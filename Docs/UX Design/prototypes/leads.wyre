@@ -1,0 +1,55 @@
+style dense quiet accent teal
+
+// Harry · leads · same list component, campaign-scoped variant
+screen LeadsList "Leads"
+  nav side
+    heading 3 "Harry"
+    link "Leads" +active
+    link "Segments"
+  nav top
+    search "Search leads"
+    button "Export" !ghost
+    avatar "Maya Chen"
+  segmented "*All | Replied | Paused | Unsubscribed"
+  datatable "Name | Company | Campaign | Stage:badge | Last activity" x12
+    row
+      link "Priya Sharma" -> LeadDetail
+      text "Startup Inc"
+      text "Q1 Cold Outreach"
+      badge "Interested"
+      text "2h ago"
+    row
+      text {lead.name}
+      text {lead.company}
+      text {campaign.name}
+      badge {lead.stage}
+      text {lead.lastActivity}
+  when empty
+    emptystate "No leads yet"
+      button "Find prospects" !primary -> FindProspectsStub
+  when loading
+    skeleton 1 +table
+
+screen LeadDetail "Priya Sharma"
+  nav top
+    breadcrumb "Leads / Priya Sharma"
+  row between
+    heading 2 "Priya Sharma"
+    buttongroup
+      button "Pause" !ghost
+      button "Unsubscribe" !danger -> UnsubscribeConfirm
+  keyvalue
+    text "Email"
+    text "priya@startup.io"
+    text "Category"
+    text "Interested"
+  section "Campaigns"
+    table "Campaign | Stage:badge | Actions"
+      row "Q1 Cold Outreach | Replied +success | View thread"
+  modal UnsubscribeConfirm "Unsubscribe globally?"
+    text "Harry will never email this person again."
+    button "Unsubscribe" !danger
+    button "Cancel" !ghost
+
+screen FindProspectsStub "Find prospects"
+  text "Opens the two-pane search — see smart-prospect.wyre"

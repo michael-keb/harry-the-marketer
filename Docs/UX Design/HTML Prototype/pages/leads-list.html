@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leads · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html" class="active">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+        <a href="lead-lists.html">Segments</a>
+        <a href="find-prospects.html">Find prospects</a>
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><input placeholder="Search leads" style="flex:1;max-width:280px"><button class="btn btn-ghost">Export</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="segmented" style="margin-bottom:1rem"><button class="active">All</button><button>Replied</button><button>Paused</button></div>
+        <table><thead><tr><th>Name</th><th>Company</th><th>Campaign</th><th>Stage</th><th>Last activity</th></tr></thead>
+        <tbody><tr><td><a href="lead-detail.html">Priya Sharma</a></td><td>Startup Inc</td><td>Q1 Cold Outreach</td><td><span class="badge badge-success">Interested</span></td><td>2h ago</td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+  
+  <script src="../js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+style dense sharp accent teal
+
+// Harry · campaign-statistics · headline tiles on campaign detail
+screen CampaignDetail "Q1 Cold Outreach"
+  nav top
+    heading 3 "Harry"
+    link "Campaigns" +active
+    breadcrumb "Campaigns / Q1 Cold Outreach"
+    avatar "Maya Chen"
+  row between
+    col
+      heading 1 "Q1 Cold Outreach"
+      badge "Running" +success
+    button "Pause campaign" !ghost
+  row +airy
+    card *1
+      stat "Sent" "4,820" {campaign.sent}
+    card *1
+      stat "Opens" "38%" {campaign.opens}
+    card *1
+      stat "Replies" "312" {campaign.replies}
+    card *1
+      stat "Positive" "84" {campaign.positive}
+  tabs
+    tab "Playbook" +active
+      section "Sequence"
+        text "Mermaid editor and readiness strip live here in the product."
+    tab "Leads"
+      datatable "Lead | Stage:badge | Last activity" x8
+        row
+          text {lead.name}
+          badge {lead.stage}
+          text {lead.lastActivity}
+    tab "Stats"
+      chart bar {campaign.statsByDay}
+      keyvalue
+        text "Mailbox with most sends"
+        text "sarah@acme.io"
+        text "Slowest first reply"
+        text "4.2 days"
+  when empty
+    emptystate "No stats for this campaign yet"
+      text "Stats appear after the campaign sends."
+  when loading
+    skeleton 4 +card
+  when error
+    callout "Campaign stats unavailable right now." +error
+    button "Retry" !primary

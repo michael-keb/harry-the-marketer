@@ -1,0 +1,51 @@
+style dense quiet accent teal
+
+// Harry · email-accounts · fleet list + detail health/warmup
+screen Mailboxes "Mailboxes"
+  nav side
+    heading 3 "Harry"
+    link "Mailboxes" +active
+    link "Buy senders"
+  nav top
+    button "Add mailbox" !primary -> AddMailboxDrawer
+    avatar "Maya Chen"
+  row between
+    search "Search mailboxes"
+    select "Health | All | Suspended"
+  datatable "Mailbox | Sent today | Limit | Warmup:badge | Health:badge" x10
+    row
+      link "sarah@acme.io" -> MailboxDetail
+      text {mailbox.sentToday}
+      text "50 / 50"
+      badge {mailbox.warmup}
+      badge {mailbox.health}
+  when loading
+    skeleton 1 +table
+  when error
+    callout "Could not refresh mailbox health." +warning
+    button "Retry" !primary
+  drawer AddMailboxDrawer "Add mailbox"
+    tabs
+      tab "OAuth" +active
+        button "Connect Google" !primary
+      tab "SMTP"
+        input "Email"
+        input "SMTP host"
+        button "Connect" !primary
+
+screen MailboxDetail "sarah@acme.io"
+  nav top
+    breadcrumb "Mailboxes / sarah@acme.io"
+    button "Suspend" !danger -> SuspendConfirm
+  row +airy
+    card *1
+      stat "Sent today" "42" {mailbox.sentToday}
+    card *1
+      stat "Warmup score" "92%" {mailbox.warmupScore}
+  section "Warmup settings"
+    toggle "Warmup enabled" +checked
+    input "Daily warmup cap"
+  modal SuspendConfirm "Suspend mailbox?"
+    text "This mailbox stops sending until you unsuspend it."
+    button "Suspend" !danger
+    button "Cancel" !ghost

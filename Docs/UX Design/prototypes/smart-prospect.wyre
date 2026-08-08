@@ -1,0 +1,49 @@
+style airy soft accent teal
+
+// Harry · smart-prospect · two-pane Find prospects (new surface)
+screen FindProspects "Find prospects"
+  nav side
+    heading 3 "Harry"
+    link "Leads"
+    link "Find prospects" +active
+  nav top
+    avatar "Maya Chen"
+  split
+    col *1
+      heading 2 "Filters"
+      section "Person"
+        input "Job title"
+        multiselect "Director | VP | Head of"
+      section "Company"
+        input "Industry"
+        select "Country"
+        select "Head count"
+      section "Location"
+        select "United States"
+        select "California"
+      button "Save search" !ghost
+    col *2
+      row between
+        col
+          heading 2 "About 12,400 matches"
+          text "Preview only — emails here are not sendable." +caption
+        button "Get email addresses" !primary -> FetchConfirm
+      datatable "Name | Title | Company | Location | Confidence" x8
+        row
+          text {prospect.name}
+          text {prospect.title}
+          text {prospect.company}
+          text {prospect.location}
+          text "High"
+      button "Show more" !ghost
+  when empty
+    col *2
+      emptystate "No one matches these filters"
+        text "Try removing the narrowest filter."
+  when loading
+    col *2
+      skeleton 1 +table
+  modal FetchConfirm "Fetch contacts?"
+    text "This spends credits and produces real email addresses."
+    button "Fetch" !primary
+    button "Cancel" !ghost

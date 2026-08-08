@@ -1,0 +1,185 @@
+style dense sharp accent teal
+
+// Jordan Lee · webhook failure → fix → sync → recovered thread → approval
+screen WebhooksList "Monitoring · Webhooks"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" -> InboxWarning
+    link "Webhooks" +active
+  nav top
+    avatar "Jordan Lee"
+  section
+    row between
+      col
+        heading 1 "Webhooks"
+        text "Reply sync endpoints and recent delivery health." +caption
+  table "Endpoint | Status | Last 10" x3
+    row
+      link "https://hooks.acme.io/smartlead" -> WebhookDetail
+      badge "Failing" !danger
+      text "3 of 10 failed"
+    row
+      text "https://hooks.acme.io/crm-events"
+      badge "Healthy"
+      text "0 failed"
+    row
+      text "https://hooks.acme.io/slack-notify"
+      badge "Healthy"
+      text "0 failed"
+
+screen WebhookDetail "Webhook · delivery log"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" -> InboxWarning
+    link "Webhooks" +active
+  nav top
+    breadcrumb "Monitoring / Webhooks / smartlead"
+    avatar "Jordan Lee"
+  callout "Replies may not sync until fixed." +warning
+  section
+    row between
+      col
+        heading 1 "https://hooks.acme.io/smartlead"
+        text "Last success 6 hours ago · SmartLead lead.replied" +caption
+      badge "Failing" !danger
+  table "Time | Event | Response" x6
+    row
+      text "10:42"
+      text "lead.replied"
+      badge "502" !danger
+    row
+      text "10:38"
+      text "lead.replied"
+      badge "502" !danger
+    row
+      text "10:15"
+      text "lead.replied"
+      badge "502" !danger
+    row
+      text "08:04"
+      text "lead.replied"
+      badge "200"
+    row
+      text "07:52"
+      text "lead.replied"
+      badge "200"
+    row
+      text "06:11"
+      text "lead.replied"
+      badge "200"
+  button "Fix endpoint" !primary -> WebhookFix
+
+screen WebhookFix "Fix endpoint + test"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" -> InboxWarning
+    link "Webhooks" +active
+  nav top
+    breadcrumb "Monitoring / Webhooks / smartlead / Fix"
+    avatar "Jordan Lee"
+  section
+    heading 1 "Fix endpoint"
+    text "Correct the URL typo, then send a test event before leaving." +caption
+  field "Endpoint URL"
+    input "https://hooks.acme.io/smartlead"
+    note "Was /smartled — corrected to /smartlead"
+  button "Send test event" !primary
+  callout "Test event delivered successfully." +success
+  button "Go to Inbox" !primary -> InboxWarning
+  button "Back to log" !ghost -> WebhookDetail
+
+screen InboxWarning "Inbox · sync banner"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" +active
+    link "Webhooks" -> WebhooksList
+  nav top
+    avatar "Jordan Lee"
+  callout "Some replies may be missing — last sync 6h ago." +warning
+  row between
+    heading 1 "Inbox"
+    button "Sync missing replies" !primary -> SyncProgress
+  table "Lead | Campaign | Last message" x4
+    row
+      text "Alex Rivera"
+      text "Q1 Cold Outreach"
+      text "Thanks, send the deck" +caption
+    row
+      text "Sam Okonkwo"
+      text "Agency intros"
+      text "Can we talk Thursday?" +caption
+    row
+      text "Morgan Lee"
+      text "Re-engage dormant"
+      text "Still interested" +caption
+    row
+      text "Casey Wu"
+      text "Founder follow-up"
+      text "Looping in my cofounder" +caption
+
+screen SyncProgress "Sync missing replies"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" +active
+    link "Webhooks" -> WebhooksList
+  nav top
+    avatar "Jordan Lee"
+  section
+    heading 1 "Sync missing replies"
+    text "Explicit catch-up from SmartLead — nothing replays silently." +caption
+  callout "Bulk send disabled while sync is running." +info
+  progress "Fetching 14 threads from SmartLead…" {sync.progress}
+  text "14 threads · started just now" +caption
+  button "Cancel" !ghost -> InboxWarning
+  link "View recovered thread when done" -> ThreadRecovered
+
+screen ThreadRecovered "Thread · Priya Sharma"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" +active
+    link "Webhooks" -> WebhooksList
+  nav top
+    breadcrumb "Inbox / Priya Sharma"
+    avatar "Jordan Lee"
+  row between
+    col
+      heading 1 "Priya Sharma"
+      text "Q1 Cold Outreach · priya@northwind.io" +caption
+    badge "Recovered" !warning
+  card
+    text "Priya Sharma"
+    text "Yes — we're evaluating tools this quarter. Can you share pricing for 5 seats?"
+    text "2 days ago" +caption
+  card
+    text "Jordan Lee"
+    text "Happy to — I'll send a one-pager after a quick call."
+    text "3 days ago" +caption
+  card
+    text "Priya Sharma"
+    text "Sounds good. Tuesday afternoon works."
+    text "3 days ago" +caption
+  textarea "Draft reply"
+  button "Send" !primary -> NeedsYourOk
+
+screen NeedsYourOk "Draft · needs approval"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" +active
+    link "Webhooks" -> WebhooksList
+  nav top
+    breadcrumb "Inbox / Priya Sharma / Draft"
+    avatar "Jordan Lee"
+  row between
+    col
+      heading 1 "Priya Sharma"
+      text "Reply queued — nothing sends without your OK." +caption
+    badge "Recovered" !warning
+  card
+    text "Priya Sharma"
+    text "Yes — we're evaluating tools this quarter. Can you share pricing for 5 seats?"
+    text "2 days ago" +caption
+  field "Your reply"
+    textarea "Great — I'll send pricing for 5 seats and a link to book 20 minutes Tuesday afternoon."
+  callout "Send routes to the approval queue. You confirm before anything leaves Harry." +info
+  button "Queue for approval" !primary
+  button "Save draft" !ghost -> ThreadRecovered

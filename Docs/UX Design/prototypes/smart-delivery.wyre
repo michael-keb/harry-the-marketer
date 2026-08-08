@@ -1,0 +1,80 @@
+style dense sharp accent teal
+
+// Harry · smart-delivery · Monitoring section, list-tests shell
+screen Deliverability "Monitoring · Deliverability"
+  nav side
+    heading 3 "Harry"
+    link "Monitoring" +active
+    link "Deliverability" +active
+  nav top
+    button "Run test" !primary -> RunTestModal
+    avatar "Maya Chen"
+  row
+    col *1
+      section "Folders"
+        list
+          card +active
+            text "All tests"
+            text "3 tests" +caption
+          card
+            text "Production domains"
+            text "1 test" +caption
+    col *3
+      row between
+        select "Status | All | Active | Completed"
+        select "Type | All | Automated | Manual"
+      datatable "Test | Type | Status:badge | Cadence | Last run" x6
+        row
+          link "Weekly inbox check" -> TestDetail
+          text "Automated"
+          badge "Active" +success
+          text "Every 7 days, run 8"
+          text "Today 09:00"
+        row
+          link "Launch smoke test" -> TestDetail
+          text "Manual"
+          badge "Completed"
+          text "—"
+          text "Yesterday"
+      when empty
+        emptystate "No placement tests yet"
+          button "Run test" !primary -> RunTestModal
+      when loading
+        skeleton 1 +table
+      when error
+        callout "List may be stale — showing last known tests." +warning
+  modal RunTestModal "Run placement test"
+    select "Manual | Automated"
+    input "Test name"
+    button "Start" !primary -> TestDetail
+    button "Cancel" !ghost
+
+screen TestDetail "Weekly inbox check"
+  nav top
+    breadcrumb "Deliverability / Weekly inbox check"
+    button "Stop test" !ghost
+  row +airy
+    card *1
+      stat "Inbox rate" "94%" {test.inboxRate}
+    card *1
+      stat "Spam rate" "4%" {test.spamRate}
+    card *1
+      stat "Missing" "2%" {test.missingRate}
+  tabs
+    tab "Providers" +active
+      datatable "Provider | Inbox | Spam | Missing" x5
+        row
+          text {provider.name}
+          text {provider.inbox}
+          text {provider.spam}
+          text {provider.missing}
+    tab "Authentication"
+      keyvalue
+        text "SPF"
+        badge "Pass" +success
+        text "DKIM"
+        badge "Pass" +success
+    tab "Blocklists"
+      table "Check | Result:badge"
+        row "Domain blacklist | Clear +success"
+        row "IP blacklist | Clear +success"

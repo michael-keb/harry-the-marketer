@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thread · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html" class="active">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb"><a href="inbox-replies.html">Inbox</a> / Priya Sharma</span><button class="btn btn-primary" data-open="modal-reply">Reply</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <h2>Re: pricing for 50 seats <span class="badge badge-success">Interested</span></h2>
+        <p class="caption">Q1 Cold Outreach · sarah@acme.io</p>
+        <div data-tabs style="margin-top:1rem">
+          <div class="tabs"><button class="tab active">Messages</button><button class="tab">Notes</button><button class="tab">Tasks</button></div>
+          <div class="tab-panel active"><div class="chat-in"><strong>Priya Sharma</strong><br>Can you share pricing for 50 seats before we book a call?</div></div>
+          <div class="tab-panel"><div class="callout callout-info">Internal only — never emailed to the prospect.</div>
+          <div class="list-card">Called Priya — wants pricing before any call.<br><span class="caption">Maya Chen · yesterday</span></div>
+          <textarea placeholder="Add internal note" style="margin-top:0.5rem"></textarea><button class="btn btn-primary btn-sm">Save note</button></div>
+          <div class="tab-panel"><div class="list-card">Send pricing one-pager<br><span class="caption">Due tomorrow · Maya</span></div><button class="btn btn-primary btn-sm">Add task</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-reply" class="modal-backdrop hidden"><div class="modal"><h3>Send reply?</h3><textarea placeholder="Your reply"></textarea><p class="caption">Nothing sends until you confirm.</p><div class="modal-actions"><button class="btn btn-primary" data-close="modal-reply">Send</button><button class="btn btn-ghost" data-close="modal-reply">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

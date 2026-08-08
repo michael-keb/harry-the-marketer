@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Title, description, canonical, OG/Twitter cards and JSON-LD are injected
+         per route: by server/site.js in production, by the Vite plugin in dev.
+         Keep this marker. -->
+    <title>Harry The Marketer</title>
+    <!--seo-->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <!-- Lexend is the product typeface and is self-hosted (web/public/fonts), so
+         the CSP stays `font-src 'self' data:` and no page load reaches a third
+         party. Preloaded because the @font-face lives inside the CSS bundle:
+         without this the browser only learns about it after the stylesheet
+         parses, and the first paint is in the fallback face. -->
+    <link rel="preload" href="/fonts/lexend-latin.woff2" as="font" type="font/woff2" crossorigin />
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <div style="font-family: system-ui, sans-serif; background:#0b1622; color:#cbd6e2; padding:2.5rem 1.5rem; max-width:36rem; margin:0 auto; line-height:1.6;">
+        <h1 style="color:#ffffff;">Harry The Marketer</h1>
+        <p>Outreach campaigns you can draw. This site needs JavaScript to run.</p>
+        <p>
+          You can still read our
+          <a style="color:#2fd79b;" href="/privacy">Privacy Policy</a> and
+          <a style="color:#2fd79b;" href="/terms">Terms of Service</a>.
+        </p>
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

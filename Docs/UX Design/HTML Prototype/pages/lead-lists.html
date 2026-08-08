@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Segments · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html" class="active">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><h2>Leads · Segments</h2><button class="btn btn-primary" data-open="modal-segment">New segment</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="split">
+          <div class="split-list">
+            <a href="#" class="list-card active"><strong>Enterprise Q1</strong><br><span class="caption">842 leads</span></a>
+            <a href="#" class="list-card"><strong>Partner list</strong><br><span class="caption">120 leads</span></a>
+          </div>
+          <div style="flex:1">
+            <div class="row between"><h2>Enterprise Q1</h2><button class="btn btn-primary" data-open="modal-push">Push to campaign</button></div>
+            <table style="margin-top:1rem"><thead><tr><th>Name</th><th>Company</th><th>Email</th></tr></thead>
+            <tbody><tr><td>Priya Sharma</td><td>Startup Inc</td><td>priya@startup.io</td></tr></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-segment" class="modal-backdrop hidden"><div class="modal"><h3>New segment</h3><input placeholder="Segment name"><div class="modal-actions"><button class="btn btn-primary" data-close="modal-segment">Create</button><button class="btn btn-ghost" data-close="modal-segment">Cancel</button></div></div></div>
+  <div id="modal-push" class="modal-backdrop hidden"><div class="modal"><h3>Push to campaign</h3><select><option>Q1 Cold Outreach</option></select><p class="caption">Campaign must already exist with playbook and mailbox.</p><div class="modal-actions"><button class="btn btn-primary" data-close="modal-push">Push leads</button><button class="btn btn-ghost" data-close="modal-push">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Webhooks · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html" class="active">Settings</a>
+        
+        <a href="settings-block-list.html">Block list</a>
+        <a href="settings-webhooks.html" class="active">Webhooks</a>
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><button class="btn btn-primary" data-open="modal-wh">Add endpoint</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <h1>Webhooks</h1>
+        <p class="caption">Tell your tools when Harry events happen.</p>
+        <div class="list-card row between" style="margin-top:1rem"><div><strong>https://hooks.example.com/harry</strong><br><span class="caption">Lead replied · Lead unsubscribed · Campaign completed</span></div>
+        <a href="campaign-webhooks.html" class="btn btn-ghost btn-sm">Campaign example</a></div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-wh" class="modal-backdrop hidden"><div class="modal"><h3>Add webhook</h3><input value="https://hooks.example.com/harry"><label><input type="checkbox" checked> Lead replied</label><div class="modal-actions"><button class="btn btn-primary" data-close="modal-wh">Save</button><button class="btn btn-ghost" data-close="modal-wh">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Block list · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html" class="active">Settings</a>
+        
+        <a href="clients-settings.html">Clients</a>
+        <a href="settings-block-list.html" class="active">Block list</a>
+        <a href="settings-webhooks.html">Webhooks</a>
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><div class="avatar">MC</div></header>
+      <div class="content">
+        <h1>Domains Harry will never email</h1>
+        <p class="caption">Most entries come from unsubscribes and bounces.</p>
+        <div class="row between" style="margin:1rem 0"><input placeholder="Search blocked domains" style="max-width:240px"><button class="btn btn-primary" data-open="modal-block">Add domain</button></div>
+        <table><thead><tr><th>Domain</th><th>Source</th><th>Added</th></tr></thead>
+        <tbody><tr><td>competitor.com</td><td><span class="badge">Manual</span></td><td>12 Apr</td></tr>
+        <tr><td>bigcorp.io</td><td><span class="badge">Unsubscribed</span></td><td>3 Apr</td></tr></tbody></table>
+        <p class="caption" style="margin-top:1rem">send-single-email has no UI — internal only; drafts still need approval.</p>
+      </div>
+    </div>
+  </div>
+  <div id="modal-block" class="modal-backdrop hidden"><div class="modal"><h3>Block domain</h3><input placeholder="domain.com"><div class="modal-actions"><button class="btn btn-primary" data-close="modal-block">Block</button><button class="btn btn-ghost" data-close="modal-block">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

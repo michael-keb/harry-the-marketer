@@ -1,0 +1,79 @@
+# Render blueprint — Harry The Marketer
+#
+# One web service. The Express app serves both the API and the built SPA, so
+# there is no separate static site: `npm run build` writes web/dist and
+# server/index.js serves it when NODE_ENV=production.
+#
+# The disk is not optional. Everything lives in SQLite (better-sqlite3), and a
+# Render instance without a disk has an ephemeral filesystem — every deploy and
+# every restart would wipe the workspace. DATA_DIR points at the mount, which is
+# the one line that makes the database survive.
+#
+# A disk also means: one instance only, and restart-style deploys rather than
+# zero-downtime ones. Both are correct for a single-writer SQLite app; scaling
+# past one instance is a Postgres migration, not a config change.
+services:
+  - type: web
+    name: harry-the-marketer
+    runtime: node
+    plan: starter          # free has no disk and sleeps; the engine must keep ticking
+    region: singapore      # closest Render region to Australia
+    branch: main
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+
+    disk:
+      name: harry-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.3
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+      - key: APP_URL
+        value: https://harrythemarketer.com
+
+      # Behind Render's proxy, so the real client IP arrives in X-Forwarded-For.
+      # Without this the rate limiter buckets every request under one address.
+      - key: TRUST_PROXY
+        value: "1"
+
+      # Auth0 is configured in production, so dev login must be off. The server
+      # also refuses to start quietly about it: index.js prints a hard warning
+      # when DEV_LOGIN is active in production, because it would let anyone sign
+      # in as anyone.
+      - key: DEV_LOGIN
+        value: "0"
+
+      # The operator behind the legal pages. Google's OAuth reviewers read
+      # /privacy; without these it renders "(operating entity to be confirmed)",
+      # which reads as an unfinished app.
+      - key: LEGAL_ENTITY_NAME
+        value: Elnakeeb Pty Ltd
+      - key: LEGAL_JURISDICTION
+        value: New South Wales, Australia
+      - key: LEGAL_PRIVACY_EMAIL
+        value: privacy@harrythemarketer.com
+      - key: LEGAL_SUPPORT_EMAIL
+        value: support@harrythemarketer.com
+
+      # Secrets: set in the Render dashboard, never in this file.
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      - key: AUTH0_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        sync: false

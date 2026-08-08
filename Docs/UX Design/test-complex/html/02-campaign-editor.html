@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Q1 Enterprise Outreach · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <p class="caption">Northwind Brand</p>
+      <nav><a href="01-client-campaigns.html" class="active">Campaigns</a></nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Northwind / Campaigns / Q1 Enterprise Outreach</span>
+        <button class="btn btn-primary" data-open="modal-launch">Launch</button>
+        <div class="avatar">JL</div>
+      </header>
+      <div class="content">
+        <div class="callout callout-warning">Launch needs: valid playbook · healthy mailbox · leads · credits</div>
+        <div class="row">
+          <div class="card"><h3>Playbook</h3><span class="badge badge-success">Ready</span><p class="caption">From goal Enterprise Q1</p></div>
+          <div class="card"><h3>Mailbox</h3><span class="badge badge-error">Failing</span><p><a href="03-deliverability-fail.html">sarah@northwind.io</a></p></div>
+          <div class="card"><h3>Leads</h3><span class="badge badge-success">2,397</span><p class="caption">3 skipped — block list</p></div>
+          <div class="card" id="credits"><h3>Credits</h3><span class="badge badge-warning">Low</span><p class="caption">800 of 2,400 needed</p>
+            <button class="btn btn-ghost btn-sm" data-open="modal-credits">Resolve credits</button></div>
+        </div>
+        <section style="margin-top:1.5rem"><h2>Playbook</h2><p>Mermaid editor — valid sequence attached.</p></section>
+      </div>
+    </div>
+  </div>
+  <div id="modal-launch" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3>Cannot launch yet</h3>
+      <p><strong>Deliverability failing.</strong> sarah@northwind.io landed 62% spam in the latest test.</p>
+      <div class="modal-actions">
+        <a href="03-deliverability-fail.html" class="btn btn-primary">View test</a>
+        <button class="btn btn-ghost" data-close="modal-launch">Close</button>
+      </div>
+    </div>
+  </div>
+  <div id="modal-credits" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3>Not enough sends remaining</h3>
+      <table style="margin:1rem 0"><tr><td>Leads to send</td><td><strong>2,400</strong></td></tr>
+      <tr><td>Client allowance left</td><td><strong>800</strong></td></tr>
+      <tr><td>Shortfall</td><td><strong>1,600</strong></td></tr></table>
+      <p class="caption">Assign more allowance, trim the segment, or cancel.</p>
+      <div class="modal-actions">
+        <button class="btn btn-primary">Assign allowance</button>
+        <button class="btn btn-ghost" data-close="modal-credits">Trim segment to 800</button>
+        <button class="btn btn-ghost" data-close="modal-credits">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <script src="../../HTML Prototype/js/harry.js"></script>
+</body>
+</html>

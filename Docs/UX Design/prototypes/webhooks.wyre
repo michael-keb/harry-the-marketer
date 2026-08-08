@@ -1,0 +1,60 @@
+style sharp quiet accent teal
+
+// Harry · webhooks · collapsed Settings block + campaign hooks
+screen SettingsWebhooks "Settings · Webhooks"
+  nav side
+    heading 3 "Harry"
+    link "Block list"
+    link "Webhooks" +active
+  nav top
+    avatar "Maya Chen"
+  section
+    row between
+      col
+        heading 1 "Webhooks"
+        text "Tell your tools when Harry events happen." +caption
+      button "Add endpoint" !primary -> AddWebhookModal
+  accordion
+    section "Workspace endpoints"
+      card
+        row between
+          col
+            text "https://hooks.example.com/harry"
+            text "Lead replied · Lead unsubscribed · Campaign completed" +caption
+          button "Edit" !ghost -> EditWebhookDrawer
+          link "Campaign-scoped example" -> CampaignWebhooks
+    section "Collapsed when unused"
+      text "One quiet line when you have no webhooks."
+  when empty
+    card
+      text "No webhooks yet"
+      button "Add endpoint" !primary -> AddWebhookModal
+  drawer EditWebhookDrawer "Edit webhook"
+    input "Endpoint URL"
+    section "Events"
+      checkbox "Lead replied" +checked
+      checkbox "Lead unsubscribed" +checked
+      checkbox "Email bounced"
+      checkbox "Campaign completed"
+    button "Save" !primary
+    button "Delete" !danger -> DeleteWebhookConfirm
+  modal AddWebhookModal "Add webhook"
+    input "https://hooks.example.com/harry"
+    checkbox "Lead replied" +checked
+    button "Save" !primary
+    button "Cancel" !ghost
+  modal DeleteWebhookConfirm "Delete webhook?"
+    button "Delete" !danger
+    button "Cancel" !ghost
+
+screen CampaignWebhooks "Campaign · Webhooks"
+  nav top
+    breadcrumb "Q1 Cold Outreach / Settings / Webhooks"
+  card
+    text "Same pattern as workspace webhooks, scoped to this campaign."
+    button "Add campaign webhook" !primary -> AddCampaignWebhookModal
+  modal AddCampaignWebhookModal "Add campaign webhook"
+    input "https://hooks.example.com/campaign"
+    checkbox "Lead replied" +checked
+    button "Save" !primary
+    button "Cancel" !ghost

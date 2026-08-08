@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deliverability failed · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar"><h3><a href="../index.html">Harry</a></h3><nav><a href="03-deliverability-fail.html" class="active">Monitoring</a></nav></aside>
+    <div class="main">
+      <header class="topbar"><span class="breadcrumb">Monitoring / Weekly inbox check</span> <span class="badge badge-error">Failed</span></header>
+      <div class="content">
+        <div class="row">
+          <div class="card"><div class="stat-label">Inbox</div><div class="stat-value">28%</div></div>
+          <div class="card"><div class="stat-label">Spam</div><div class="stat-value">62%</div></div>
+          <div class="card"><div class="stat-label">Missing</div><div class="stat-value">10%</div></div>
+        </div>
+        <div class="callout callout-warning" style="margin-top:1rem">Launch stays blocked until inbox rate meets threshold or you attach a different mailbox.</div>
+        <table style="margin-top:1rem"><thead><tr><th>Mailbox</th><th>Last test</th><th>Inbox</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td>sarah@northwind.io</td><td>Today 08:00</td><td>28%</td><td><a href="02-campaign-editor.html">Swap</a></td></tr>
+          <tr><td>backup@northwind.io</td><td>Yesterday</td><td>91%</td><td><a href="02-campaign-editor.html">Use this</a></td></tr>
+        </tbody></table>
+        <a href="02-campaign-editor.html" class="btn btn-ghost" style="margin-top:1rem">Back to campaign</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

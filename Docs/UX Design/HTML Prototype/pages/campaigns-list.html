@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Campaigns · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html" class="active">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><h2>Campaigns</h2><button class="btn btn-primary" data-open="modal-new">New campaign</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <table><thead><tr><th>Campaign</th><th>Status</th><th>Sent</th><th>Replies</th><th>Updated</th></tr></thead>
+        <tbody>
+          <tr><td><a href="campaign-detail.html">Q1 Cold Outreach</a></td><td><span class="badge badge-success">Running</span></td><td>4,820</td><td>312</td><td>Today</td></tr>
+          <tr><td><a href="campaign-editor.html">Untitled campaign</a></td><td><span class="badge">Draft</span></td><td>—</td><td>—</td><td>Today</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+  </div>
+  <div id="modal-new" class="modal-backdrop hidden"><div class="modal"><h3>New campaign</h3><div class="field"><label>Name (optional)</label><input placeholder="Q1 Cold Outreach"></div><div class="modal-actions"><a href="campaign-editor.html" class="btn btn-primary">Create</a><button class="btn btn-ghost" data-close="modal-new">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

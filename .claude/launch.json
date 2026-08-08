@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "harry-the-marketer",
+      "runtimeExecutable": "/Users/mk/.nvm/versions/node/v22.22.3/bin/node",
+      "runtimeArgs": ["scripts/dev.mjs"],
+      "port": 8131
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+style dense sharp accent teal
+
+// Harry · analytics · Reports + Dashboard share one aggregate
+screen Reports "Reports · last 7 days"
+  nav side
+    heading 3 "Harry"
+    link "Dashboard" -> Dashboard
+    link "Reports" +active
+    link "Campaigns"
+    link "Inbox"
+    link "Mailboxes"
+    link "Monitoring"
+    link "Settings"
+  nav top
+    breadcrumb "Reports"
+    daterange "1 May | 7 May"
+    avatar "Maya Chen"
+  row between
+    col
+      heading 1 "Outreach overview"
+      text "Same numbers as Dashboard for this range" +caption
+    segmented "*7 days | 30 days | 90 days"
+  row +airy
+    card *1
+      stat "Emails sent" "12,480" {analytics.sent}
+      text "+8% vs prior period" +caption
+    card *1
+      stat "Replies" "842" {analytics.replies}
+      text "6.7% reply rate" +caption
+    card *1
+      stat "Positive replies" "218" {analytics.positive}
+      text "26% of replies" +caption
+    card *1
+      stat "Mailbox health" "Good" {analytics.health}
+      statusdot +success
+  tabs
+    tab "Campaigns" +active
+      datatable "Campaign | Sent | Replies | Positive | Status:badge" x6
+        row
+          text "Q1 Cold Outreach"
+          text {campaign.sent}
+          text {campaign.replies}
+          text {campaign.positive}
+          badge {campaign.status}
+    tab "Mailboxes"
+      datatable "Mailbox | Provider | Sent | Bounce | Health:badge" x5
+        row
+          text {mailbox.email}
+          text {mailbox.provider}
+          text {mailbox.sent}
+          text {mailbox.bounce}
+          badge {mailbox.health}
+    tab "By day"
+      chart line {analytics.dailyReplies}
+  when empty
+    emptystate "Nothing sent in this range"
+      text "Pick a wider range or start a campaign."
+      button "Open campaigns" !primary
+  when loading
+    skeleton 4 +card
+    skeleton 1 +table
+  when error
+    callout "Could not load reports. Dashboard may show cached numbers from earlier today." +warning
+    button "Retry" !primary
+
+screen Dashboard "Dashboard"
+  nav top
+    heading 3 "Harry"
+    link "Dashboard" +active
+    link "Reports" -> Reports
+  row +airy
+    card *1
+      stat "Emails sent" "12,480" {analytics.sent}
+    card *1
+      stat "Replies" "842" {analytics.replies}
+    card *1
+      stat "Positive" "218" {analytics.positive}
+  note "KPI tiles read from the same aggregate as Reports — one date range, one truth."

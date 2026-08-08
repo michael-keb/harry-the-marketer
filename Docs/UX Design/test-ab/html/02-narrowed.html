@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Find prospects · narrowed</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar"><h3>Harry</h3><nav><a class="active">Find prospects</a></nav></aside>
+    <div class="main">
+      <header class="topbar"><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="split">
+          <div style="flex:1"><h3>Filters</h3><input value="Director | VP"><select><option>United States</option></select><select><option>Software</option></select><select><option>500-5000 employees</option></select></div>
+          <div style="flex:2">
+            <div class="row between"><div><h2>About 12,400 matches</h2><p class="caption">Preview only — emails here are not sendable.</p></div>
+            <button class="btn btn-primary" data-open="modal-fetch">Get email addresses</button></div>
+            <table style="margin-top:1rem"><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Confidence</th></tr></thead>
+            <tbody><tr><td>Alex Kim</td><td>Director IT</td><td>Dataflow</td><td>High</td></tr></tbody></table>
+          </div>
+        </div>
+        <a href="03-fetch-failed.html" class="btn btn-ghost" style="margin-top:1rem">Simulate fetch fail →</a>
+      </div>
+    </div>
+  </div>
+  <div id="modal-fetch" class="modal-backdrop hidden"><div class="modal"><h3>Fetch contacts?</h3><p>Spends 500 credits for real email addresses.</p><div class="modal-actions"><a href="03-fetch-failed.html" class="btn btn-primary">Fetch 500</a><button class="btn btn-ghost" data-close="modal-fetch">Cancel</button></div></div></div>
+  <script src="../../HTML Prototype/js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+style sharp quiet accent teal
+
+// Harry · clients · agency-only Settings section + switcher
+screen ClientsSettings "Settings · Clients"
+  nav side
+    heading 3 "Harry"
+    text "Agency workspace" +caption
+    divider
+    link "Team"
+    link "Clients" +active
+    link "Block list"
+    link "Webhooks"
+  nav top
+    select "Acme Agency | Northwind Brand | Contoso Studio"
+    avatar "Jordan Lee"
+  section
+    row between
+      col
+        heading 1 "Client workspaces"
+        text "Each brand has separate leads, campaigns and inbox." +caption
+      button "New client" !primary -> NewClientModal
+  row
+    card *1
+      heading 3 "Acme Agency"
+      text "admin@acme.com" +caption
+      taglist
+        badge "Campaigns"
+        badge "Leads"
+      keyvalue
+        text "Allowance"
+        text "10,000 emails · 5,000 leads"
+      button "Manage" !ghost
+    card *1
+      heading 3 "Northwind Brand"
+      text "ops@northwind.io" +caption
+      taglist
+        badge "Campaigns"
+        badge "Inbox"
+      button "Manage" !ghost
+  when empty
+    emptystate "No client workspaces yet"
+      button "New client" !primary -> NewClientModal
+  modal NewClientModal "New client"
+    field "Name" +required
+      input "Acme Agency"
+    field "Contact email" +required
+      input "admin@acme.com"
+    section "Permissions"
+      checkbox "Campaigns" +checked
+      checkbox "Mailboxes"
+      checkbox "Leads" +checked
+      checkbox "Inbox"
+      checkbox "Reports"
+    note "People sign in with Auth0 — no password field."
+    button "Create client" !primary
+    button "Cancel" !ghost

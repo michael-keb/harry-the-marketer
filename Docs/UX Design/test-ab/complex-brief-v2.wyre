@@ -1,0 +1,151 @@
+style airy soft accent teal
+
+// A/B TEST v2 · complex-brief-v2.md · prospect fetch under pressure
+screen FindTooBroad "Find prospects · too broad"
+  nav side
+    heading 3 "Harry"
+    link "Leads"
+    link "Find prospects" +active
+  nav top
+    avatar "Maya Chen"
+  split
+    col *1
+      heading 3 "Filters"
+      text "From goal Enterprise Q1" +caption
+      input "Job title"
+      select "Country"
+    col *2
+      heading 2 "About 840,000 matches"
+      callout "Audience too broad — add filters before spending credits." +warning
+      datatable "Name | Title | Company | Preview email" x6
+        row
+          text {prospect.name}
+          text {prospect.title}
+          text {prospect.company}
+          text "preview · not sendable"
+      button "Get email addresses" +disabled
+  when loading
+    col *2
+      skeleton 1 +table
+
+screen FindNarrowed "Find prospects · narrowed"
+  nav side
+    heading 3 "Harry"
+    link "Find prospects" +active
+  nav top
+    avatar "Maya Chen"
+  split
+    col *1
+      heading 3 "Filters"
+      input "Director | VP"
+      select "United States"
+      select "Software"
+      select "500-5000 employees"
+    col *2
+      row between
+        col
+          heading 2 "About 12,400 matches"
+          text "Preview only — emails here are not sendable." +caption
+        button "Get email addresses" !primary -> FetchConfirm
+      datatable "Name | Title | Company | Location | Confidence" x8
+        row
+          text {prospect.name}
+          text {prospect.title}
+          text {prospect.company}
+          text {prospect.location}
+          text "High"
+      button "Show more" !ghost
+  modal FetchConfirm "Fetch contacts?"
+    text "This spends 500 credits and produces real email addresses."
+    button "Fetch 500" !primary -> FetchFailed
+    button "Cancel" !ghost
+
+screen FetchFailed "Fetch · insufficient credits"
+  nav side
+    heading 3 "Harry"
+    link "Find prospects" +active
+  nav top
+    avatar "Maya Chen"
+  callout "Insufficient credits — requested 500, available 480. Preview kept below." +error
+  split
+    col *1
+      heading 3 "Filters"
+      text "Same narrowed filters" +caption
+    col *2
+      heading 2 "About 12,400 matches"
+      text "Last preview before failed fetch · 2 min ago" +caption
+      datatable "Name | Title | Company" x6
+        row
+          text {prospect.name}
+          text {prospect.title}
+          text {prospect.company}
+      row
+        button "Fetch 100 instead" !primary -> ReviewQueue
+        button "Buy credits" +disabled
+
+screen ReviewQueue "Review fetched contacts"
+  nav top
+    breadcrumb "Find prospects / Review"
+    text "100 fetched · 12 flagged" +caption
+    avatar "Maya Chen"
+  row between
+    col
+      heading 2 "Review before push"
+      text "Remove wrong titles and low deliverability rows." +caption
+    button "Push 88 to segment" !primary -> PushSegment
+  datatable " | Name | Title | Deliverability:badge | Issue" x8
+    row
+      checkbox " "
+      text {prospect.name}
+      text {prospect.title}
+      badge "Low" +error
+      text "Wrong seniority"
+    row
+      checkbox " +checked"
+      text {prospect.name}
+      text {prospect.title}
+      badge "High" +success
+      text "—"
+  note "12 rows pre-flagged; unchecked rows will not push."
+
+screen PushSegment "Push to segment"
+  nav top
+    breadcrumb "Segments / Enterprise Q1"
+  callout "88 net new contacts added to Enterprise Q1." +success
+  keyvalue
+    text "Fetched"
+    text "100"
+    text "Removed in review"
+    text "12"
+    text "Net new"
+    text "88"
+  button "Push to campaign" !primary -> PushCampaign
+
+screen PushCampaign "Push to campaign"
+  nav top
+    breadcrumb "Campaigns / Attach leads"
+  field "Campaign" +required
+    select "Q1 Cold Outreach | Partner nurture"
+  callout "Campaign must already exist — no create-from-name." +info
+  button "Push leads" !primary -> PushSuccess
+  modal PushSuccess "Attached with skips"
+    text "85 leads attached. 3 skipped — already on this campaign:"
+    text "james@acme.io · sofia@north.io · priya@startup.io"
+    button "View campaign" !primary -> CampaignNudge
+    button "Done" !ghost
+
+screen CampaignNudge "Q1 Cold Outreach"
+  nav top
+    breadcrumb "Campaigns / Q1 Cold Outreach"
+  callout "Leads attached ✓ · Mailbox still missing — launch blocked." +warning
+  row +airy
+    card *1
+      heading 3 "Playbook"
+      badge "Ready" +success
+    card *1
+      heading 3 "Mailbox"
+      badge "Missing" +error
+    card *1
+      heading 3 "Leads"
+      badge "85 new" +success
+  button "Attach mailbox" !primary

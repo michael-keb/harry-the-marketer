@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deliverability · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html" class="active">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><h2>Monitoring · Deliverability</h2><button class="btn btn-primary" data-open="modal-test">Run test</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="split">
+          <div class="split-list">
+            <div class="list-card active"><strong>All tests</strong><br><span class="caption">3 tests</span></div>
+            <div class="list-card"><strong>Production domains</strong><br><span class="caption">1 test</span></div>
+          </div>
+          <div style="flex:1">
+            <table><thead><tr><th>Test</th><th>Type</th><th>Status</th><th>Cadence</th><th>Last run</th></tr></thead>
+            <tbody><tr><td><a href="test-detail.html">Weekly inbox check</a></td><td>Automated</td><td><span class="badge badge-success">Active</span></td><td>Every 7 days, run 8</td><td>Today 09:00</td></tr>
+            <tr><td><a href="test-detail.html">Launch smoke test</a></td><td>Manual</td><td><span class="badge">Completed</span></td><td>—</td><td>Yesterday</td></tr></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-test" class="modal-backdrop hidden"><div class="modal"><h3>Run placement test</h3><select><option>Manual</option><option>Automated</option></select><input placeholder="Test name"><div class="modal-actions"><a href="test-detail.html" class="btn btn-primary">Start</a><button class="btn btn-ghost" data-close="modal-test">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

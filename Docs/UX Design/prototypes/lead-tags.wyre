@@ -1,0 +1,45 @@
+style dense quiet accent teal
+
+// Harry · lead-tags · labels on detail + bulk bar
+screen LeadsList "Leads"
+  nav side
+    heading 3 "Harry"
+    link "Leads" +active
+  nav top
+    search "Search leads"
+    avatar "Maya Chen"
+  row between
+    text "3 selected" +caption
+    button "Add label" !primary -> BulkTagModal
+  datatable " | Name | Company | Stage:badge | Labels" x10
+    row
+      checkbox " "
+      link "Priya Sharma" -> LeadDetail
+      text "Startup Inc"
+      badge "Replied"
+      text "Enterprise, Hot"
+    row
+      checkbox " "
+      text {lead.name}
+      text {lead.company}
+      badge {lead.stage}
+      text {lead.labels}
+  modal BulkTagModal "Add label"
+    combobox "Pick or create label"
+    button "Apply" !primary
+    button "Cancel" !ghost
+
+screen LeadDetail "Priya Sharma"
+  nav top
+    breadcrumb "Leads / Priya Sharma"
+  row between
+    heading 2 "Priya Sharma"
+    button "Add label" !primary -> BulkTagModal
+  taglist
+    badge "Enterprise"
+    badge "Hot"
+    badge "+ Add"
+  modal BulkTagModal "Add label"
+    combobox "Pick or create label"
+    button "Apply" !primary
+    button "Cancel" !ghost

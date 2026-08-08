@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mailboxes · Tags · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html" class="active">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><h2>Mailboxes</h2><button class="btn btn-ghost">Add mailbox</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="row between" style="margin-bottom:1rem"><input placeholder="Search mailboxes" style="max-width:240px"><select style="width:auto"><option>All tags</option><option>Warmup</option></select>
+        <button class="btn btn-primary" data-open="modal-tag">Tag selected</button></div>
+        <table><thead><tr><th></th><th>Mailbox</th><th>Provider</th><th>Health</th><th>Tags</th></tr></thead>
+        <tbody><tr><td><input type="checkbox" checked></td><td><a href="mailbox-detail.html">sarah@acme.io</a></td><td>Google</td><td><span class="badge badge-success">Good</span></td><td>Warmup, Production</td></tr>
+        <tr><td><input type="checkbox"></td><td>alex@acme.io</td><td>Google</td><td><span class="badge badge-success">Good</span></td><td>Sandbox</td></tr></tbody></table>
+        <p class="caption" style="margin-top:0.5rem">Multi-select stays quiet until rows are checked.</p>
+      </div>
+    </div>
+  </div>
+  <div id="modal-tag" class="modal-backdrop hidden"><div class="modal"><h3>Tag mailboxes</h3><div class="field"><label>Tags</label><input value="Warmup, Production"></div><div class="modal-actions"><button class="btn btn-primary" data-close="modal-tag">Apply tags</button><button class="btn btn-ghost" data-close="modal-tag">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+style dense quiet accent teal
+
+// Harry · lead-notes · internal notes panel beside thread
+screen LeadDetail "Priya Sharma"
+  nav top
+    breadcrumb "Leads / Priya Sharma"
+    avatar "Maya Chen"
+  split
+    col *2
+      section "Profile"
+        keyvalue
+          text "Company"
+          text "Startup Inc"
+          text "Email"
+          text "priya@startup.io"
+      section "Activity"
+        timeline
+          text "Replied · Q1 Cold Outreach · yesterday"
+          text "Note added · Maya Chen · yesterday"
+    col *1
+      section "Notes"
+        callout "Internal only — never emailed to the prospect." +info
+        list
+          card
+            text "Called Priya — wants pricing for 50 seats before any call."
+            text "Maya Chen · yesterday" +caption
+          card
+            text "Maya tried LinkedIn — no response yet."
+            text "Alex Kim · 3 days ago" +caption
+        field "Add note"
+          textarea "What happened off-email?"
+          note "Composer context feeds the next draft; draft still needs your OK."
+        button "Save note" !primary
+  when empty
+    section "Notes"
+      text "No notes yet"
+      textarea "First note"
+      button "Save note" !primary

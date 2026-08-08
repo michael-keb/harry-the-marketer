@@ -1,0 +1,31 @@
+style dense quiet accent teal
+
+// Harry · email-account-tags · bulk tag on Mailboxes
+screen Mailboxes "Mailboxes"
+  nav side
+    heading 3 "Harry"
+    link "Mailboxes" +active
+    link "Campaigns"
+  nav top
+    heading 2 "Mailboxes"
+    button "Add mailbox" !ghost
+    avatar "Maya Chen"
+  row between
+    search "Search mailboxes"
+    select "All tags | Warmup | Production"
+    button "Tag selected" !primary -> TagMailboxesModal
+  datatable " | Mailbox | Provider | Health:badge | Tags" x8
+    row
+      checkbox " "
+      text {mailbox.email}
+      text {mailbox.provider}
+      badge {mailbox.health}
+      text {mailbox.tags}
+  note "Multi-select stays quiet until rows are checked."
+  modal TagMailboxesModal "Tag mailboxes"
+    multiselect "Warmup | Production | Sandbox"
+    button "Apply tags" !primary
+    button "Cancel" !ghost
+  when empty
+    emptystate "No mailboxes connected"
+      button "Add mailbox" !primary

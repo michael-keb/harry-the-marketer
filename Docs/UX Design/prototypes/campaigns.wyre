@@ -1,0 +1,70 @@
+style dense quiet accent teal
+
+// Harry · campaigns · minimal create, readiness strip, launch to Needs your OK
+screen CampaignsList "Campaigns"
+  nav side
+    heading 3 "Harry"
+    link "Campaigns" +active
+    link "Leads"
+    link "Inbox" -> InboxNeedsOk
+    link "Mailboxes"
+  nav top
+    heading 2 "Campaigns"
+    button "New campaign" !primary -> NewCampaignModal
+    avatar "Maya Chen"
+  datatable "Campaign | Status:badge | Sent | Replies | Updated" x6
+    row
+      link "Q1 Cold Outreach" -> CampaignEditor
+      badge "Running" +success
+      text {campaign.sent}
+      text {campaign.replies}
+      text {campaign.updated}
+    row
+      link "Untitled campaign" -> CampaignEditor
+      badge "Draft"
+      text "—"
+      text "—"
+      text "Today"
+  when empty
+    emptystate "No campaigns yet"
+      button "New campaign" !primary -> NewCampaignModal
+  modal NewCampaignModal "New campaign"
+    input "Name (optional)"
+    button "Create" !primary -> CampaignEditor
+    button "Cancel" !ghost
+
+screen CampaignEditor "Untitled campaign"
+  nav top
+    breadcrumb "Campaigns / Untitled campaign"
+    button "Launch" !primary -> LaunchConfirm
+    avatar "Maya Chen"
+  callout "Launch needs: valid playbook · mailbox · leads" +warning
+  row +airy
+    card *1
+      heading 3 "Playbook"
+      badge "Missing" +error
+      link "Open editor" -> CampaignEditor
+    card *1
+      heading 3 "Mailbox"
+      badge "Missing" +error
+      link "Attach"
+    card *1
+      heading 3 "Leads"
+      badge "Missing" +error
+      link "Attach"
+  section "Playbook"
+    text "Starter Mermaid diagram opens here after create."
+  modal LaunchConfirm "Launch campaign?"
+    text "Drafts go to Inbox → Needs your OK. Nothing sends without your approval."
+    button "Launch" !primary -> InboxNeedsOk
+    button "Cancel" !ghost
+
+screen InboxNeedsOk "Needs your OK"
+  nav top
+    heading 3 "Harry"
+    link "Inbox" +active
+  list
+    card x3
+      text {draft.lead}
+      text {draft.subject}
+      button "Review draft" !primary

@@ -1,0 +1,29 @@
+style sharp quiet accent teal
+
+// Harry · utilities · domain block list in Settings; no compose UI
+screen SettingsBlockList "Settings · Block list"
+  nav side
+    heading 3 "Harry"
+    link "Team"
+    link "Block list" +active
+    link "Webhooks"
+  nav top
+    avatar "Maya Chen"
+  section
+    heading 1 "Domains Harry will never email"
+    text "Most entries come from unsubscribes and bounces. Add the few you need by hand." +caption
+  card
+    row between
+      search "Search blocked domains"
+      button "Add domain" !primary -> AddDomainModal
+    table "Domain | Source:badge | Added"
+      row "competitor.com | Manual | 12 Apr"
+      row "bigcorp.io | Unsubscribed | 3 Apr"
+      row "badlead.net | Bounced | 1 Apr"
+    when empty
+      text "No blocked domains yet."
+  note "send-single-email has no UI — internal function only; drafts still need approval."
+  modal AddDomainModal "Block domain"
+    input "domain.com"
+    button "Block" !primary
+    button "Cancel" !ghost

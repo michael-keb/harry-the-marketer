@@ -1,0 +1,42 @@
+style dense quiet accent teal
+
+// Harry · lead-lists · segments + push to existing campaign
+screen LeadLists "Leads · Segments"
+  nav side
+    heading 3 "Harry"
+    link "All leads"
+    link "Segments" +active
+    link "Find prospects"
+  nav top
+    button "New segment" !primary -> NewListModal
+    avatar "Maya Chen"
+  split
+    col *1
+      list
+        card x5 +active
+          text {list.name}
+          text {list.count} leads +caption
+    col *2
+      row between
+        heading 2 "Enterprise Q1"
+        button "Push to campaign" !primary -> PushCampaignModal
+      datatable "Name | Company | Email" x8
+        row
+          text {lead.name}
+          text {lead.company}
+          text {lead.email}
+      row
+        button "Import CSV" !ghost
+        button "Move to segment" !ghost
+  modal NewListModal "New segment"
+    input "Segment name"
+    button "Create" !primary
+    button "Cancel" !ghost
+  modal PushCampaignModal "Push to campaign"
+    select "Q1 Cold Outreach | Partner nurture"
+    callout "Campaign must already exist with playbook and mailbox." +info
+    button "Push leads" !primary
+    button "Cancel" !ghost
+  when empty
+    emptystate "No segments yet"
+      button "New segment" !primary -> NewListModal

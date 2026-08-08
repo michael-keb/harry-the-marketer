@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thread · Task · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html" class="active">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb">Inbox / Priya Sharma</span><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="chat-in">Can you share pricing for 50 seats?</div>
+        <button class="btn btn-primary" data-open="modal-task">Add task</button>
+        <a href="lead-detail-notes.html" class="btn btn-ghost">Add note</a>
+      </div>
+    </div>
+  </div>
+  <div id="modal-task" class="modal-backdrop hidden"><div class="modal"><h3>Follow-up task</h3>
+    <input value="Send pricing one-pager"><input type="date"><select><option>Maya Chen</option></select>
+    <div class="modal-actions"><a href="action-center.html" class="btn btn-primary">Create task</a><button class="btn btn-ghost" data-close="modal-task">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reports · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html" class="active">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb">Reports</span><input type="date" value="2026-05-01" style="width:auto"> – <input type="date" value="2026-05-07" style="width:auto"><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="row between">
+          <div><h1>Outreach overview</h1><p class="caption">Same numbers as Dashboard for this range</p></div>
+          <div class="segmented"><button class="active">7 days</button><button>30 days</button><button>90 days</button></div>
+        </div>
+        <div class="row" style="margin-top:1rem">
+          <div class="card"><div class="stat-label">Emails sent</div><div class="stat-value">12,480</div><p class="caption">+8% vs prior period</p></div>
+          <div class="card"><div class="stat-label">Replies</div><div class="stat-value">842</div><p class="caption">6.7% reply rate</p></div>
+          <div class="card"><div class="stat-label">Positive replies</div><div class="stat-value">218</div><p class="caption">26% of replies</p></div>
+          <div class="card"><div class="stat-label">Mailbox health</div><div class="stat-value">Good</div></div>
+        </div>
+        <div data-tabs style="margin-top:1.5rem">
+          <div class="tabs"><button class="tab active">Campaigns</button><button class="tab">Mailboxes</button><button class="tab">By day</button></div>
+          <div class="tab-panel active"><table><thead><tr><th>Campaign</th><th>Sent</th><th>Replies</th><th>Positive</th><th>Status</th></tr></thead>
+          <tbody><tr><td><a href="campaign-detail.html">Q1 Cold Outreach</a></td><td>4,820</td><td>312</td><td>84</td><td><span class="badge badge-success">Running</span></td></tr>
+          <tr><td>Partner nurture</td><td>2,100</td><td>98</td><td>31</td><td><span class="badge badge-success">Running</span></td></tr></tbody></table></div>
+          <div class="tab-panel"><table><thead><tr><th>Mailbox</th><th>Provider</th><th>Sent</th><th>Bounce</th><th>Health</th></tr></thead>
+          <tbody><tr><td>sarah@acme.io</td><td>Google</td><td>1,240</td><td>0.4%</td><td><span class="badge badge-success">Good</span></td></tr></tbody></table></div>
+          <div class="tab-panel"><p class="caption">Chart: daily replies over selected range</p><div class="card" style="height:200px;display:flex;align-items:center;justify-content:center;color:var(--muted)">Line chart placeholder</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script src="../js/harry.js"></script>
+</body>
+</html>

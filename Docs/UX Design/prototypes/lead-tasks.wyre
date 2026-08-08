@@ -1,0 +1,40 @@
+style dense quiet accent teal
+
+// Harry · lead-tasks · from thread + Action Center (no Tasks nav)
+screen ThreadTask "Inbox · Priya Sharma"
+  nav top
+    breadcrumb "Inbox / Priya Sharma"
+  chat
+    row +incoming
+      col
+        text "Can you share pricing for 50 seats?"
+  section "Quick actions"
+    button "Add task" !primary -> AddTaskModal
+    button "Add note" !ghost
+  modal AddTaskModal "Follow-up task"
+    input "Send pricing one-pager"
+    input "Due date"
+    select "Assign to Maya Chen | Alex Kim"
+    button "Create task" !primary -> ActionCenter
+    button "Cancel" !ghost
+
+screen ActionCenter "Action Center"
+  nav top
+    heading 2 "Action Center"
+    text "Human work lives here — not a separate Tasks app." +caption
+  tabs
+    tab "Drafts to approve" +active
+      list
+        card
+          text "Reply to Priya Sharma"
+          button "Review" !primary
+    tab "Tasks"
+      list
+        card
+          row between
+            col
+              text "Send pricing one-pager"
+              text "Priya Sharma · due tomorrow" +caption
+            button "Done" !primary
+  when empty
+    emptystate "Nothing waiting on you"

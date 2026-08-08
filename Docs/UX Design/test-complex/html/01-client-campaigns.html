@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Campaigns · Northwind · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <p class="caption">Northwind Brand</p>
+      <nav>
+        <a href="01-client-campaigns.html" class="active">Campaigns</a>
+        <a href="#">Leads</a>
+        <a href="04-needs-ok-client.html">Inbox</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <select style="width:auto"><option>Northwind Brand</option><option>Acme Agency</option></select>
+        <div class="avatar">JL</div>
+      </header>
+      <div class="content">
+        <p class="caption">Client scope comes from the switcher — no filter on this page.</p>
+        <div class="row between">
+          <div><h1>Campaigns</h1><p class="caption">Scoped to Northwind only</p></div>
+          <a href="02-campaign-editor.html" class="btn btn-primary">New campaign</a>
+        </div>
+        <table style="margin-top:1rem">
+          <thead><tr><th>Campaign</th><th>Status</th><th>Leads</th><th>Updated</th></tr></thead>
+          <tbody>
+            <tr><td><a href="02-campaign-editor.html">Q1 Enterprise Outreach</a></td><td><span class="badge">Draft</span></td><td>0</td><td>Today</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weekly inbox check · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html" class="active">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb">Deliverability / Weekly inbox check</span><button class="btn btn-ghost">Stop test</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="row"><div class="card"><div class="stat-label">Inbox rate</div><div class="stat-value">94%</div></div>
+        <div class="card"><div class="stat-label">Spam rate</div><div class="stat-value">4%</div></div>
+        <div class="card"><div class="stat-label">Missing</div><div class="stat-value">2%</div></div></div>
+        <div data-tabs style="margin-top:1rem">
+          <div class="tabs"><button class="tab active">Providers</button><button class="tab">Authentication</button><button class="tab">Blocklists</button></div>
+          <div class="tab-panel active"><table><thead><tr><th>Provider</th><th>Inbox</th><th>Spam</th><th>Missing</th></tr></thead>
+          <tbody><tr><td>Gmail</td><td>96%</td><td>3%</td><td>1%</td></tr></tbody></table></div>
+          <div class="tab-panel"><p>SPF <span class="badge badge-success">Pass</span> · DKIM <span class="badge badge-success">Pass</span></p></div>
+          <div class="tab-panel"><table><tr><td>Domain blacklist</td><td><span class="badge badge-success">Clear</span></td></tr></tbody></table></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script src="../js/harry.js"></script>
+</body>
+</html>

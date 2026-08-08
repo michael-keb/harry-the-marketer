@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Find prospects · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html" class="active">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><h2>Find prospects</h2><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="split">
+          <div style="flex:1">
+            <h3>Filters</h3>
+            <div class="field"><label>Job title</label><input placeholder="Director, VP"></div>
+            <div class="field"><label>Industry</label><input></div>
+            <div class="field"><label>Country</label><select><option>United States</option></select></div>
+          </div>
+          <div style="flex:2">
+            <div class="row between"><div><h2>About 12,400 matches</h2><p class="caption">Preview only — emails here are not sendable.</p></div>
+            <button class="btn btn-primary" data-open="modal-fetch">Get email addresses</button></div>
+            <table style="margin-top:1rem"><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Location</th><th>Confidence</th></tr></thead>
+            <tbody><tr><td>Jordan Lee</td><td>VP Sales</td><td>Northwind</td><td>CA, US</td><td>High</td></tr></tbody></table>
+            <button class="btn btn-ghost btn-sm">Show more</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-fetch" class="modal-backdrop hidden"><div class="modal"><h3>Fetch contacts?</h3><p>This spends credits and produces real email addresses.</p><div class="modal-actions"><button class="btn btn-primary" data-close="modal-fetch">Fetch</button><button class="btn btn-ghost" data-close="modal-fetch">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buy senders · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html" class="active">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb">Mailboxes / Buy senders</span><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="steps"><span class="active">1 Search domain</span><span>2 Review order</span><span>3 Done</span></div>
+        <div class="split">
+          <div><input placeholder="acme-outreach.com"><div class="list-card active">acme-outreach.com · Available · $12/yr</div>
+          <div class="field"><label>Mailbox count</label><input value="3"></div></div>
+          <div class="card"><h3>Order summary</h3><p>Domain: acme-outreach.com<br>3 × warmup-ready<br><strong>Total: $47.00</strong></p>
+          <p class="caption">Harry never stores card details.</p>
+          <button class="btn btn-primary" data-open="modal-order">Place order</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-order" class="modal-backdrop hidden"><div class="modal"><h3>Confirm purchase</h3><p>Buying acme-outreach.com and 3 mailboxes.</p><div class="modal-actions"><a href="order-done.html" class="btn btn-primary">Confirm</a><button class="btn btn-ghost" data-close="modal-order">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

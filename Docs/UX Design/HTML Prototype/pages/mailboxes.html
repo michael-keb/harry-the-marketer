@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mailboxes · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html" class="active">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><button class="btn btn-primary" data-open="modal-add">Add mailbox</button><a href="buy-senders.html" class="btn btn-ghost">Buy senders</a><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="row between" style="margin-bottom:1rem"><input placeholder="Search mailboxes" style="max-width:240px"><select style="width:auto"><option>All</option><option>Suspended</option></select></div>
+        <table><thead><tr><th>Mailbox</th><th>Sent today</th><th>Limit</th><th>Warmup</th><th>Health</th></tr></thead>
+        <tbody><tr><td><a href="mailbox-detail.html">sarah@acme.io</a></td><td>42</td><td>50 / 50</td><td><span class="badge badge-success">Active</span></td><td><span class="badge badge-success">Good</span></td></tr>
+        <tr><td>alex@acme.io</td><td>18</td><td>50 / 50</td><td><span class="badge">Off</span></td><td><span class="badge badge-success">Good</span></td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+  <div id="modal-add" class="modal-backdrop hidden"><div class="modal"><h3>Add mailbox</h3><button class="btn btn-primary" style="width:100%">Connect Google</button><div class="modal-actions"><button class="btn btn-ghost" data-close="modal-add">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

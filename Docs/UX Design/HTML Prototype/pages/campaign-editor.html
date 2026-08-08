@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Untitled campaign · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html" class="active">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb">Campaigns / Untitled campaign</span><button class="btn btn-primary" data-open="modal-launch">Launch</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="callout callout-warning">Launch needs: valid playbook · mailbox · leads</div>
+        <div class="row">
+          <div class="card"><h3>Playbook</h3><span class="badge badge-error">Missing</span></div>
+          <div class="card"><h3>Mailbox</h3><span class="badge badge-error">Missing</span></div>
+          <div class="card"><h3>Leads</h3><span class="badge badge-error">Missing</span></div>
+        </div>
+        <section style="margin-top:1.5rem"><h2>Playbook</h2><p>Starter Mermaid diagram opens here after create.</p></section>
+      </div>
+    </div>
+  </div>
+  <div id="modal-launch" class="modal-backdrop hidden"><div class="modal"><h3>Launch campaign?</h3><p>Drafts go to Inbox → Needs your OK. Nothing sends without your approval.</p><div class="modal-actions"><a href="inbox-needs-ok.html" class="btn btn-primary">Launch</a><button class="btn btn-ghost" data-close="modal-launch">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

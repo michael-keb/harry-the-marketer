@@ -1,0 +1,134 @@
+style dense sharp accent teal
+
+// STRESS TEST · complex-brief.md · agency launch with blockers
+screen ClientCampaigns "Campaigns · Northwind Brand"
+  nav side
+    heading 3 "Harry"
+    text "Northwind Brand" +caption
+    divider
+    link "Campaigns" +active
+    link "Leads"
+    link "Inbox" -> NeedsYourOkClient
+  nav top
+    select "Northwind Brand | Acme Agency | Contoso Studio"
+    avatar "Jordan Lee"
+  note "Client scope comes from the switcher — no filter on this page."
+  row between
+    col
+      heading 1 "Campaigns"
+      text "Scoped to Northwind only" +caption
+    button "New campaign" !primary -> CampaignEditor
+  datatable "Campaign | Status:badge | Leads | Updated" x4
+    row
+      link "Q1 Enterprise Outreach" -> CampaignEditor
+      badge "Draft"
+      text "0"
+      text "Today"
+  when empty
+    emptystate "No campaigns for this client"
+      button "New campaign" !primary -> CampaignEditor
+
+screen CampaignEditor "Q1 Enterprise Outreach"
+  nav top
+    breadcrumb "Northwind / Campaigns / Q1 Enterprise Outreach"
+    button "Launch" !primary -> LaunchBlockedDeliverability
+    avatar "Jordan Lee"
+  callout "Launch needs: valid playbook · healthy mailbox · leads · credits" +warning
+  row +airy
+    card *1
+      heading 3 "Playbook"
+      badge "Ready" +success
+      text "From goal Enterprise Q1" +caption
+    card *1
+      heading 3 "Mailbox"
+      badge "Failing" +error
+      link "sarah@northwind.io" -> DeliverabilityFail
+    card *1
+      heading 3 "Leads"
+      badge "2,397" +success
+      text "3 skipped — block list" +caption
+      link "Enterprise Q1 segment" -> CampaignEditor
+    card *1
+      heading 3 "Credits"
+      badge "Low" +warning
+      text "800 of 2,400 needed" +caption
+      link "Resolve credits" -> LaunchBlockedCreditsModal
+  section "Playbook"
+    text "Mermaid editor — valid sequence attached."
+  modal LaunchBlockedDeliverability "Cannot launch yet"
+    heading 3 "Deliverability failing"
+    text "sarah@northwind.io landed 62% spam in the latest test. Swap mailbox or wait for a passing test."
+    button "View test" !primary -> DeliverabilityFail
+    button "Swap mailbox" !ghost -> DeliverabilityFail
+    button "Close" !ghost
+
+screen DeliverabilityFail "Weekly inbox check · Failed"
+  nav top
+    breadcrumb "Monitoring / Weekly inbox check"
+    badge "Failed" +error
+  row +airy
+    card *1
+      stat "Inbox" "28%" {test.inbox}
+    card *1
+      stat "Spam" "62%" {test.spam}
+    card *1
+      stat "Missing" "10%" {test.missing}
+  callout "Launch stays blocked until inbox rate meets threshold or you attach a different mailbox." +warning
+  table "Mailbox | Last test | Inbox | Action"
+    row "sarah@northwind.io | Today 08:00 | 28% | Swap" -> CampaignEditor
+    row "backup@northwind.io | Yesterday | 91% | Use this" -> CampaignEditor
+  button "Re-run test" !primary
+  button "Back to campaign" !ghost -> CampaignEditor
+
+  modal LaunchBlockedCreditsModal "Not enough sends remaining"
+    keyvalue
+      text "Leads to send"
+      text "2,400"
+      text "Client allowance left"
+      text "800"
+      text "Shortfall"
+      text "1,600"
+    text "Assign more allowance, trim the segment, or cancel."
+    button "Assign allowance" !primary
+    button "Trim segment to 800" !ghost -> CampaignEditor
+    button "Cancel" !ghost -> CampaignEditor
+
+screen NeedsYourOkClient "Needs your OK · Priya view"
+  nav top
+    select "Northwind Brand"
+    avatar "Priya Basra"
+  callout "You can review drafts. Only workspace owners can approve sends." +info
+  list
+    card x3
+      text {draft.lead}
+      text {draft.subject}
+      row
+        button "Approve" +disabled
+        button "Edit suggestion" !ghost
+  note "Approve disabled — policy terminal for client users."
+  link "Switch to owner account to approve" -> NeedsYourOkOwner
+
+screen NeedsYourOkOwner "Needs your OK · Owner view"
+  nav top
+    select "Northwind Brand"
+    avatar "Jordan Lee"
+  list
+    card x3 -> ActivityTrail
+      text {draft.lead}
+      text {draft.subject}
+      row
+        button "Approve" !primary
+        button "Edit" !ghost
+  section "Skipped on attach"
+    text "3 leads on block list were not added: competitor.com domain." +caption
+
+screen ActivityTrail "Activity · Northwind"
+  nav top
+    breadcrumb "Northwind / Activity"
+  timeline
+    text "Jordan Lee approved 3 drafts · Northwind · just now"
+    text "Jordan Lee launched Q1 Enterprise Outreach · Northwind · 4 min ago"
+    text "3 leads skipped on attach · block list · 6 min ago"
+    text "Jordan Lee swapped mailbox to backup@northwind.io · 8 min ago"
+    text "Deliverability test failed · sarah@northwind.io · 12 min ago"
+  note "Note bodies and credentials never appear here."

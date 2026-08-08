@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clients · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html" class="active">Settings</a>
+        
+        <hr><p class="caption">Agency workspace</p>
+        <a href="clients-settings.html" class="active">Clients</a>
+        <a href="settings-block-list.html">Block list</a>
+        <a href="settings-webhooks.html">Webhooks</a>
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><select style="width:auto"><option>Acme Agency</option><option>Northwind Brand</option></select><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="row between"><div><h1>Client workspaces</h1><p class="caption">Each brand has separate leads, campaigns and inbox.</p></div>
+        <button class="btn btn-primary" data-open="modal-client">New client</button></div>
+        <div class="row" style="margin-top:1rem">
+          <div class="card"><h3>Acme Agency</h3><p class="caption">admin@acme.com</p><div class="taglist"><span class="badge">Campaigns</span><span class="badge">Leads</span></div><p class="caption">10,000 emails · 5,000 leads</p></div>
+          <div class="card"><h3>Northwind Brand</h3><p class="caption">ops@northwind.io</p><div class="taglist"><span class="badge">Campaigns</span><span class="badge">Inbox</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="modal-client" class="modal-backdrop hidden"><div class="modal"><h3>New client</h3>
+    <div class="field"><label>Name</label><input value="Acme Agency"></div>
+    <div class="field"><label>Contact email</label><input value="admin@acme.com"></div>
+    <p class="caption">Permissions: Campaigns, Leads (Auth0 sign-in — no password)</p>
+    <div class="modal-actions"><button class="btn btn-primary" data-close="modal-client">Create client</button><button class="btn btn-ghost" data-close="modal-client">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

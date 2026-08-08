@@ -1,0 +1,43 @@
+style airy soft accent teal
+
+// Harry · smart-senders · buy flow inside Mailboxes, confirm before charge
+screen BuySenders "Buy sending infrastructure"
+  nav top
+    breadcrumb "Mailboxes / Buy senders"
+    avatar "Maya Chen"
+  steps 2 "Search domain | Review order | Done"
+  split
+    col *1
+      section "1 · Domain"
+        search "acme-outreach.com"
+        list
+          card +active
+            text "acme-outreach.com"
+            text "Available · $12/yr" +caption
+          card
+            text "tryacme.io"
+            text "Available · $14/yr" +caption
+      section "2 · Mailboxes"
+        input "Mailbox count"
+        text "3 mailboxes suggested" +caption
+    col *1
+      card
+        heading 3 "Order summary"
+        keyvalue
+          text "Domain"
+          text "acme-outreach.com"
+          text "Mailboxes"
+          text "3 × warmup-ready"
+          text "Total today"
+          text "$47.00"
+        callout "Harry never stores card details — you confirm with the vendor checkout." +info
+        button "Place order" !primary -> OrderConfirm
+  modal OrderConfirm "Confirm purchase"
+    text "You are buying acme-outreach.com and 3 mailboxes."
+    button "Confirm" !primary -> OrderDone
+    button "Cancel" !ghost
+
+screen OrderDone "Order placed"
+  emptystate "Order submitted"
+    text "Mailboxes appear in your fleet when provisioning finishes."
+    button "Back to mailboxes" !primary -> BuySenders

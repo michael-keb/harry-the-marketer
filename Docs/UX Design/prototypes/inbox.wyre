@@ -1,0 +1,93 @@
+style dense sharp accent teal
+
+// Harry · inbox · Replies split + Needs your OK + collapsed filters
+screen InboxReplies "Inbox · Replies"
+  nav side
+    heading 3 "Harry"
+    link "Inbox" +active
+    link "Needs your OK" -> InboxNeedsOk
+    link "Unread"
+    link "Assigned to me"
+    link "Important"
+  nav top
+    search "Search replies (30 max)"
+    button "Filters" !ghost -> FiltersDrawer
+    badge "2 active" small
+    avatar "Maya Chen"
+  split
+    col *1
+      text "Showing 20 of 248" +caption
+      list
+        card x6 -> ThreadView
+          row between
+            col
+              text {thread.lead}
+              text {thread.company} +caption
+            badge {thread.intent}
+          text {thread.snippet}
+          text {thread.time} +caption
+      pagination
+    col *2
+      emptystate "Select a reply"
+        text "Open a thread to read history and respond."
+  drawer FiltersDrawer "Filters"
+    select "Campaign (max 5)"
+    select "Mailbox (max 20)"
+    select "Intent"
+    daterange "From | To"
+    button "Apply" !primary
+    button "Clear" !ghost
+  when empty
+    emptystate "No replies yet"
+      text "Replies appear when campaigns get answers."
+  when loading
+    skeleton 6 +card
+
+screen ThreadView "Priya Sharma · Startup Inc"
+  nav top
+    breadcrumb "Inbox / Priya Sharma"
+    button "Mark important" !ghost
+  row between
+    col
+      heading 2 "Re: pricing for 50 seats"
+      badge "Interested" +success
+      text "Q1 Cold Outreach · sarah@acme.io" +caption
+    row
+      button "Assign" !ghost
+      button "Reply" !primary -> ReplyConfirm
+  tabs
+    tab "Messages" +active
+      chat
+        row +incoming
+          avatar "PS"
+          col
+            text "Priya Sharma"
+            text "Can you share pricing for 50 seats before we book a call?"
+    tab "Notes"
+      callout "Internal only — never emailed to the prospect." +info
+      list
+        card
+          text "Called Priya — wants pricing before any call."
+          text "Maya Chen · yesterday" +caption
+      textarea "Add internal note"
+      button "Save note" !primary
+    tab "Tasks"
+      list
+        card
+          text "Send pricing one-pager"
+          text "Due tomorrow · Maya" +caption
+      button "Add task" !primary
+  modal ReplyConfirm "Send reply?"
+    textarea "Your reply"
+    text "Nothing sends until you confirm."
+    button "Send" !primary
+    button "Cancel" !ghost
+
+screen InboxNeedsOk "Needs your OK"
+  list
+    card x4 -> ThreadView
+      text {draft.lead}
+      text {draft.subject}
+      row
+        button "Approve" !primary
+        button "Edit" !ghost

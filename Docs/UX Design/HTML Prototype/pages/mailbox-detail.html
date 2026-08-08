@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sarah@acme.io · Harry</title>
+  <link rel="stylesheet" href="../css/harry.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="analytics-dashboard.html">Dashboard</a>
+        <a href="analytics-reports.html">Reports</a>
+        <a href="campaigns-list.html">Campaigns</a>
+        <a href="leads-list.html">Leads</a>
+        <a href="inbox-replies.html">Inbox</a>
+        <a href="mailboxes.html" class="active">Mailboxes</a>
+        <a href="deliverability.html">Monitoring</a>
+        <a href="settings-block-list.html">Settings</a>
+        
+      </nav>
+    </aside>
+    <div class="main">
+      
+      <header class="topbar"><span class="breadcrumb">Mailboxes / sarah@acme.io</span><button class="btn btn-danger" data-open="modal-suspend">Suspend</button><div class="avatar">MC</div></header>
+      <div class="content">
+        <div class="row"><div class="card"><div class="stat-label">Sent today</div><div class="stat-value">42</div></div>
+        <div class="card"><div class="stat-label">Warmup score</div><div class="stat-value">92%</div></div></div>
+        <section style="margin-top:1.5rem"><h2>Warmup settings</h2>
+        <label><input type="checkbox" checked> Warmup enabled</label>
+        <div class="field" style="margin-top:0.75rem"><label>Daily warmup cap</label><input value="20"></div></section>
+      </div>
+    </div>
+  </div>
+  <div id="modal-suspend" class="modal-backdrop hidden"><div class="modal"><h3>Suspend mailbox?</h3><p>This mailbox stops sending until you unsuspend it.</p><div class="modal-actions"><button class="btn btn-danger" data-close="modal-suspend">Suspend</button><button class="btn btn-ghost" data-close="modal-suspend">Cancel</button></div></div></div>
+  <script src="../js/harry.js"></script>
+</body>
+</html>

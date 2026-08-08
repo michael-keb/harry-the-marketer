@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Harry — graduate prototype</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Same tokens as web/src/index.css, so markup here lifts into React unchanged.
+  tailwind.config = {
+    theme: { extend: { colors: {
+      ink: { 950:'#0b1120', 900:'#101828', 800:'#1a2438', 700:'#253046', 600:'#344259' },
+      accent: { 300:'#7dd8c5', 400:'#45c4a8', 500:'#17a583', 600:'#0d8168' },
+    }, fontFamily: { sans: ['Avenir Next','Segoe UI','ui-sans-serif','system-ui','sans-serif'] } } },
+  }
+</script>
+<style type="text/tailwindcss">
+  @layer components {
+    .card { @apply bg-ink-900 border border-ink-700 rounded-xl; }
+    .input { @apply w-full bg-ink-950 border border-ink-600 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-accent-500; }
+    .btn-primary { @apply inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium bg-accent-500 text-ink-950 hover:bg-accent-400 cursor-pointer; }
+    .btn-ghost { @apply inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium bg-transparent border border-ink-600 text-slate-300 hover:border-accent-500 hover:text-accent-300 cursor-pointer; }
+    .chip { @apply rounded-full border border-ink-600 px-2.5 py-0.5 text-[11px] text-slate-400; }
+  }
+</style>
+</head>
+<body class="bg-ink-950 text-slate-200 antialiased font-sans h-full">
+
+<div class="flex h-screen">
+  <aside class="w-56 shrink-0 border-r border-ink-700 bg-ink-900 flex flex-col">
+    <div class="px-5 py-5 border-b border-ink-700">
+      <div class="flex items-center gap-2.5">
+        <div class="size-6 rounded bg-accent-500 text-ink-950 grid place-items-center text-xs font-bold">H</div>
+        <span class="text-base font-bold tracking-tight text-slate-100">Harry</span>
+      </div>
+      <div class="text-[11px] text-slate-500 mt-1">One real conversation at a time.</div>
+    </div>
+    <nav id="nav" class="flex-1 p-3 space-y-1"></nav>
+    <div class="p-4 border-t border-ink-700">
+      <div class="text-sm text-slate-300">Sam Reid</div>
+      <div class="text-[11px] text-slate-500">Operations, final term</div>
+    </div>
+  </aside>
+
+  <main class="flex-1 overflow-y-auto">
+    <div class="max-w-4xl mx-auto p-6" id="pages"></div>
+  </main>
+</div>
+
+<template id="tpl-today">
+  <div class="space-y-5">
+    <h1 class="text-xl font-semibold">Today</h1>
+
+    <section class="card p-6">
+      <p class="text-lg font-medium text-slate-100">Three things need you</p>
+      <p class="text-sm text-slate-400 mt-1 leading-relaxed">
+        Two emails to read and send, and one LinkedIn message to copy across. About four minutes.
+      </p>
+      <button class="btn-primary mt-4" data-go="queue">Open the queue</button>
+    </section>
+
+    <section class="card p-5">
+      <div class="flex justify-between text-sm mb-2">
+        <span class="text-slate-400">Businesses that said yes</span>
+        <span class="font-medium text-slate-200 tabular-nums">1 of 3</span>
+      </div>
+      <div class="h-1.5 rounded-full bg-ink-800 overflow-hidden">
+        <div class="h-full bg-accent-500" style="width:33%"></div>
+      </div>
+      <p class="text-xs text-slate-500 mt-3">
+        Nothing here counts emails sent. One signed agreement is worth more than a hundred of those.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2 class="text-sm font-semibold text-slate-300 px-4 pt-4 pb-2">While you were away</h2>
+      <ul class="divide-y divide-ink-800 text-sm">
+        <li class="px-4 py-2.5 flex gap-3">
+          <span class="text-slate-300">Priya replied</span>
+          <span class="text-slate-500">— she'll introduce you to Boxfresh</span>
+          <span class="ml-auto text-[11px] text-slate-600">2h ago</span>
+        </li>
+        <li class="px-4 py-2.5 flex gap-3">
+          <span class="text-slate-300">Wrote a follow-up</span>
+          <span class="text-slate-500">— Harrow Goods, waiting for your OK</span>
+          <span class="ml-auto text-[11px] text-slate-600">4h ago</span>
+        </li>
+        <li class="px-4 py-2.5 flex gap-3">
+          <span class="text-slate-300">Held a send</span>
+          <span class="text-slate-500">— outside your sending hours until 8:30am</span>
+          <span class="ml-auto text-[11px] text-slate-600">yesterday</span>
+        </li>
+      </ul>
+    </section>
+  </div>
+</template>
+
+<template id="tpl-queue">
+  <div class="space-y-4">
+    <h1 class="text-xl font-semibold">Needs you</h1>
+
+    <div class="flex gap-1 rounded-xl border border-ink-700 bg-ink-900 p-1 w-fit">
+      <button class="rounded-lg px-3.5 py-1.5 text-sm bg-ink-700 text-slate-100 font-medium">
+        Needs you <span class="ml-2 rounded-full bg-accent-500/20 px-1.5 py-0.5 text-[11px] font-semibold text-accent-300">3</span>
+      </button>
+      <button class="rounded-lg px-3.5 py-1.5 text-sm text-slate-400 hover:text-slate-200">Replies</button>
+    </div>
+
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <p class="text-sm text-slate-400">Nothing goes out until you say so.</p>
+      <button class="btn-ghost">Send both emails</button>
+    </div>
+
+    <!-- APPROVE: an email Harry can send itself -->
+    <section class="card p-4 space-y-3">
+      <div class="flex items-baseline gap-2 flex-wrap text-sm">
+        <span class="chip border-accent-600/40 text-accent-300">Email</span>
+        <span class="text-slate-500">To</span>
+        <span class="font-medium text-slate-200">Priya Naidu</span>
+        <span class="text-slate-400">· Boxfresh, Head of Operations</span>
+        <span class="ml-auto text-[11px] text-slate-600">written 12m ago</span>
+      </div>
+      <div class="rounded-lg border border-accent-600/30 bg-accent-500/10 p-3 text-sm">
+        <div class="text-xs text-accent-300 mb-1">She said</div>
+        <div class="text-slate-300">Happy to introduce you — send me two lines I can forward.</div>
+      </div>
+      <div class="rounded-lg border border-ink-700 bg-ink-950 p-4">
+        <div class="font-medium text-slate-200">Re: Quick favour</div>
+        <div class="mt-2 whitespace-pre-wrap text-sm text-slate-300 leading-relaxed">Thanks Priya — here are the two lines:
+
+Sam Reid is doing an operations assessment this term and is looking for one business to study. It's about an hour of your time and you get the written findings, free.
+
+Forward whenever suits. If it turns out to be awkward, no problem at all.
+
+Sam</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="btn-primary">Send it</button>
+        <button class="btn-ghost">Edit</button>
+        <span class="ml-auto text-xs text-slate-500 hover:text-red-400 cursor-pointer">Don't send</span>
+      </div>
+      <p class="text-[11px] text-slate-600">Goes out around 9:15am — inside your sending hours.</p>
+    </section>
+
+    <!-- DO: a channel Harry cannot send on -->
+    <section class="card p-4 space-y-3">
+      <div class="flex items-baseline gap-2 flex-wrap text-sm">
+        <span class="chip border-sky-700/50 text-sky-300">LinkedIn</span>
+        <span class="text-slate-500">To</span>
+        <span class="font-medium text-slate-200">Tom Harrow</span>
+        <span class="text-slate-400">· Harrow Goods, Founder</span>
+        <span class="ml-auto text-[11px] text-slate-600">you send this one</span>
+      </div>
+      <div class="text-xs text-slate-500">Step 2 — he accepted your connection request on Tuesday.</div>
+      <div class="rounded-lg border border-ink-700 bg-ink-950 p-4">
+        <div class="whitespace-pre-wrap text-sm text-slate-300 leading-relaxed">Thanks for connecting, Tom. I'm doing an operations assessment this term and I'm after one business to study — Harrow Goods came to mind because of the pick-time work you posted about.
+
+It's about an hour, and you'd get the written findings. Not for you? Just say and I'll leave it.</div>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button class="btn-primary">Copy and open LinkedIn</button>
+        <button class="btn-ghost">Mark as sent</button>
+        <span class="ml-auto text-xs text-slate-500 hover:text-red-400 cursor-pointer">Skip this one</span>
+      </div>
+      <p class="text-[11px] text-slate-600">
+        Harry never signs in to LinkedIn for you. You paste and send, then tell it what happened —
+        that keeps your account safe.
+      </p>
+    </section>
+
+    <!-- DO: contribute-first -->
+    <section class="card p-4 space-y-3">
+      <div class="flex items-baseline gap-2 flex-wrap text-sm">
+        <span class="chip border-slate-600 text-slate-400">Comment</span>
+        <span class="text-slate-500">On</span>
+        <span class="font-medium text-slate-200">Jess Okafor's post</span>
+        <span class="text-slate-400">· Coastal Supply</span>
+      </div>
+      <div class="text-xs text-slate-500">No path to Coastal Supply yet — contributing first, no ask.</div>
+      <div class="rounded-lg border border-ink-700 bg-ink-950 p-4">
+        <div class="whitespace-pre-wrap text-sm text-slate-300 leading-relaxed">The split-shift point matches what I saw at a 30-person warehouse — the handover gap cost more than the picking did. Did rostering the overlap help, or just move the queue?</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="btn-primary">Copy and open the post</button>
+        <button class="btn-ghost">Mark as done</button>
+      </div>
+    </section>
+  </div>
+</template>
+
+<template id="tpl-people">
+  <div class="space-y-4">
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <h1 class="text-xl font-semibold">People <span class="text-slate-500 text-sm font-normal">(24)</span></h1>
+      <div class="flex gap-2">
+        <input class="input w-56" placeholder="Search people…" />
+        <button class="btn-ghost">Add someone</button>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap gap-1.5">
+      <button class="chip border-accent-500 bg-accent-500/10 text-accent-300">everyone 24</button>
+      <button class="chip">not contacted 11</button>
+      <button class="chip">contacted 6</button>
+      <button class="chip">replied 4</button>
+      <button class="chip">agreed 1</button>
+      <button class="chip">parked 2</button>
+    </div>
+
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-slate-500 border-b border-ink-700">
+            <th class="px-4 py-3 font-medium">Name</th>
+            <th class="px-4 py-3 font-medium">Where</th>
+            <th class="px-4 py-3 font-medium">How you know them</th>
+            <th class="px-4 py-3 font-medium">Stage</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody id="people-rows"></tbody>
+      </table>
+    </div>
+
+    <p class="text-xs text-slate-500">
+      Everyone from your cohort, your tutors and your placement contacts is already here —
+      SquadInstitute added them. You do not have to import anything to start.
+    </p>
+  </div>
+</template>
+
+<template id="tpl-door">
+  <div class="space-y-4">
+    <button class="text-xs text-slate-500 hover:text-slate-300" data-go="people">Back to people</button>
+
+    <div class="card p-5">
+      <p class="text-lg font-medium text-slate-100">Boxfresh</p>
+      <p class="text-sm text-slate-400">Ecommerce, 40 staff, Melbourne · ships its own orders</p>
+    </div>
+
+    <h2 class="text-sm font-semibold text-slate-300">Who can open this door?</h2>
+
+    <section class="card p-4 border-accent-600/50">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm font-medium text-slate-100">Priya Naidu works there</span>
+        <span class="chip border-emerald-700/50 text-emerald-300">strongest path</span>
+      </div>
+      <p class="text-sm text-slate-400 mt-1.5 leading-relaxed">
+        Same cohort, 2024. You worked on the logistics unit together and she replied to you in March.
+      </p>
+      <div class="flex items-center gap-2 mt-3">
+        <button class="btn-primary" data-go="queue">Ask Priya for an introduction</button>
+        <span class="text-xs text-slate-500">Harry drafts it; you send it</span>
+      </div>
+    </section>
+
+    <section class="card p-4">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm font-medium text-slate-200">Two alumni, no contact since 2023</span>
+        <span class="chip">dormant tie</span>
+      </div>
+      <p class="text-sm text-slate-400 mt-1.5 leading-relaxed">
+        Reconnect first — no ask in the first message. Harry will wait a week before it suggests one.
+      </p>
+      <button class="btn-ghost mt-3">Start a reconnect</button>
+    </section>
+
+    <section class="card p-4">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm font-medium text-slate-200">Your coach knows their ops manager</span>
+        <span class="chip">via Dan Whitmore</span>
+      </div>
+      <p class="text-sm text-slate-400 mt-1.5 leading-relaxed">
+        Dan can ask on your behalf. Slower than email, but it lands with his name on it rather than yours.
+      </p>
+      <button class="btn-ghost mt-3">Ask Dan</button>
+    </section>
+
+    <section class="card p-4 opacity-70">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm text-slate-300">Nobody yet — cold</span>
+        <span class="chip">last resort</span>
+      </div>
+      <p class="text-sm text-slate-400 mt-1.5 leading-relaxed">
+        Better odds if you contribute something useful first. If you are short on time, a direct ask
+        is fine — it is an honest one.
+      </p>
+      <div class="flex gap-2 mt-3">
+        <button class="btn-ghost">Contribute first</button>
+        <button class="btn-ghost">Just ask directly</button>
+      </div>
+    </section>
+  </div>
+</template>
+
+<template id="tpl-proof">
+  <div class="space-y-4">
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <h1 class="text-xl font-semibold">Proof</h1>
+      <button class="btn-ghost">Export everything</button>
+    </div>
+    <p class="text-sm text-slate-400 max-w-2xl">
+      What you can put in front of an employer: named businesses, dated agreements, and what came of them.
+    </p>
+
+    <section class="card divide-y divide-ink-800">
+      <div class="p-4 flex items-start gap-3">
+        <span class="mt-0.5 size-2 rounded-full bg-accent-400 shrink-0"></span>
+        <div class="min-w-0 flex-1">
+          <p class="text-sm font-medium text-slate-100">Boxfresh — operations assessment</p>
+          <p class="text-xs text-slate-500 mt-0.5">Agreed by Priya Naidu, Head of Operations · 6 August 2026</p>
+          <p class="text-sm text-slate-400 mt-2 leading-relaxed">
+            "Happy for Sam to study our fulfilment process. Findings to be shared with us first."
+          </p>
+        </div>
+        <button class="btn-ghost shrink-0">Open</button>
+      </div>
+      <div class="p-4 flex items-start gap-3">
+        <span class="mt-0.5 size-2 rounded-full bg-slate-600 shrink-0"></span>
+        <div class="min-w-0 flex-1">
+          <p class="text-sm text-slate-300">Harrow Goods — awaiting signature</p>
+          <p class="text-xs text-slate-500 mt-0.5">Link opened twice, not signed · sent 4 August</p>
+        </div>
+        <button class="btn-ghost shrink-0">Nudge</button>
+      </div>
+    </section>
+
+    <section class="card p-5">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3">This term</h2>
+      <div class="grid grid-cols-3 gap-3 text-center">
+        <div class="rounded-lg bg-ink-800 py-3">
+          <div class="text-2xl font-bold text-slate-100 tabular-nums">1</div>
+          <div class="text-[11px] text-slate-500 mt-1">agreements signed</div>
+        </div>
+        <div class="rounded-lg bg-ink-800 py-3">
+          <div class="text-2xl font-bold text-slate-100 tabular-nums">4</div>
+          <div class="text-[11px] text-slate-500 mt-1">real conversations</div>
+        </div>
+        <div class="rounded-lg bg-ink-800 py-3">
+          <div class="text-2xl font-bold text-slate-100 tabular-nums">2</div>
+          <div class="text-[11px] text-slate-500 mt-1">introductions made for you</div>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500 mt-3">
+        No reply rates, no open rates, no benchmarks. None of them are the thing you are trying to get.
+      </p>
+    </section>
+  </div>
+</template>
+
+<template id="tpl-setup">
+  <div class="space-y-5 max-w-2xl">
+    <h1 class="text-xl font-semibold">Setup</h1>
+
+    <section class="card p-5 space-y-3">
+      <label class="block text-base font-medium text-slate-100" for="ask">What are you trying to land?</label>
+      <p class="text-sm text-slate-400">One sentence is enough. You can come back to the rest later.</p>
+      <textarea id="ask" class="input min-h-24 text-[15px]" placeholder="One business that will let me study their fulfilment process for my operations assessment this term."></textarea>
+      <div class="flex justify-end">
+        <button class="btn-primary">Save and start</button>
+      </div>
+    </section>
+
+    <details class="card p-5">
+      <summary class="text-sm font-medium text-slate-200 cursor-pointer">Add more detail — makes every email sharper</summary>
+      <div class="mt-4 space-y-4">
+        <div>
+          <label class="block text-sm text-slate-300">Who is asking</label>
+          <p class="text-xs text-slate-500 mb-1.5">Your name, and why a stranger should take you seriously.</p>
+          <textarea class="input min-h-16 text-[13px]" placeholder="Sam Reid, final-term operations student. Eight years running warehouse teams before I went back to study."></textarea>
+        </div>
+        <div>
+          <label class="block text-sm text-slate-300">Proof you can point to</label>
+          <p class="text-xs text-slate-500 mb-1.5">Results, numbers, credentials. Optional, but it does the heavy lifting.</p>
+          <textarea class="input min-h-16 text-[13px]" placeholder="Cut pick times 30% at Harrow Goods. Cert IV in Logistics."></textarea>
+        </div>
+        <div>
+          <span class="block text-sm text-slate-300 mb-1.5">How it should sound</span>
+          <div class="flex gap-1.5">
+            <button class="chip border-accent-500 bg-accent-500/10 text-accent-300">Direct</button>
+            <button class="chip">Warm</button>
+            <button class="chip">Formal</button>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <section class="card p-5 space-y-4">
+      <h2 class="font-semibold text-slate-200">Sending</h2>
+      <div class="flex items-start gap-4">
+        <div class="flex-1">
+          <div class="text-sm text-slate-300">Show me every message before it goes</div>
+          <p class="text-xs text-slate-500 mt-1">Your name is on it, so you send it.</p>
+        </div>
+        <div class="h-6 w-11 shrink-0 rounded-full bg-accent-500 relative">
+          <span class="absolute top-0.5 right-0.5 block size-5 rounded-full bg-white"></span>
+        </div>
+      </div>
+      <div class="flex items-end gap-3 flex-wrap border-t border-ink-800 pt-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Send between</label>
+          <input type="time" class="input w-auto" value="08:30" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">and</label>
+          <input type="time" class="input w-auto" value="17:30" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">on</label>
+          <select class="input w-auto"><option>weekdays</option><option>every day</option></select>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500">Times taken from this browser. Nothing to pick.</p>
+    </section>
+
+    <section class="card p-5 space-y-3">
+      <h2 class="font-semibold text-slate-200">Your coach</h2>
+      <p class="text-sm text-slate-400">
+        Dan Whitmore can read and approve anything before it sends, and can open doors for you.
+      </p>
+      <div class="flex items-center gap-3 text-sm">
+        <span class="text-slate-200">dan.whitmore@squadinstitute.edu</span>
+        <span class="chip border-emerald-700/50 text-emerald-300">active</span>
+      </div>
+    </section>
+  </div>
+</template>
+
+<script>
+  const PAGES = [
+    { id:'today',  label:'Today' },
+    { id:'queue',  label:'Needs you', badge:3 },
+    { id:'people', label:'People' },
+    { id:'proof',  label:'Proof' },
+    { id:'setup',  label:'Setup' },
+  ]
+
+  // Full class strings, never interpolated — Tailwind cannot see `text-${x}-300`.
+  const STAGE = {
+    agreed: 'text-emerald-300',
+    contacted: 'text-sky-300',
+    replied: 'text-indigo-300',
+    'not contacted': 'text-slate-500',
+    '—': 'text-slate-600',
+  }
+
+  const PEOPLE = [
+    ['Priya Naidu','Boxfresh · Head of Operations','Same cohort, 2024','agreed'],
+    ['Tom Harrow','Harrow Goods · Founder','Placement supervisor','contacted'],
+    ['Jess Okafor','Coastal Supply · Ops Manager','No path yet','not contacted'],
+    ['Dan Whitmore','SquadInstitute · Coach','Your coach','—'],
+    ['Marcus Bell','Northwind · Logistics Lead','Alumni, 2021','replied'],
+    ['Ana Ruiz','Fernwood Foods · COO','Dan knows her','not contacted'],
+  ]
+
+  const nav = document.getElementById('nav')
+  const pages = document.getElementById('pages')
+
+  function show(id) {
+    pages.innerHTML = ''
+    pages.appendChild(document.getElementById('tpl-' + id).content.cloneNode(true))
+    if (id === 'people') fillPeople()
+    ;[...nav.children].forEach((b) => {
+      const on = b.dataset.id === id
+      b.className = 'w-full text-left flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ' +
+        (on ? 'bg-ink-700 text-accent-300 font-medium' : 'text-slate-400 hover:text-slate-200 hover:bg-ink-800')
+    })
+    pages.querySelectorAll('[data-go]').forEach((el) =>
+      el.addEventListener('click', () => show(el.dataset.go)))
+    location.hash = id
+  }
+
+  function fillPeople() {
+    const rows = document.getElementById('people-rows')
+    rows.innerHTML = PEOPLE.map(([name, where, tie, stage]) => `
+      <tr class="border-b border-ink-800 last:border-0 hover:bg-ink-800/40">
+        <td class="px-4 py-2.5 text-slate-200">${name}</td>
+        <td class="px-4 py-2.5 text-slate-400">${where}</td>
+        <td class="px-4 py-2.5"><span class="chip">${tie}</span></td>
+        <td class="px-4 py-2.5"><span class="text-xs ${STAGE[stage] || 'text-slate-400'}">${stage}</span></td>
+        <td class="px-4 py-2.5 text-right">
+          <button class="text-xs text-accent-300 hover:text-accent-400" data-go="door">Find a path</button>
+        </td>
+      </tr>`).join('')
+    rows.querySelectorAll('[data-go]').forEach((el) =>
+      el.addEventListener('click', () => show(el.dataset.go)))
+  }
+
+  nav.innerHTML = PAGES.map((p) => `
+    <button data-id="${p.id}">
+      <span>${p.label}</span>
+      ${p.badge ? `<span class="ml-auto rounded-full bg-accent-500/20 px-1.5 py-0.5 text-[11px] font-semibold text-accent-300">${p.badge}</span>` : ''}
+    </button>`).join('')
+  ;[...nav.children].forEach((b) => b.addEventListener('click', () => show(b.dataset.id)))
+
+  show((location.hash || '#today').slice(1))
+</script>
+</body>
+</html>
