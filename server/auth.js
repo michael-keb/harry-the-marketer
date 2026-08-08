@@ -144,6 +144,8 @@ authRouter.get('/api/auth/login', rateLimit({ windowMs: 15 * 60_000, max: 30, ke
   url.searchParams.set('redirect_uri', `${env.APP_URL}/api/auth/callback`)
   url.searchParams.set('scope', 'openid profile email')
   url.searchParams.set('state', state)
+  // Audience + first-party API "Allow Skipping User Consent" skips the Authorize App screen.
+  if (env.AUTH0_AUDIENCE) url.searchParams.set('audience', env.AUTH0_AUDIENCE)
   if (req.query.screen_hint === 'signup') url.searchParams.set('screen_hint', 'signup')
   res.redirect(url.toString())
 })
@@ -171,11 +173,24 @@ authRouter.get('/api/auth/callback', async (req, res) => {
     if (!tokenRes.ok) throw new Error(`token exchange failed: ${await tokenRes.text()}`)
     const tokens = await tokenRes.json()
 
-    const userRes = await fetch(`https://${env.AUTH0_DOMAIN}/userinfo`, {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
-    })
-    if (!userRes.ok) throw new Error(`userinfo failed: ${await userRes.text()}`)
-    const profile = await userRes.json()
+    // Prefer ID token claims (always present with openid). userinfo can fail when the
+    // access token is an API JWT rather than an opaque /userinfo token.
+    let profile = null
+    if (tokens.id_token) {
+      try {
+        const payload = tokens.id_token.split('.')[1]
+        profile = JSON.parse(Buffer.from(payload, 'base64url').toString())
+      } catch {
+        profile = null
+      }
+    }
+    if (!profile?.sub) {
+      const userRes = await fetch(`https://${env.AUTH0_DOMAIN}/userinfo`, {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      })
+      if (!userRes.ok) throw new Error(`userinfo failed: ${await userRes.text()}`)
+      profile = await userRes.json()
+    }
 
     const user = upsertUser({
       sub: profile.sub,

@@ -25,6 +25,8 @@ export const env = {
   AUTH0_DOMAIN: process.env.AUTH0_DOMAIN || '',
   AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID || '',
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET || '',
+  // First-party API audience — lets Auth0 skip the "Authorize App" consent screen.
+  AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE || 'https://harrythemarketer.com/api',
 
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '',
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '',

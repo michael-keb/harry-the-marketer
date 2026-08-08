@@ -19,7 +19,7 @@ services:
     plan: starter          # free has no disk and sleeps; the engine must keep ticking
     region: singapore      # closest Render region to Australia
     branch: main
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
 
@@ -69,6 +69,8 @@ services:
         sync: false
       - key: AUTH0_CLIENT_SECRET
         sync: false
+      - key: AUTH0_AUDIENCE
+        value: https://harrythemarketer.com/api
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
