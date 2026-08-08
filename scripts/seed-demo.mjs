@@ -55,4 +55,49 @@ await post('/api/deliverability/folders',{name:'Weekly placement checks'})
 
 // Real activity so Reports is not empty
 await post('/api/engine/tick')
-console.log(JSON.stringify({mailbox:mb.id,client:client?.id,campaign:camp.id,leads:leads.length,segment:seg.id},null,0))
+
+// ---- conversations ----------------------------------------------------------
+// Without this the Inbox seeds empty, and an empty Inbox proves nothing: the
+// three panes, the folder counts and the message trail are all invisible until
+// something has actually been said. So run the campaign for real — approve the
+// first emails, let leads answer, and let the agent draft the replies.
+//
+// The route below is a sandbox helper, not a back door: `simulate-reply` walks
+// the same path a genuine inbound message takes, so what lands in the Inbox is
+// classified, threaded and drafted exactly as production would.
+
+await put(`/api/campaigns/${camp.id}`,{status:'running'})
+await post('/api/engine/tick')
+
+// Approve the opening email for everyone, so there is a sent side to reply to.
+const opening = rec((await get('/api/drafts')).b)?.drafts || []
+for(const d of opening) await post(`/api/drafts/${d.id}/approve`)
+await post('/api/engine/tick')
+
+// Six answers across the intents the agent routes on, so the folders differ
+// from one another rather than all showing the same thing.
+const answers=[
+ [0,'Thanks for reaching out — this is timely. We are mid-way through a Jira migration and the handover between ops and support is exactly where things fall over. What does onboarding look like?'],
+ [1,'Interesting. Can you send pricing for a team of about 40, and does it integrate with Zendesk?'],
+ [2,'Not right now, we renewed with an incumbent in June. Try me next year.'],
+ [3,'Yes — keen to see it. I have Thursday afternoon or Friday morning free.'],
+ [4,'Please take me off this list.'],
+]
+for(const [i,text] of answers) await post(`/api/campaigns/${camp.id}/leads/${leads[i].id}/simulate-reply`,{text})
+await post('/api/engine/tick')
+
+// A second round on the two warmest threads, so at least one conversation is
+// long enough that the trail collapses older messages behind an expander —
+// which is the behaviour worth capturing.
+const second = rec((await get('/api/drafts')).b)?.drafts || []
+for(const d of second.slice(0,2)) await post(`/api/drafts/${d.id}/approve`)
+await post('/api/engine/tick')
+await post(`/api/campaigns/${camp.id}/leads/${leads[0].id}/simulate-reply`,
+ {text:'Thursday at 2pm suits. Sending an invite — could you include whoever handles the data migration side?'})
+await post('/api/engine/tick')
+
+const inbox = rec((await get('/api/inbox/threads?state=all&limit=20')).b)
+const pending = rec((await get('/api/drafts')).b)?.drafts || []
+
+console.log(JSON.stringify({mailbox:mb.id,client:client?.id,campaign:camp.id,leads:leads.length,segment:seg.id,
+ threads:(inbox?.items||[]).length,awaitingApproval:pending.length},null,0))

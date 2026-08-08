@@ -49,6 +49,15 @@ Tokens for test users expire after ~7 days; reconnect when that happens.
 
 ## Production verification (public users)
 
+> **The full submission pack is [GOOGLE-VERIFICATION-PACK.md](GOOGLE-VERIFICATION-PACK.md)** —
+> scope justifications ready to paste, the demo-video shot list, the console fields, and an
+> honest account of what `gmail.readonly` costs. Read that before starting; the summary below
+> is the short version.
+>
+> The headline: `gmail.readonly` is a **restricted** scope, so verification requires an annual
+> third-party CASA security assessment (~$540–$4,500/yr) on top of the usual forms. `gmail.send`
+> alone would only be *sensitive*, which is free. Staying in **Testing** avoids both.
+
 When non-test users must connect Gmail:
 
 1. Deploy so `{APP_URL}/privacy` and `{APP_URL}/terms` are reachable on the public internet.

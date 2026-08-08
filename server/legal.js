@@ -203,6 +203,9 @@ const privacy = {
     <li><code>gmail.send</code> — send campaign and reply emails from your mailbox</li>
     <li><code>gmail.readonly</code> — read replies so the engine can classify intent and advance playbooks</li>
     <li><code>userinfo.email</code> / <code>userinfo.profile</code> — identify which mailbox you connected</li>
+    <li><code>drive.file</code> — create and update the one prospect spreadsheet you ask for, and nothing else
+      in your Drive. This scope grants access only to files this app itself creates, which is why Harry
+      creates the spreadsheet for you rather than asking you to pick an existing one.</li>
   </ul>
   <p>Our use of information received from Google APIs adheres to the
   <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener">Google API Services User Data Policy</a>,

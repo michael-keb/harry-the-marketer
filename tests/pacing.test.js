@@ -137,10 +137,17 @@ test('the engine closes the mailbox slot after a send', async () => {
   db.prepare("INSERT INTO leads (user_id, email, first_name) VALUES (1, 'x@example.com', 'X')").run()
   db.prepare('INSERT INTO campaign_leads (campaign_id, lead_id) VALUES (1, 1)').run()
 
+  // Measured from before the tick, not after it. The gap is written as
+  // `Date.now() + nextGapMs(...)` at the moment of the send, so comparing it
+  // against a *later* clock reading is the gap minus however long the tick
+  // took. That passes all morning — when the day's remaining allowance spreads
+  // to well over the floor — and fails every evening, when the spacing lands
+  // exactly on the 45s minimum and there is nothing left to absorb the tick.
+  const before = Date.now()
   await tick()
   const after = db.prepare('SELECT next_send_at FROM mailboxes WHERE id = 1').get()
   assert.ok(after.next_send_at > Date.now(), 'the slot is closed for a gap')
-  assert.ok(after.next_send_at - Date.now() >= 45_000, 'and the gap is a real one')
+  assert.ok(after.next_send_at - before >= 45_000, 'and the gap is a real one')
 })
 
 test('hashFraction stays in range for anything thrown at it', () => {
