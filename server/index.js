@@ -11,7 +11,7 @@ import { siteRouter, publicApi, renderSpa, spaBuildExists } from './site.js'
 import { securityHeaders, compression, staticGzip, rateLimit } from './security.js'
 import { api } from './routes.js'
 import { startEngine, stopEngine } from './engine.js'
-import { onEvent, db } from './db.js'
+import { onEvent } from './db.js'
 import { fireWebhooks, normalizeEventType } from './parity/webhooks.js'
 import { notify } from './alerts.js'
 
@@ -40,30 +40,6 @@ app.use((req, res, next) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, auth0: auth0Configured(), google: googleConfigured(), devLogin: devLoginEnabled() })
-})
-
-// TEMPORARY diagnostics probe — guarded by PROBE_TOKEN env, removed after debugging.
-app.get('/api/probe', (req, res) => {
-  const token = process.env.PROBE_TOKEN
-  if (!token || req.query.token !== token) return res.status(404).json({ error: 'Unknown endpoint' })
-  const q = (sql) => {
-    try { return db.prepare(sql).all() } catch (err) { return { error: String(err.message || err) } }
-  }
-  const kv = (k) => { try { return db.prepare('SELECT value FROM kv WHERE key = ?').get(k)?.value || null } catch { return null } }
-  res.json({
-    engineLastTick: kv('engine_last_tick'),
-    now: new Date().toISOString(),
-    campaigns: q('SELECT id, name, status, user_id, mailbox_id FROM campaigns ORDER BY id DESC LIMIT 10'),
-    campaignLeads: q("SELECT id, campaign_id, lead_id, node_id, state, outcome, wait_until, error, updated_at FROM campaign_leads WHERE state NOT IN ('finished') ORDER BY id DESC LIMIT 20"),
-    mailboxes: q('SELECT id, email, provider, status, is_suspended, suspended_reason, last_error, sent_today, sent_today_date, next_send_at, deleted_at FROM mailboxes'),
-    mailboxesFallback: q('SELECT id, email, provider, status FROM mailboxes'),
-    drafts: q("SELECT id, campaign_id, lead_id, node_id, status, subject, created_at FROM drafts WHERE status = 'pending' ORDER BY id DESC LIMIT 10"),
-    leads: q('SELECT id, email, status FROM leads ORDER BY id DESC LIMIT 10'),
-    users: q('SELECT id, email, paced, send_from, send_to, send_days, send_timezone, require_approval FROM users'),
-    holds: q('SELECT id, scope, scope_id, reason, source, release_at, created_at FROM send_holds ORDER BY id DESC LIMIT 10'),
-    events: q('SELECT id, user_id, campaign_id, lead_id, type, substr(detail,1,140) detail, created_at FROM events ORDER BY id DESC LIMIT 40'),
-    messages: q("SELECT id, campaign_id, lead_id, mailbox_id, direction, send_status, subject, created_at FROM messages ORDER BY id DESC LIMIT 10"),
-  })
 })
 
 app.use(siteRouter) // public: robots.txt, sitemap.xml, favicon, OG image
