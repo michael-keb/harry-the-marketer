@@ -161,7 +161,7 @@ export default function Monitoring() {
           </span>
         </h2>
         {delivery.mailboxes.length === 0 ? (
-          <p className="text-sm text-slate-500">No mailboxes connected — connect one from the Mailboxes page.</p>
+          <p className="text-sm text-slate-500">No mailboxes connected — connect one from the Connections page.</p>
         ) : (
           <table className="w-full text-sm">
             <thead>

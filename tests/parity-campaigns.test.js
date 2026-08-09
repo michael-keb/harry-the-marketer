@@ -733,7 +733,12 @@ test('a manual reply is refused for an unsubscribed lead and can be scheduled', 
   })
   assert.equal(scheduled.status, 200)
   assert.equal(scheduled.body.scheduled, true)
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM messages WHERE campaign_id = ? AND send_status = 'scheduled'").get(campaign.id).n, 1)
+  // `queued`, not `scheduled`. This route used to park the row as `scheduled`,
+  // a value nothing in the product looked for: the dispatch job selects
+  // `queued`, and so does the Inbox's Scheduled folder. So a reply scheduled
+  // here never appeared in the folder meant to show it and was never sent —
+  // and this assertion is the one that made that look correct.
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM messages WHERE campaign_id = ? AND send_status = 'queued'").get(campaign.id).n, 1)
 
   const now = await client.post(`/api/campaigns/${campaign.id}/threads/${message.id}/reply`, { body: 'Sending now.', confirm: true })
   assert.equal(now.status, 200)

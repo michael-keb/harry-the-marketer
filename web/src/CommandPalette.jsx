@@ -44,8 +44,10 @@ const NAV_COMMANDS = [
   { id: 'nav:reports-team', title: 'Go to Reports → Team', to: '/app/reports?tab=team', keywords: 'analytics users seats' },
   { id: 'nav:monitoring', title: 'Go to Monitoring', to: '/app/monitoring', keywords: 'health status uptime incidents' },
   { id: 'nav:placement', title: 'Go to Monitoring → Inbox placement', to: '/app/monitoring', keywords: 'deliverability spam seed test blacklist' },
-  { id: 'nav:mailboxes', title: 'Go to Mailboxes', to: '/app/mailboxes', keywords: 'senders accounts warmup smtp imap fleet' },
-  { id: 'nav:mailboxes-attention', title: 'Go to Mailboxes → Needs attention', to: '/app/mailboxes?health=attention', keywords: 'broken sending failing smtp' },
+  { id: 'nav:connections', title: 'Go to Connections', to: '/app/connections', keywords: 'mailboxes senders accounts warmup smtp imap fleet sms whatsapp telegram' },
+  { id: 'nav:connections-email', title: 'Go to Connections → Email', to: '/app/connections?area=email', keywords: 'gmail outlook mailboxes fleet' },
+  { id: 'nav:connections-messages', title: 'Go to Connections → Messages', to: '/app/connections?area=messages', keywords: 'sms whatsapp telegram twilio' },
+  { id: 'nav:mailboxes-attention', title: 'Go to Connections → Needs attention', to: '/app/connections?area=email&health=attention', keywords: 'broken sending failing smtp mailboxes' },
   { id: 'nav:settings', title: 'Go to Settings', to: '/app/settings/briefing', keywords: 'profile briefing voice preferences' },
   { id: 'nav:settings-sending', title: 'Go to Settings → Sending', to: '/app/settings/sending', keywords: 'send controls hours pacing caps limits quiet hours holds bounces' },
   { id: 'nav:settings-block', title: 'Go to Settings → Never contact', to: '/app/settings/never-contact', keywords: 'block list suppression unsubscribe do not email blocked domains' },
@@ -116,7 +118,7 @@ const SOURCES = [
       meta: [m.fromName, m.provider].filter(Boolean).join(' · '),
       // The fleet reads its filters straight off the query string, so naming
       // the mailbox lands on a one-row list rather than the whole fleet.
-      to: `/app/mailboxes${qs({ q: m.fromEmail || '' })}`,
+      to: `/app/connections${qs({ area: 'email', q: m.fromEmail || '' })}`,
     }),
   },
   {
@@ -170,7 +172,7 @@ const SOURCES = [
       id: `tag-mailbox:${t.id}`,
       title: t.name,
       meta: `mailbox label · ${t.usageCount ?? 0} in use`,
-      to: '/app/mailboxes',
+      to: '/app/connections?area=email',
     }),
   },
 ]

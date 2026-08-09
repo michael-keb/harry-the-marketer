@@ -478,44 +478,9 @@ export function SchedulePanel({ campaign, onSaved }) {
         </div>
       </details>
 
-      <SendPreview campaignId={campaign.id} />
+      <p className="mt-4 border-t border-slate-200 pt-4 text-xs text-slate-500">
+        See the block grid on the <strong className="font-medium text-slate-700">Schedule</strong> tab of this campaign.
+      </p>
     </Panel>
-  )
-}
-
-// What this window actually produces. The window used to be a setting nobody
-// could check — it was stored, shown, and read by nothing — so the schedule it
-// implies is now printed next to it.
-function SendPreview({ campaignId }) {
-  const [preview, setPreview] = useState(null)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    let live = true
-    api.get(`/api/send-preview?campaignId=${campaignId}&limit=8`)
-      .then((r) => live && setPreview(r))
-      .catch((e) => live && setError(e))
-    return () => { live = false }
-  }, [campaignId])
-
-  if (error || !preview) return null
-  return (
-    <div className="mt-4 border-t border-slate-200 pt-4">
-      <div className="text-xs font-medium text-slate-700">When the next emails would leave</div>
-      {preview.sends.length === 0 ? (
-        <p className="mt-1 text-xs text-amber-700">
-          Nothing would go out{preview.blocked ? ` — ${preview.blocked.reason}` : '.'}
-        </p>
-      ) : (
-        <ul className="mt-1.5 space-y-0.5">
-          {preview.sends.map((s) => (
-            <li key={s.number} className="text-xs text-slate-600">
-              {new Date(s.at).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-            </li>
-          ))}
-        </ul>
-      )}
-      <p className="mt-1.5 text-xs text-slate-500">{preview.note}</p>
-    </div>
   )
 }

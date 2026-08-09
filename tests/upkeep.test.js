@@ -501,6 +501,68 @@ test('a schedule past its end date is retired rather than left running for ever'
     'an ended schedule does not get one last run')
 })
 
+// ---- inbound attach (the gap that emptied the Inbox) -------------------------
+
+test('a reply from a known lead attaches to the campaign thread instead of vanishing', () => {
+  // Campaign primary is mailbox A; the outbound (and therefore the Gmail thread)
+  // lives on mailbox B — the rotation case that made per-thread sync miss.
+  const primary = seedMailbox(db, owner.id, 'primary-inbox@example.com')
+  const sender = seedMailbox(db, owner.id, 'rotated-sender@example.com')
+  const lead = seedLead(db, owner.id, 'prospect-replies@acme.test')
+  const campaign = seedCampaign(db, owner.id, 'Inbox attach', primary.id)
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(campaign.id)
+  db.prepare(
+    "INSERT INTO campaign_leads (campaign_id, lead_id, state, node_id, thread_id) VALUES (?, ?, 'waiting', 'n1', ?)"
+  ).run(campaign.id, lead.id, 'gmail-thread-rotated')
+  db.prepare(
+    `INSERT INTO messages
+       (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
+     VALUES (?, ?, ?, ?, 'out', 'Intro', 'Hi', ?, ?, 'out-1', 'gmail-thread-rotated')`
+  ).run(owner.id, campaign.id, lead.id, sender.id, sender.email, lead.email)
+
+  const result = jobs.ingestRecentInbound(sender, {
+    providerMessageId: 'in-rotated-1',
+    threadId: 'gmail-thread-rotated',
+    fromEmail: lead.email,
+    toEmail: sender.email,
+    subject: 'Re: Intro',
+    body: 'Yes, let us talk next week.',
+    receivedAt: iso(-1_000),
+  })
+
+  assert.equal(result, 'attached')
+  const inbound = db.prepare(
+    "SELECT * FROM messages WHERE provider_message_id = 'in-rotated-1'"
+  ).get()
+  assert.ok(inbound, 'reply is stored as a campaign message')
+  assert.equal(inbound.direction, 'in')
+  assert.equal(inbound.campaign_id, campaign.id)
+  assert.equal(inbound.lead_id, lead.id)
+  assert.equal(inbound.mailbox_id, sender.id)
+  assert.equal(
+    db.prepare("SELECT COUNT(*) n FROM unmatched_messages WHERE provider_message_id = 'in-rotated-1'").get().n,
+    0,
+    'a matched reply must not also land in untracked'
+  )
+})
+
+test('a stranger reply still lands in untracked', () => {
+  const mb = seedMailbox(db, owner.id, 'untracked-inbox@example.com')
+  const result = jobs.ingestRecentInbound(mb, {
+    providerMessageId: 'in-stranger-1',
+    threadId: 'thread-x',
+    fromEmail: 'nobody-known@elsewhere.test',
+    toEmail: mb.email,
+    subject: 'Cold pitch',
+    body: 'Buy my list',
+    receivedAt: iso(-1_000),
+  })
+  assert.equal(result, 'untracked')
+  assert.ok(db.prepare(
+    "SELECT 1 FROM unmatched_messages WHERE provider_message_id = 'in-stranger-1'"
+  ).get())
+})
+
 // ---- the whole pass ----------------------------------------------------------
 
 test('a failing job cannot take down the pass or the tick', async () => {

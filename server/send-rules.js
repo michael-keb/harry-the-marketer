@@ -196,6 +196,43 @@ export function legacyCampaignSchedule(campaign) {
   }
 }
 
+// Keep campaigns.schedule in step with send_rules so both UIs and the engine
+// read the same window. Uses the first window — the legacy column only stores one.
+export function effectiveRulesToLegacySchedule(rules) {
+  const w = rules?.windows?.[0]
+  if (!w?.from || !w?.to || !Array.isArray(w.days) || !w.days.length) return null
+  return {
+    timezone: rules.timezone || '',
+    days: w.days,
+    start_hour: w.from,
+    end_hour: w.to,
+    min_gap_minutes: Number(rules.minGapMinutes) || 0,
+  }
+}
+
+export function syncCampaignScheduleColumn(campaignId, rules) {
+  const schedule = effectiveRulesToLegacySchedule(rules)
+  if (!schedule) return
+  db.prepare("UPDATE campaigns SET schedule = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(JSON.stringify(schedule), campaignId)
+}
+
+export function legacyScheduleToStoredRules(schedule) {
+  const patch = legacyCampaignSchedule({ schedule: JSON.stringify(schedule || {}) })
+  if (!patch) return {}
+  const out = { windows: patch.windows, minGapMinutes: patch.minGapMinutes }
+  if (patch.timezone) out.timezone = patch.timezone
+  return out
+}
+
+export function copyCampaignSendRules(wsId, fromCampaignId, toCampaignId, updatedBy = '') {
+  const row = db.prepare(
+    'SELECT rules FROM send_rules WHERE workspace_id = ? AND scope = ? AND scope_id = ?'
+  ).get(wsId, 'campaign', fromCampaignId)
+  if (!row?.rules || row.rules === '{}') return
+  saveRules(wsId, 'campaign', toCampaignId, parse(row.rules), updatedBy)
+}
+
 // ---- validation -------------------------------------------------------------
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/

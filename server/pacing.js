@@ -16,6 +16,7 @@
 //
 // Sandbox mailboxes ignore all of it: they exist to be tested in seconds.
 import crypto from 'node:crypto'
+import { isOAuthProvider } from './providers.js'
 
 export const DEFAULT_WINDOW = { from: '08:30', to: '17:30', days: 'weekdays' }
 
@@ -84,14 +85,33 @@ export function nextOpen(window, at) {
   return at
 }
 
-// Today's ceiling for this mailbox: its own limit, held down while it warms up.
+// Today's ceiling for this mailbox: its own limit, held down while it warms up,
+// and held down further by a warm-up count the user has set by hand.
+//
+// That last clause is load-bearing. `PUT /api/mailboxes/:id/warmup` has always
+// stored `warmup_daily_count`, reported it back as "today's effective cap", and
+// let server/upkeep.js tune it up and down off bounce telemetry — while nothing
+// on the send path ever read it. A mailbox set to 5 a day sent 50, and the only
+// thing the setting changed was the number on the screen. It is read here, in
+// the one function the engine, the approval queue, the campaign header and the
+// mailer all ask, so there is a single answer rather than two that disagree.
+//
+// It can only ever *tighten*: the min against the ramp is deliberate, so no
+// value posted to the warm-up route can hand a mailbox connected an hour ago
+// its full allowance. `warmup_ramp_enabled: false` therefore means "do not
+// climb past the count you chose", not "start there on day one" — Harry's own
+// first-fortnight floor is not switchable, and that divergence is recorded in
+// Docs/email-accounts/warmup-settings.md.
 export function dailyCap(mailbox, now = Date.now()) {
   const limit = mailbox.daily_limit
-  if (mailbox.provider !== 'gmail') return limit
+  if (!isOAuthProvider(mailbox.provider)) return limit
+  const chosen = mailbox.warmup_enabled && mailbox.warmup_daily_count > 0
+    ? Math.max(1, Math.min(limit, mailbox.warmup_daily_count))
+    : limit
   const connected = Date.parse(String(mailbox.created_at || '').replace(' ', 'T') + 'Z')
-  if (!connected) return limit
+  if (!connected) return chosen
   const days = Math.max(0, Math.floor((now - connected) / 86_400_000))
-  return Math.max(1, Math.min(limit, RAMP_START + days * RAMP_PER_DAY))
+  return Math.max(1, Math.min(chosen, RAMP_START + days * RAMP_PER_DAY))
 }
 
 export function isWarmingUp(mailbox, now = Date.now()) {
@@ -122,7 +142,7 @@ export function canSendNow(owner, mailbox, now = Date.now()) {
   // The ceiling is a number a human set, so it always applies. Only the clock
   // and the spacing are skipped — for sandbox mailboxes, and when pacing is off.
   const hasAllowance = remainingToday(mailbox, now) > 0
-  if (mailbox.provider !== 'gmail') return hasAllowance ? { ok: true } : outOfAllowance
+  if (!isOAuthProvider(mailbox.provider)) return hasAllowance ? { ok: true } : outOfAllowance
   const window = sendWindow(owner)
   if (!window.on) return hasAllowance ? { ok: true } : outOfAllowance
   if (!hasAllowance) {

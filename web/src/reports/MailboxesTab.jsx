@@ -38,7 +38,7 @@ function MailboxSummary() {
       id="mailbox-summary"
       title="Mailbox states"
       note="Derived on every request, never stored, so these counts cannot drift from what the sending engine actually sees."
-      actions={<Link to="/app/mailboxes" className="text-xs text-slate-600 hover:text-accent-700">Manage mailboxes</Link>}
+      actions={<Link to="/app/connections?area=email" className="text-xs text-slate-600 hover:text-accent-700">Manage mailboxes</Link>}
     >
       {loading && !data ? (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3" aria-hidden>
@@ -51,7 +51,7 @@ function MailboxSummary() {
           icon="mailboxes"
           title="No mailboxes connected"
           hint="Connect a Gmail account or add a sandbox mailbox and its health shows up here."
-          action={<Link to="/app/mailboxes" className="btn-primary">Connect a mailbox</Link>}
+          action={<Link to="/app/connections?area=email" className="btn-primary">Connect a mailbox</Link>}
         />
       ) : (
         <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -201,7 +201,7 @@ function MailboxHealth({ params }) {
                   {rows.map((m) => (
                     <tr key={m.mailbox_id} className="border-b border-slate-200 last:border-0">
                       <th scope="row" className="px-3 py-2.5 text-left font-normal">
-                        <Link to="/app/mailboxes" className="text-ink-900 hover:text-accent-700">{m.email}</Link>
+                        <Link to="/app/connections?area=email" className="text-ink-900 hover:text-accent-700">{m.email}</Link>
                         {m.is_sandbox && <span className="ml-2 rounded px-1.5 py-0.5 text-[11px] bg-slate-200 text-slate-600">sandbox</span>}
                         {!m.warmup_enabled && !m.is_sandbox && (
                           <span className="ml-2 rounded px-1.5 py-0.5 text-[11px] bg-amber-50 text-amber-700">no warm-up</span>
@@ -236,7 +236,7 @@ function MailboxHealth({ params }) {
                 : 'No mailboxes connected. '}
               {bouncingOnly
                 ? <button type="button" className="cursor-pointer text-accent-700 hover:underline" onClick={() => setBouncingOnly(false)}>Show all mailboxes</button>
-                : <Link to="/app/mailboxes" className="text-accent-700 hover:underline">Connect one</Link>}
+                : <Link to="/app/connections?area=email" className="text-accent-700 hover:underline">Connect one</Link>}
             </p>
           )}
           <LoadMore hasMore={list.hasMore} loading={list.loading} onClick={list.loadMore} />

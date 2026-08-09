@@ -2,7 +2,7 @@
 import express from 'express'
 import { db, logEvent, touch, kvGet } from './db.js'
 import { requireUser, workspace } from './auth.js'
-import { googleConfigured, auth0Configured, devLoginEnabled, env } from './env.js'
+import { googleConfigured, microsoftConfigured, auth0Configured, devLoginEnabled, env } from './env.js'
 import { telemetryRecent, telemetryStats, telemetryFailures } from './telemetry.js'
 import { parsePlaybook, DEFAULT_PLAYBOOK } from './playbook.js'
 import { simulateReply, remainingQuota, sendEmail } from './mailer.js'
@@ -18,6 +18,7 @@ import { dailyCap, isWarmingUp, sendWindow, DEFAULT_WINDOW } from './pacing.js'
 import { resolveSend, sendingContext } from './gates.js'
 import { registerSendControls } from './send-controls.js'
 import { registerParity } from './parity/index.js'
+import { REVIVE_MAILBOX_SQL } from './parity/schema.js'
 import { suppressionFor } from './suppression.js'
 
 // When may this mailbox send, and if not now, why and when? Shared by the
@@ -119,18 +120,29 @@ api.post('/leads/import', (req, res) => {
   const rows = req.body?.rows
   if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows to import' })
   if (rows.length > 10000) return res.status(400).json({ error: 'Max 10,000 rows per import' })
-  let added = 0, skipped = 0
+  let added = 0, skipped = 0, suppressed = 0
   const errors = []
   const insert = db.prepare(
-    'INSERT INTO leads (user_id, email, first_name, last_name, company, title, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO leads (user_id, email, first_name, last_name, company, title, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const importAll = db.transaction(() => {
     for (const row of rows) {
       const email = String(row.email || '').trim().toLowerCase()
       if (!EMAIL_RE.test(email)) { skipped++; if (errors.length < 5) errors.push(`invalid email: "${row.email}"`); continue }
+
+      // Somebody on the never-contact list comes back in as `unsubscribed`, not
+      // `active`. No email could have escaped either way — enrolment and the
+      // mailer both re-check suppression — but this route imported them as
+      // contactable, so the Leads page showed a person who had opted out sitting
+      // there looking available, with nothing to say otherwise. Being wrong on
+      // screen about who you may email is its own harm, even when the send path
+      // holds.
+      const blocked = suppressionFor(req.wsId, { address: email })
       try {
         insert.run(req.wsId, email, String(row.firstName || '').trim(), String(row.lastName || '').trim(),
-          String(row.company || '').trim(), String(row.title || '').trim(), String(row.notes || '').trim())
+          String(row.company || '').trim(), String(row.title || '').trim(), String(row.notes || '').trim(),
+          blocked ? 'unsubscribed' : 'active')
+        if (blocked) suppressed++
         added++
       } catch (err) {
         if (String(err).includes('UNIQUE')) skipped++
@@ -139,16 +151,20 @@ api.post('/leads/import', (req, res) => {
     }
   })
   importAll()
-  logEvent(req.wsId, { type: 'leads_imported', detail: `${added} added, ${skipped} skipped` })
-  res.json({ added, skipped, errors })
+  logEvent(req.wsId, {
+    type: 'leads_imported',
+    detail: `${added} added, ${skipped} skipped` + (suppressed ? `, ${suppressed} on the never-contact list` : ''),
+  })
+  res.json({ added, skipped, suppressed, errors })
 })
 
 // ---- mailboxes --------------------------------------------------------------
 
 api.get('/mailboxes', (req, res) => {
-  const rows = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY id').all(req.wsId)
+  const rows = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id').all(req.wsId)
   res.json({
     googleConfigured: googleConfigured(),
+    microsoftConfigured: microsoftConfigured(),
     mailboxes: rows.map((m) => ({
       id: m.id, provider: m.provider, email: m.email, displayName: m.display_name,
       status: m.status, dailyLimit: m.daily_limit, remainingToday: remainingQuota(m),
@@ -161,12 +177,24 @@ api.get('/mailboxes', (req, res) => {
 api.post('/mailboxes/sandbox', (req, res) => {
   const name = String(req.body?.name || 'Sandbox Sender').trim()
   const emailAddr = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '.')}@sandbox.local`
+  // Connecting an address that was removed brings the row back rather than
+  // colliding with UNIQUE (user_id, provider, email) — the row is still there,
+  // marked. delete.md TC-11 asks that the warm-up ramp start from the beginning
+  // rather than resume, so the counters are reset with it.
+  const removed = db.prepare(
+    "SELECT * FROM mailboxes WHERE user_id = ? AND provider = 'sandbox' AND email = ? AND deleted_at IS NOT NULL"
+  ).get(req.wsId, emailAddr)
+  if (removed) {
+    db.prepare(REVIVE_MAILBOX_SQL).run(name, removed.id)
+    logEvent(req.wsId, { type: 'mailbox_connected', detail: `sandbox:${emailAddr} (reconnected after removal)` })
+    return res.json(db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(removed.id))
+  }
   try {
     const info = db.prepare(
-      "INSERT INTO mailboxes (user_id, provider, email, display_name) VALUES (?, 'sandbox', ?, ?)"
+      "INSERT INTO mailboxes (user_id, provider, email, display_name, deleted_at) VALUES (?, 'sandbox', ?, ?, NULL)"
     ).run(req.wsId, emailAddr, name)
     logEvent(req.wsId, { type: 'mailbox_connected', detail: `sandbox:${emailAddr}` })
-    res.json(db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(info.lastInsertRowid))
+    res.json(db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(info.lastInsertRowid))
   } catch (err) {
     if (String(err).includes('UNIQUE')) return res.status(409).json({ error: 'A sandbox mailbox with that name already exists' })
     throw err
@@ -174,7 +202,7 @@ api.post('/mailboxes/sandbox', (req, res) => {
 })
 
 api.put('/mailboxes/:id', (req, res) => {
-  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(req.params.id, req.wsId)
+  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(req.params.id, req.wsId)
   if (!mailbox) return res.status(404).json({ error: 'Mailbox not found' })
   const limit = Number(req.body?.dailyLimit)
   if (!Number.isInteger(limit) || limit < 1 || limit > 2000) return res.status(400).json({ error: 'Daily limit must be 1-2000' })
@@ -182,14 +210,130 @@ api.put('/mailboxes/:id', (req, res) => {
   res.json({ ok: true })
 })
 
+// Removing a mailbox — Docs/email-accounts/delete.md.
+//
+// This was a hard `DELETE FROM mailboxes` guarded by a 409 whenever a live
+// campaign used it, which is the opposite of what the spec asks for on both
+// counts. `messages.mailbox_id` is ON DELETE SET NULL, so a send survived the
+// delete but became attributable to no address at all — the Inbox and Reports
+// history the spec says must stay intact could no longer be labelled. And the
+// 409 meant the documented flow (see the consequences, confirm, delete) was
+// simply unavailable for the case the spec spends most of its words on.
+//
+// So: a soft delete that detaches, cancels and stops warm-up in one
+// transaction. `deleted_at` is what every read path filters on. The row is also
+// suspended and disconnected on the way out — belt and braces, because those
+// two columns are already honoured by `isSendable`, by the engine's rotation
+// pool and by the send gates, so a read path that has not yet learned about
+// `deleted_at` still cannot send from a removed address.
 api.delete('/mailboxes/:id', (req, res) => {
-  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(req.params.id, req.wsId)
-  if (!mailbox) return res.status(404).json({ error: 'Mailbox not found' })
-  const inUse = db.prepare("SELECT COUNT(*) c FROM campaigns WHERE mailbox_id = ? AND status IN ('running','paused')").get(mailbox.id)
-  if (inUse.c) return res.status(409).json({ error: `Mailbox is used by ${inUse.c} campaign(s) — archive them first` })
-  db.prepare('DELETE FROM mailboxes WHERE id = ?').run(mailbox.id)
-  logEvent(req.wsId, { type: 'mailbox_removed', detail: mailbox.email })
-  res.json({ ok: true })
+  // TC-4: a non-numeric id is a validation failure, not a lookup miss.
+  if (!/^\d+$/.test(String(req.params.id))) {
+    return res.status(422).json({ ok: false, error: 'id must be a positive integer', field: 'id' })
+  }
+  const mailbox = db.prepare(
+    "SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL"
+  ).get(req.params.id, req.wsId)
+  // AC 5 / TC-10: a cross-workspace id and an already-removed one are the same
+  // answer, and both carry the documented code.
+  if (!mailbox) return res.status(404).json({ ok: false, error: 'Email account not found', errorCode: 'ACCOUNT_NOT_FOUND' })
+
+  const attached = db.prepare(
+    `SELECT DISTINCT c.id, c.name, c.status FROM campaigns c
+      WHERE c.user_id = ? AND COALESCE(c.deleted_at, '') = ''
+        AND (c.mailbox_id = ? OR c.id IN (SELECT campaign_id FROM campaign_mailboxes WHERE mailbox_id = ?))
+      ORDER BY c.id`
+  ).all(req.wsId, mailbox.id, mailbox.id)
+  const waiting = db.prepare(
+    `SELECT d.id FROM drafts d JOIN campaigns c ON c.id = d.campaign_id
+      WHERE d.user_id = ? AND c.mailbox_id = ? AND d.status IN ('pending', 'approved')`
+  ).all(req.wsId, mailbox.id)
+
+  // AC 6: drafts waiting for a human are neither sent nor silently discarded —
+  // the caller is told how many and has to say yes. Only drafts force this:
+  // a confirmation nobody can ever avoid is one nobody reads.
+  const confirmed = req.body?.confirm === true || String(req.query?.confirm || '') === 'true'
+  if (waiting.length && !confirmed) {
+    return res.status(409).json({
+      ok: false,
+      errorCode: 'CONFIRM_REQUIRED',
+      draftsWaiting: waiting.length,
+      campaigns: attached.map((c) => ({ id: c.id, name: c.name, status: c.status })),
+      error: `${waiting.length} email${waiting.length === 1 ? ' is' : 's are'} waiting for your OK on ${mailbox.email}`
+        + ' — re-send with confirm: true and they will be cancelled rather than sent',
+    })
+  }
+
+  const held = []
+  db.transaction(() => {
+    // Drafts first: cancelled, with a reason on the lead, never sent.
+    for (const d of waiting) {
+      db.prepare("UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?")
+        .run(`mailbox removed: ${mailbox.email}`, d.id)
+    }
+    // Detach: the campaign's own sender and every pooled attachment.
+    db.prepare('UPDATE campaigns SET mailbox_id = NULL WHERE mailbox_id = ?').run(mailbox.id)
+    db.prepare('DELETE FROM campaign_mailboxes WHERE mailbox_id = ?').run(mailbox.id)
+    db.prepare('UPDATE campaign_leads SET mailbox_id = NULL WHERE mailbox_id = ?').run(mailbox.id)
+
+    // AC 2: a campaign left with nothing to send from holds, with a stated
+    // reason, rather than failing lead by lead on the next tick.
+    for (const c of attached) {
+      const left = db.prepare(
+        `SELECT COUNT(*) n FROM mailboxes
+          WHERE user_id = ? AND deleted_at IS NULL
+            AND (id = (SELECT mailbox_id FROM campaigns WHERE id = ?)
+                 OR id IN (SELECT mailbox_id FROM campaign_mailboxes WHERE campaign_id = ?))`
+      ).get(req.wsId, c.id, c.id).n
+      if (left) continue
+      held.push(c)
+      if (c.status === 'running') {
+        db.prepare(
+          `UPDATE campaigns SET status = 'paused', status_reason = 'no mailbox attached',
+                                status_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+        ).run(c.id)
+      }
+    }
+
+    // The mark, plus warm-up off with the recorded reason (AC 3), plus the
+    // credential columns zeroed so a soft-deleted row holds nothing usable.
+    db.prepare(
+      `UPDATE mailboxes
+          SET deleted_at = datetime('now'), deleted_reason = 'deleted by user action',
+              warmup_enabled = 0, warmup_auto_adjust = 0,
+              is_suspended = 1, suspended_at = datetime('now'),
+              suspended_reason = 'deleted by user action',
+              status = 'disconnected', next_send_at = 0,
+              access_token = '', refresh_token = '', token_expiry = 0
+        WHERE id = ?`
+    ).run(mailbox.id)
+  })()
+
+  // Revoking upstream is best-effort and deliberately outside the transaction:
+  // the local credential is already gone, and Google being unreachable must not
+  // roll back a removal the user asked for.
+  if (mailbox.provider === 'gmail' && googleConfigured() && (mailbox.refresh_token || mailbox.access_token)) {
+    fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: mailbox.refresh_token || mailbox.access_token }).toString(),
+    }).catch(() => { /* the stored copy is already zeroed; nothing local depends on this */ })
+  }
+
+  logEvent(req.wsId, {
+    type: 'mailbox_removed',
+    detail: `${mailbox.email} removed by ${req.user?.email || 'owner'}`
+      + ` — ${attached.length} campaign(s) detached, ${waiting.length} draft(s) cancelled`
+      + (held.length ? `, ${held.map((c) => `"${c.name}"`).join(', ')} left with no mailbox` : ''),
+  })
+  res.json({
+    ok: true,
+    message: 'Email account deleted successfully!',
+    emailAccountId: mailbox.id,
+    campaignsDetached: attached.length,
+    draftsCancelled: waiting.length,
+    campaignsHolding: held.map((c) => ({ id: c.id, name: c.name })),
+  })
 })
 
 // ---- campaigns --------------------------------------------------------------
@@ -257,7 +401,7 @@ api.get('/campaigns/:id', (req, res) => {
     "SELECT id, name, target, description FROM goals WHERE campaign_id = ? AND status != 'archived'"
   ).get(c.id)
 
-  const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(c.mailbox_id) : null
+  const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(c.mailbox_id) : null
 
   res.json({
     ...campaignSummary(c), mermaid: c.mermaid,
@@ -350,7 +494,7 @@ api.post('/campaigns/:id/preview-messages', async (req, res) => {
   // Preview as a real attached lead when asked, so the personalisation is real.
   const subject = previewRecipient(req, res, c)
   if (!subject) return
-  const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(c.mailbox_id) : null
+  const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(c.mailbox_id) : null
 
   // Streamed as newline-delimited JSON. Every sample is its own model call, so
   // holding all of them back until the slowest one lands wastes the wait — the
@@ -427,7 +571,7 @@ api.post('/campaigns/:id/preview-messages/:nodeId', async (req, res) => {
 
   const subject = previewRecipient(req, res, c)
   if (!subject) return
-  const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(c.mailbox_id) : null
+  const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(c.mailbox_id) : null
 
   // The samples already on screen above this one, so the rewrite answers what
   // the reader can see rather than a thread only the server remembers.
@@ -464,7 +608,7 @@ api.put('/campaigns/:id', (req, res) => {
   if (!c) return
   const { name, mermaid, mailboxId, status, approvedCopy: copy } = req.body || {}
   if (mailboxId !== undefined && mailboxId !== null) {
-    const mb = db.prepare('SELECT id FROM mailboxes WHERE id = ? AND user_id = ?').get(mailboxId, req.wsId)
+    const mb = db.prepare('SELECT id FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(mailboxId, req.wsId)
     if (!mb) return res.status(400).json({ error: 'Mailbox not found' })
   }
   if (status !== undefined) {
@@ -551,11 +695,39 @@ api.post('/campaigns/:id/leads', (req, res) => {
   res.json({ added })
 })
 
+// Removing one lead from a campaign. The bulk form of this
+// (`POST /api/campaigns/:id/leads/remove`, server/parity/campaigns.js) already
+// behaved correctly and this now matches it, because two routes that mean the
+// same thing must do the same thing.
+//
+// Two things were wrong here. It deleted the pairing and left any pending draft
+// standing in Needs your OK — an email addressed to somebody who is no longer in
+// the campaign, one click away from being sent, and no screen would have said
+// why. And it answered `200 {"removed":0}` for a lead that was never in the
+// campaign, which reads as success for work that did not happen; a lead that is
+// not there is a 404, exactly as it is on retry, pause and complete.
+//
+// The draft dies inside the same transaction as the pairing, so no tick and no
+// approval can find one without the other. Declined rather than deleted: the
+// queue stops offering it, and the trail keeps the email that was written.
 api.delete('/campaigns/:id/leads/:leadId', (req, res) => {
   const c = getCampaign(req, res)
   if (!c) return
-  const info = db.prepare('DELETE FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').run(c.id, req.params.leadId)
-  res.json({ removed: info.changes })
+  const cl = db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(c.id, req.params.leadId)
+  if (!cl) return res.status(404).json({ error: 'Lead is not in this campaign' })
+  const draftsCancelled = db.transaction(() => {
+    const drafts = db.prepare(
+      "UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now') WHERE campaign_id = ? AND lead_id = ? AND status IN ('pending','approved')"
+    ).run(`${req.user?.email || 'a workspace member'} (lead removed from campaign)`, c.id, cl.lead_id).changes
+    db.prepare('DELETE FROM campaign_leads WHERE id = ?').run(cl.id)
+    return drafts
+  })()
+  logEvent(req.wsId, {
+    campaignId: c.id, leadId: cl.lead_id, type: 'campaign_lead_removed',
+    detail: `${req.user?.email || 'a workspace member'} removed the lead from "${c.name}"`
+      + (draftsCancelled ? `; ${draftsCancelled} queued email(s) withdrawn` : ''),
+  })
+  res.json({ ok: true, removed: 1, draftsCancelled, node: cl.node_id || '' })
 })
 
 // Retry an errored/stuck lead from the start of its current node.
@@ -648,7 +820,7 @@ api.post('/drafts/:id/approve', async (req, res) => {
   // Approving means "yes, send this" — the sending rhythm still decides the
   // minute, so say which it will be rather than letting it look stuck.
   const after = db.prepare('SELECT status FROM drafts WHERE id = ?').get(draft.id)
-  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(campaign.mailbox_id)
+  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
   res.json({
     ok: true,
     sent: after?.status === 'sent',
@@ -857,7 +1029,7 @@ api.post('/inbox/thread/:threadId/reply', async (req, res) => {
   const anchor = rows.find((m) => m.campaign_id && m.lead_id) || rows[0]
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(anchor.campaign_id)
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(anchor.lead_id)
-  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(anchor.mailbox_id)
+  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(anchor.mailbox_id)
   if (!campaign || !lead || !mailbox) return res.status(400).json({ error: 'Thread is missing campaign context' })
   const lastSubject = rows[rows.length - 1].subject || ''
   const subject = lastSubject.startsWith('Re:') ? lastSubject : `Re: ${lastSubject}`
@@ -944,7 +1116,7 @@ api.post('/goals', async (req, res) => {
     }
     steps.push(`Qualified ${leads.length} leads, attached ${attached} with fit 60 or higher`)
     const mailbox = db.prepare(
-      "SELECT * FROM mailboxes WHERE user_id = ? AND status = 'connected' ORDER BY CASE provider WHEN 'gmail' THEN 0 ELSE 1 END, id LIMIT 1"
+      "SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND status = 'connected' ORDER BY CASE provider WHEN 'gmail' THEN 0 ELSE 1 END, id LIMIT 1"
     ).get(req.wsId)
     if (mailbox && attached > 0) {
       db.prepare("UPDATE campaigns SET mailbox_id = ?, status = 'running', updated_at = datetime('now') WHERE id = ?").run(mailbox.id, campaignId)
@@ -1114,7 +1286,7 @@ api.get('/analytics', (req, res) => {
      GROUP BY day ORDER BY day`
   ).all(uid)
 
-  const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY id').all(uid).map((m) => ({
+  const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id').all(uid).map((m) => ({
     id: m.id, email: m.email, provider: m.provider, status: m.status,
     dailyLimit: m.daily_limit, remainingToday: remainingQuota(m),
     sentTotal: db.prepare("SELECT COUNT(*) n FROM messages WHERE mailbox_id = ? AND direction = 'out'").get(m.id).n,
@@ -1250,7 +1422,7 @@ api.get('/monitoring', (req, res) => {
     auth0Configured() ? 'ok' : 'warn',
     auth0Configured() ? `Auth0 connected${devLoginEnabled() ? ' (dev login also enabled)' : ''}` : 'Dev login only — configure Auth0 for production sign-in')
 
-  const mailboxRows = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY id').all(uid)
+  const mailboxRows = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id').all(uid)
   const gmailBoxes = mailboxRows.filter((m) => m.provider === 'gmail')
   const brokenBoxes = mailboxRows.filter((m) => m.status === 'error' || m.last_error)
   const expiredTokens = gmailBoxes.filter((m) => m.token_expiry && m.token_expiry < now && !m.refresh_token)

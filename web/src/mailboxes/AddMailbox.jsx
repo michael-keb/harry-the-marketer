@@ -21,7 +21,7 @@ const PRESETS = {
 // A 422 may name either spelling depending on which one was sent.
 const err2 = (err, a, b) => fieldError(err, a) || fieldError(err, b)
 
-export default function AddMailbox({ googleConfigured, onClose, onAdded }) {
+export default function AddMailbox({ googleConfigured, microsoftConfigured, onClose, onAdded }) {
   const [path, setPath] = useState('gmail')
   const [announcement, say] = useAnnounce()
 
@@ -29,9 +29,10 @@ export default function AddMailbox({ googleConfigured, onClose, onAdded }) {
     <Modal title="Add a mailbox" onClose={onClose} wide>
       <LiveRegion message={announcement} />
 
-      <div className="flex gap-1 border-b border-slate-200 mb-4" role="tablist" aria-label="How to add a mailbox">
+      <div className="flex gap-1 border-b border-slate-200 mb-4 overflow-x-auto" role="tablist" aria-label="How to add a mailbox">
         {[
           ['gmail', 'Connect Gmail'],
+          ['outlook', 'Connect Outlook'],
           ['sandbox', 'Sandbox'],
           ['smtp', 'SMTP details'],
         ].map(([id, label]) => (
@@ -55,6 +56,7 @@ export default function AddMailbox({ googleConfigured, onClose, onAdded }) {
           is announced as one rather than as loose content below a button. */}
       <div role="tabpanel" id={`add-mailbox-panel-${path}`} aria-labelledby={`add-mailbox-tab-${path}`}>
         {path === 'gmail' && <GmailPath googleConfigured={googleConfigured} say={say} />}
+        {path === 'outlook' && <OutlookPath microsoftConfigured={microsoftConfigured} say={say} />}
         {path === 'sandbox' && <SandboxPath onAdded={onAdded} onClose={onClose} say={say} />}
         {path === 'smtp' && <SmtpPath say={say} />}
       </div>
@@ -117,7 +119,13 @@ function GmailPath({ googleConfigured, say }) {
       </Field>
 
       {result && (
-        <p className="text-xs text-slate-700 rounded-lg border border-slate-200 bg-white/40 px-3 py-2">{result.message}</p>
+        <p className={`text-xs rounded-lg border px-3 py-2 ${
+          result.next === 'already_connected'
+            ? 'text-amber-800 border-amber-200 bg-amber-50'
+            : 'text-slate-700 border-slate-200 bg-white/40'
+        }`}>
+          {result.message}
+        </p>
       )}
       {error && !error.payload?.field && (
         <p role="alert" className="text-xs text-red-700">{error.message}</p>
@@ -125,7 +133,95 @@ function GmailPath({ googleConfigured, say }) {
 
       <div className="flex flex-wrap justify-end gap-2">
         <button type="submit" className="btn-ghost" disabled={busy}>{busy ? 'Checking…' : 'Check this address'}</button>
-        <a className="btn-primary" href="/api/google/connect">Continue to Google</a>
+        <a
+          className="btn-primary"
+          href={email.trim()
+            ? `/api/google/connect?email=${encodeURIComponent(email.trim().toLowerCase())}`
+            : '/api/google/connect'}
+        >
+          Continue to Google
+        </a>
+      </div>
+    </form>
+  )
+}
+
+function OutlookPath({ microsoftConfigured, say }) {
+  const [email, setEmail] = useState('')
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const check = async (e) => {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    setResult(null)
+    try {
+      const res = await api.post('/api/mailboxes', { type: 'OUTLOOK', fromEmail: email })
+      setResult(res)
+      say(res.message)
+    } catch (err) {
+      setError(err)
+      say(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!microsoftConfigured) {
+    return (
+      <div className="card border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="status">
+        <p className="font-medium">Microsoft OAuth is not connected.</p>
+        <p className="mt-0.5 text-amber-700">
+          Set <span className="font-mono">MICROSOFT_CLIENT_ID</span> and <span className="font-mono">MICROSOFT_CLIENT_SECRET</span>{' '}
+          from an Azure app registration. Redirect URI:{' '}
+          <span className="font-mono">{window.location.origin}/api/microsoft/callback</span>
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <form onSubmit={check} className="space-y-3">
+      <p className="text-xs text-slate-600">
+        Consent happens on Microsoft&apos;s screen. Works with Outlook.com and Microsoft 365 work accounts.
+      </p>
+      <Field
+        id="outlook-address"
+        label="Outlook address (optional)"
+        help="Only used to check if this address is already connected."
+        error={fieldError(error, 'fromEmail')}
+      >
+        {({ id, describedBy }) => (
+          <input id={id} type="email" className="input" value={email} aria-describedby={describedBy}
+            autoComplete="off" placeholder="you@company.com" onChange={(e) => setEmail(e.target.value)} />
+        )}
+      </Field>
+
+      {result && (
+        <p className={`text-xs rounded-lg border px-3 py-2 ${
+          result.next === 'already_connected'
+            ? 'text-amber-800 border-amber-200 bg-amber-50'
+            : 'text-slate-700 border-slate-200 bg-white/40'
+        }`}>
+          {result.message}
+        </p>
+      )}
+      {error && !error.payload?.field && (
+        <p role="alert" className="text-xs text-red-700">{error.message}</p>
+      )}
+
+      <div className="flex flex-wrap justify-end gap-2">
+        <button type="submit" className="btn-ghost" disabled={busy}>{busy ? 'Checking…' : 'Check this address'}</button>
+        <a
+          className="btn-primary"
+          href={email.trim()
+            ? `/api/microsoft/connect?email=${encodeURIComponent(email.trim().toLowerCase())}`
+            : '/api/microsoft/connect'}
+        >
+          Continue to Microsoft
+        </a>
       </div>
     </form>
   )

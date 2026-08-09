@@ -165,12 +165,21 @@ const WS_COLUMN = {
   drafts: 'user_id',
 }
 
+// Tables where a row can be soft-deleted and must then be indistinguishable
+// from one that never existed. Deliberately not every table with a `deleted_at`
+// column: campaigns and lead lists have restore routes that need to load the
+// deleted row, and mailboxes have none — a removed mailbox is gone for good
+// (Docs/email-accounts/delete.md §4: "not reversible from the UI").
+const SOFT_DELETED = new Set(['mailboxes'])
+
+const isGone = (table, row) => SOFT_DELETED.has(table) && String(row?.deleted_at || '') !== ''
+
 export function owned(table, id, wsId, what = table) {
   const col = WS_COLUMN[table] || 'workspace_id'
   const n = Number(id)
   if (!Number.isInteger(n) || n <= 0) throw notFound(what)
   const row = db.prepare(`SELECT * FROM ${table} WHERE id = ? AND ${col} = ?`).get(n, wsId)
-  if (!row) throw notFound(what)
+  if (!row || isGone(table, row)) throw notFound(what)
   return row
 }
 
@@ -182,7 +191,7 @@ export function ownedAll(table, ids, wsId, what = table) {
   const rows = []
   for (const id of ids) {
     const row = db.prepare(`SELECT * FROM ${table} WHERE id = ? AND ${col} = ?`).get(id, wsId)
-    if (!row) throw new HttpError(404, { error: 'not_found', message: `No such ${what}: ${id}`, id })
+    if (!row || isGone(table, row)) throw new HttpError(404, { error: 'not_found', message: `No such ${what}: ${id}`, id })
     rows.push(row)
   }
   return rows

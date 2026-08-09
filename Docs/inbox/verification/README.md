@@ -16,6 +16,22 @@ SmartLead ships ten near-identical inbox screens; this is one list with a state 
 
 ![Inbox — ten states, one list — desktop](./inbox-states.png)
 
+### Inbox — the whole email trail beside the list
+
+Three panes: folders, a scannable list, and a reading pane holding every message in the conversation oldest-first. Older messages collapse behind an expander; the newest stays open.
+
+**1 folders and list**
+
+![Inbox — the whole email trail beside the list — 1 folders and list](./inbox-email-trail-1-folders-and-list.png)
+
+**2 conversation open**
+
+![Inbox — the whole email trail beside the list — 2 conversation open](./inbox-email-trail-2-conversation-open.png)
+
+**3 trail expanded**
+
+![Inbox — the whole email trail beside the list — 3 trail expanded](./inbox-email-trail-3-trail-expanded.png)
+
 ## What the specs in this category are judged at
 
 | Spec | Verdict | Notes |

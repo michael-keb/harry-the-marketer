@@ -136,7 +136,7 @@ export function parseBlockList(raw, field = 'domain_block_list') {
 // workspace's own connected mailboxes are refused with an explanation rather
 // than stored (domain-block-list §2, last acceptance criterion).
 function ownSendingIdentities(wsId) {
-  const rows = db.prepare('SELECT email FROM mailboxes WHERE user_id = ?').all(wsId)
+  const rows = db.prepare('SELECT email FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL').all(wsId)
   const addresses = new Set()
   const domains = new Set()
   for (const row of rows) {
@@ -148,17 +148,25 @@ function ownSendingIdentities(wsId) {
   return { addresses, domains }
 }
 
+// Both spellings, deliberately. The web app reads the camelCase names; the
+// spec's acceptance criterion names `email_or_domain`, `created_at` and
+// `client_id`, and an integration ported from the source API asks for those.
+// Carrying both costs four keys and means neither reader has to be wrong.
 function shape(row) {
   return {
     id: row.id,
     value: row.value,
-    emailOrDomain: row.value,        // the source API's `email_or_domain`
+    emailOrDomain: row.value,
+    email_or_domain: row.value,
     isDomain: Boolean(row.is_domain),
+    is_domain: Boolean(row.is_domain),
     source: row.source,
     sourceLabel: SOURCES[row.source] || row.source,
     createdBy: row.created_by,
     createdAt: row.created_at,
+    created_at: row.created_at,
     clientId: null,                  // Harry has no per-client block lists yet
+    client_id: null,
   }
 }
 
@@ -285,7 +293,7 @@ function resolveMailbox(wsId, o) {
   if (!address) {
     throw invalid('fromEmail', 'either fromEmail or fromMailboxId must name the mailbox to send from')
   }
-  const box = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND lower(trim(email)) = ?').get(wsId, address)
+  const box = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND lower(trim(email)) = ?').get(wsId, address)
   if (!box || box.status === 'disconnected' || box.is_suspended) throw notFound('mailbox')
   return box
 }

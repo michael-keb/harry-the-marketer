@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Harry The Marketer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+  <script src="https://cdn.auth0.com/js/lock/12.5.1/lock.min.js"></script>
+  <style>
+    :root {
+      --ink: #0b1622;
+      --ink-soft: #1e293b;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --paper: #ffffff;
+      --wash: #f8fafc;
+      --accent: #0f9d6e;
+      --accent-deep: #0b7a55;
+      --accent-soft: #e8f8f1;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      font-family: "DM Sans", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #e8f8f1 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #eef2ff 0%, transparent 45%),
+        var(--wash);
+      color: var(--ink);
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px 40px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+      text-decoration: none;
+      color: inherit;
+    }
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      flex-shrink: 0;
+    }
+    .brand-name {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+    .brand-name span { color: var(--accent-deep); }
+
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 18px 50px rgba(15, 23, 42, 0.06);
+      overflow: hidden;
+    }
+
+    .intro {
+      padding: 28px 28px 8px;
+      text-align: center;
+    }
+    .intro h1 {
+      margin: 0;
+      font-size: 1.55rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--ink);
+      text-wrap: balance;
+    }
+    .intro p {
+      margin: 10px 0 0;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      color: var(--muted);
+      text-wrap: pretty;
+    }
+
+    #lock-container {
+      padding: 8px 16px 8px;
+      min-height: 280px;
+    }
+
+    /* Soften Lock chrome to match Harry */
+    .auth0-lock.auth0-lock .auth0-lock-header {
+      display: none !important;
+    }
+    .auth0-lock.auth0-lock .auth0-lock-widget {
+      box-shadow: none !important;
+      margin: 0 auto !important;
+    }
+    .auth0-lock.auth0-lock .auth0-lock-content {
+      padding-top: 8px !important;
+    }
+    .auth0-lock.auth0-lock .auth0-lock-form {
+      padding-left: 12px !important;
+      padding-right: 12px !important;
+    }
+    .auth0-lock.auth0-lock .auth0-lock-submit {
+      background: var(--accent-deep) !important;
+      border-radius: 10px !important;
+      font-family: "DM Sans", system-ui, sans-serif !important;
+      font-weight: 600 !important;
+    }
+    .auth0-lock.auth0-lock .auth0-lock-submit:hover {
+      background: var(--accent) !important;
+    }
+    .auth0-lock.auth0-lock .auth0-lock-alternative a,
+    .auth0-lock.auth0-lock .auth0-lock-tabs-container a {
+      color: var(--accent-deep) !important;
+    }
+    .auth0-lock.auth0-lock input {
+      border-radius: 10px !important;
+      font-family: "DM Sans", system-ui, sans-serif !important;
+    }
+
+    .footer {
+      max-width: 420px;
+      width: 100%;
+      margin-top: 18px;
+      text-align: center;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+    .footer a {
+      color: var(--accent-deep);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <a class="brand" href="https://harrythemarketer.com/" rel="noopener">
+      <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect width="32" height="32" rx="7" fill="#0b1622" stroke="#23303e"/>
+        <path d="M9.5 7.5v17M22.5 7.5v17M9.5 16h4.5" stroke="#2fd79b" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M14 16l8.5-5M14 16l8.5 5" stroke="#0f9d6e" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div class="brand-name">Harry The <span>Marketer</span></div>
+    </a>
+
+    <div class="card">
+      <div class="intro">
+        <h1 id="headline">Welcome back</h1>
+        <p id="lede">Sign in to your workspace — your campaigns have been ticking away without you.</p>
+      </div>
+      <div id="lock-container"></div>
+    </div>
+
+    <p class="footer">
+      By continuing you agree to the
+      <a href="https://harrythemarketer.com/terms">Terms</a>
+      and
+      <a href="https://harrythemarketer.com/privacy">Privacy Policy</a>.
+    </p>
+  </div>
+
+  <script>
+    (function () {
+      var config = JSON.parse(decodeURIComponent(escape(window.atob('@@config@@'))));
+      var params = Object.assign({}, config.internalOptions || {});
+      var extras = config.extraParams || {};
+      var isSignup = params.screen_hint === 'signup' || extras.screen_hint === 'signup';
+
+      document.getElementById('headline').textContent = isSignup ? 'Create your account' : 'Welcome back';
+      document.getElementById('lede').textContent = isSignup
+        ? 'Your trial starts now. A sandbox mailbox and a campaign you can run end to end today.'
+        : 'Sign in to your workspace — your campaigns have been ticking away without you.';
+
+      var lock = new Auth0Lock(config.clientID, config.auth0Domain, {
+        container: 'lock-container',
+        closable: false,
+        autoclose: false,
+        autofocus: true,
+        allowLogin: true,
+        allowSignUp: true,
+        allowForgotPassword: true,
+        initialScreen: isSignup ? 'signUp' : 'login',
+        loginAfterSignUp: true,
+        socialButtonStyle: 'big',
+        avatar: null,
+        rememberLastLogin: !config.prompt,
+        languageDictionary: {
+          title: '',
+          emailInputPlaceholder: 'you@company.com',
+          passwordInputPlaceholder: 'Password',
+          forgotPasswordAction: 'Forgot password?',
+          loginSubmitLabel: 'Sign in',
+          signUpSubmitLabel: 'Create account',
+          signUpLabel: 'Sign up',
+          loginLabel: 'Sign in',
+          signUpTitle: '',
+          loginWithLabel: 'Continue with %s',
+          databaseEnterpriseAlternativeLoginInstructions: 'or',
+          databaseAlternativeSignUpInstructions: 'or',
+          signUpTerms: 'No card required to start.'
+        },
+        theme: {
+          primaryColor: '#0b7a55',
+          logo: '',
+          labeledSubmitButton: true
+        },
+        auth: {
+          redirectUrl: config.callbackURL,
+          responseType: (config.internalOptions && config.internalOptions.response_type) ||
+            (config.callbackOnLocationHash ? 'token' : 'code'),
+          params: params
+        },
+        configurationBaseUrl: config.clientConfigurationBaseUrl,
+        overrides: {
+          __tenant: config.auth0Tenant,
+          __token_issuer: config.authorizationServer.issuer
+        },
+        assetsUrl: config.assetsUrl,
+        allowedConnections: config.connection ? [config.connection] : null
+      });
+
+      lock.show();
+    })();
+  </script>
+</body>
+</html>

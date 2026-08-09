@@ -398,7 +398,11 @@ test('the CSV export carries the right headers, a BOM, RFC 4180 quoting and the 
 
   const text = await csv(res)
   assert.equal(text.charCodeAt(0), 0xfeff)                      // byte order mark
-  assert.equal(csvRows(text)[0], 'id,email,firstName,lastName,company,title,phone,website,linkedin,location,status,stage,campaigns,customFields,unsubscribedAt,createdAt')
+  // The header is a contract with whatever reads the file. Docs/leads/export.md
+  // §2's engagement columns are appended, so every existing column keeps its
+  // index; `website` is the company URL (`company_url` is its other documented
+  // spelling for the same `leads.website` column) and is not repeated.
+  assert.equal(csvRows(text)[0], 'id,email,firstName,lastName,company,title,phone,website,linkedin,location,status,stage,campaigns,customFields,unsubscribedAt,createdAt,lastStepSent,openCount,clickCount,replyCount')
   // A comma and an embedded quote are quoted and the quote is doubled.
   assert.ok(text.includes('"Ann, ""Annie"""'))
   assert.ok(text.includes('"Comma, Inc"'))

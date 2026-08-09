@@ -5,6 +5,7 @@ import { env, auth0Configured, devLoginEnabled, isProduction } from './env.js'
 import { rateLimit } from './security.js'
 import { composeBusinessContext, parseProfile } from '../shared/profile.js'
 import { isSupportedWebhook } from './alerts.js'
+import { billingStatus } from './billing.js'
 
 const SECRET = sessionSecret()
 const COOKIE = 'htm_session'
@@ -81,14 +82,27 @@ export function workspace(req, res, next) {
 }
 
 function upsertUser({ sub, email, name = '', picture = '' }) {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const canonical = normalizedEmail
+    ? db.prepare('SELECT * FROM users WHERE lower(email) = ? ORDER BY id LIMIT 1').get(normalizedEmail)
+    : null
+
   const existing = db.prepare('SELECT * FROM users WHERE sub = ?').get(sub)
   if (existing) {
-    db.prepare('UPDATE users SET email = ?, name = ?, picture = ? WHERE id = ?').run(email, name || existing.name, picture || existing.picture, existing.id)
-    return db.prepare('SELECT * FROM users WHERE id = ?').get(existing.id)
+    const userId = canonical?.id ?? existing.id
+    db.prepare('UPDATE users SET email = ?, name = ?, picture = ? WHERE id = ?')
+      .run(normalizedEmail || existing.email, name || existing.name, picture || existing.picture, userId)
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(userId)
   }
-  const info = db.prepare('INSERT INTO users (sub, email, name, picture) VALUES (?, ?, ?, ?)').run(sub, email, name, picture)
+  if (canonical) {
+    db.prepare('UPDATE users SET name = ?, picture = ? WHERE id = ?')
+      .run(name || canonical.name, picture || canonical.picture, canonical.id)
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(canonical.id)
+  }
+  const info = db.prepare('INSERT INTO users (sub, email, name, picture) VALUES (?, ?, ?, ?)')
+    .run(sub, normalizedEmail || email, name, picture)
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid)
-  logEvent(user.id, { type: 'signup', detail: email })
+  logEvent(user.id, { type: 'signup', detail: normalizedEmail || email })
   return user
 }
 
@@ -123,6 +137,7 @@ authRouter.get('/api/auth/me', (req, res) => {
     consentTerms: owner?.consent_terms ?? '',
     sheet: { id: owner?.sheet_id ?? '', url: owner?.sheet_url ?? '', syncedAt: owner?.sheet_synced_at ?? '' },
     workspace: { role: ws.role, ownerEmail: ws.ownerEmail, shared: ws.wsId !== user.id },
+    billing: billingStatus(owner || user),
   })
 })
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Harry the Marketer \u2014 lead-generation platform where campaign playbooks are Mermaid diagrams executed by an AI agent against the live email chain.",
+  "description": "Harry the Marketer — lead-generation platform where campaign playbooks are Mermaid diagrams executed by an AI agent against the live email chain.",
   "scripts": {
     "dev": "concurrently -n api,web -c blue,green \"node --watch server/index.js\" \"vite --config web/vite.config.js\"",
     "dev:api": "node --watch server/index.js",
@@ -15,9 +15,12 @@
     "test:web": "vitest run --config web/vitest.config.js",
     "routes": "node scripts/routes.mjs",
     "test:e2e": "node scripts/e2e-parity.mjs",
+    "smoke:prod": "node scripts/production-smoke.mjs",
+    "backup:db": "node scripts/backup-db.mjs",
     "matrix": "node scripts/requirements-matrix.mjs",
     "gallery": "node scripts/gallery.mjs",
-    "seed:demo": "node scripts/seed-demo.mjs"
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "check:layout": "node scripts/layout-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",

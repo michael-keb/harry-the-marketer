@@ -126,7 +126,15 @@ export function FolderRail({ folder, onChange, counts = {}, approvals, showUntra
                 aria-current={on ? 'true' : undefined}
                 title={f.hint}
                 onClick={() => onChange(f.id)}
-                className={`flex w-full cursor-pointer items-center gap-2 rounded-lg text-left transition-colors ${
+                // `relative` is load-bearing, not decoration. `sr-only` is
+                // `position: absolute`, and an absolutely-positioned element is
+                // only clipped by an ancestor's `overflow` if that ancestor is
+                // itself positioned. Without this the hidden count labels inside
+                // the horizontally-scrolled strip took their coordinates from the
+                // page, sat ~500px off the right edge, and gave the whole
+                // document a sideways scrollbar on tablet. Anchoring each label
+                // to its own button keeps it where it belongs.
+                className={`relative flex w-full cursor-pointer items-center gap-2 rounded-lg text-left transition-colors ${
                   strip ? 'shrink-0 px-3 py-1.5 text-sm' : 'px-2.5 py-1.5 text-sm'
                 } ${
                   on

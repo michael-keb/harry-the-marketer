@@ -15,9 +15,19 @@ import Leads from './pages/Leads.jsx'
 import Campaigns from './pages/Campaigns.jsx'
 import CampaignDetail from './pages/CampaignDetail.jsx'
 import Inbox from './pages/Inbox.jsx'
-import Mailboxes from './pages/Mailboxes.jsx'
+import Connections from './pages/Connections.jsx'
 import Monitoring from './pages/Monitoring.jsx'
 import Settings from './pages/Settings.jsx'
+
+// Old /app/mailboxes bookmarks and OAuth return URLs keep working — query
+// string (connected=, error=, health=) is preserved onto Connections → Email.
+function MailboxesRedirect() {
+  const { search } = useLocation()
+  const params = new URLSearchParams(search)
+  if (!params.get('area')) params.set('area', 'email')
+  const q = params.toString()
+  return <Navigate to={`/app/connections${q ? `?${q}` : ''}`} replace />
+}
 
 const NAV = [
   { to: '/app', label: 'Dashboard', icon: 'dashboard' },
@@ -27,7 +37,7 @@ const NAV = [
   { to: '/app/leads', label: 'Leads', icon: 'leads' },
   { to: '/app/reports', label: 'Reports', icon: 'reports' },
   { to: '/app/monitoring', label: 'Monitoring', icon: 'monitor' },
-  { to: '/app/mailboxes', label: 'Mailboxes', icon: 'mailboxes' },
+  { to: '/app/connections', label: 'Connections', icon: 'connections' },
   { to: '/app/settings', label: 'Settings', icon: 'settings' },
 ]
 
@@ -205,7 +215,8 @@ export default function App({ user, onUserChanged }) {
             <Route path="leads" element={<Leads />} />
             <Route path="reports" element={<Reports />} />
             <Route path="monitoring" element={<Monitoring />} />
-            <Route path="mailboxes" element={<Mailboxes />} />
+            <Route path="connections" element={<Connections />} />
+            <Route path="mailboxes" element={<MailboxesRedirect />} />
             {/* Settings is seven areas under one item — the splat is which one,
                 so every area has an address a link can point at. */}
             <Route path="settings/*" element={<Settings user={user} onSaved={onUserChanged} />} />

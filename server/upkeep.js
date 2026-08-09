@@ -26,6 +26,7 @@ import { db, logEvent } from './db.js'
 import { recordTelemetry } from './telemetry.js'
 import { notify } from './alerts.js'
 import { gmailRecentInbound } from './google.js'
+import { outlookRecentInbound } from './microsoft.js'
 import { sendEmail, SuppressedError } from './mailer.js'
 import { canSendNow } from './pacing.js'
 import { openDueRuns, dispatchSeedSends } from './deliverability-runs.js'
@@ -73,7 +74,7 @@ async function dispatchScheduled() {
 
     const campaign = msg.campaign_id ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(msg.campaign_id) : null
     const lead = msg.lead_id ? db.prepare('SELECT * FROM leads WHERE id = ?').get(msg.lead_id) : null
-    const mailbox = msg.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(msg.mailbox_id) : null
+    const mailbox = msg.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(msg.mailbox_id) : null
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(msg.user_id)
 
     if (!campaign || !lead || !mailbox || !user) {
@@ -89,11 +90,21 @@ async function dispatchScheduled() {
     }
 
     try {
+      // The copied recipients ride along. The scheduling route stores them on
+      // the queued row explicitly "so they survive the wait", and then this
+      // call dropped them: `sendEmail` defaults `cc` and `bcc` to empty, so a
+      // reply scheduled for tomorrow with two colleagues copied went out to the
+      // lead alone. Exactly the defect already fixed on the immediate path,
+      // one layer down — and invisible, because the test for it asserted the
+      // queued row rather than the delivered one.
+      const copies = (value) => String(value || '').split(',').map((a) => a.trim()).filter(Boolean)
       await sendEmail({
         mailbox, user, campaign, lead,
         nodeId: msg.node_id || '',
         subject: msg.subject,
         body: msg.body,
+        cc: copies(msg.cc_emails),
+        bcc: copies(msg.bcc_emails),
       })
       // `sendEmail` writes its own `messages` row — the real one, with the
       // provider id, thread and tracking token. Keeping this one as well would
@@ -308,7 +319,7 @@ async function rollUpWarmupStats() {
 async function adjustWarmup() {
   const mailboxes = db.prepare(
     `SELECT * FROM mailboxes
-      WHERE warmup_enabled = 1 AND warmup_auto_adjust = 1 AND is_suspended = 0`
+      WHERE deleted_at IS NULL AND warmup_enabled = 1 AND warmup_auto_adjust = 1 AND is_suspended = 0`
   ).all()
   if (!mailboxes.length) return {}
 
@@ -347,21 +358,102 @@ async function adjustWarmup() {
 
 // ---- untracked replies -------------------------------------------------------
 
-// Mail that arrived in a connected mailbox and matches no lead. The inbox has a
-// whole surface for triaging these and, until now, nothing ever put one there.
-// A reply to a colleague, a bounce notice, a cold approach from someone else —
-// none of it should vanish, and none of it should be guessed into a campaign.
+// Mail that arrived in a connected mailbox. Prefer attaching it to the campaign
+// conversation it belongs to; only genuine orphans go to the untracked queue.
+//
+// Known-lead replies used to be skipped here on the assumption that the
+// per-thread engine sync would catch them. That assumption fails when the send
+// went from a rotated/pinned mailbox (sync looked at the wrong account) or the
+// lead is no longer in `waiting` — and the reply vanished from Harry entirely.
+// Exported so tests can drive the matcher without a live Gmail call.
+export function ingestRecentInbound(mailbox, msg) {
+  if (!msg?.providerMessageId) return null
+
+  const known = db.prepare('SELECT 1 FROM messages WHERE provider_message_id = ?').get(msg.providerMessageId)
+  if (known) return 'known'
+
+  const seen = db.prepare('SELECT 1 FROM unmatched_messages WHERE provider_message_id = ?').get(msg.providerMessageId)
+  if (seen) return 'seen'
+
+  const from = String(msg.fromEmail || '').toLowerCase().trim()
+  const lead = from
+    ? db.prepare('SELECT * FROM leads WHERE user_id = ? AND lower(trim(email)) = ?').get(mailbox.user_id, from)
+    : null
+
+  if (lead) {
+    // Prefer the enrolment that already owns this provider thread.
+    let cl = msg.threadId
+      ? db.prepare(
+          `SELECT cl.* FROM campaign_leads cl
+             JOIN campaigns c ON c.id = cl.campaign_id
+            WHERE cl.lead_id = ? AND cl.thread_id = ? AND c.user_id = ?
+            ORDER BY cl.id DESC LIMIT 1`
+        ).get(lead.id, msg.threadId, mailbox.user_id)
+      : null
+
+    // Otherwise any open conversation with this lead that was sent from this
+    // mailbox — rotation means the campaign's primary mailbox is often wrong.
+    if (!cl) {
+      cl = db.prepare(
+        `SELECT cl.* FROM campaign_leads cl
+           JOIN campaigns c ON c.id = cl.campaign_id
+          WHERE cl.lead_id = ? AND c.user_id = ?
+            AND COALESCE(cl.completed_at, '') = ''
+            AND EXISTS (
+              SELECT 1 FROM messages m
+               WHERE m.campaign_id = cl.campaign_id AND m.lead_id = cl.lead_id
+                 AND m.direction = 'out' AND m.mailbox_id = ?
+            )
+          ORDER BY cl.id DESC LIMIT 1`
+      ).get(lead.id, mailbox.user_id, mailbox.id)
+    }
+
+    if (cl) {
+      db.prepare(
+        `INSERT INTO messages
+           (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
+         VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
+      ).run(
+        mailbox.user_id, cl.campaign_id, lead.id, mailbox.id,
+        msg.subject || '', String(msg.body || '').slice(0, 20000),
+        msg.fromEmail || '', msg.toEmail || mailbox.email,
+        msg.providerMessageId, msg.threadId || cl.thread_id || ''
+      )
+      if (!cl.thread_id && msg.threadId) {
+        db.prepare('UPDATE campaign_leads SET thread_id = ? WHERE id = ?').run(msg.threadId, cl.id)
+      }
+      logEvent(mailbox.user_id, {
+        campaignId: cl.campaign_id, leadId: lead.id, type: 'reply',
+        detail: String(msg.body || msg.subject || '').slice(0, 120),
+      })
+      return 'attached'
+    }
+  }
+
+  db.prepare(
+    `INSERT INTO unmatched_messages
+       (workspace_id, mailbox_id, from_email, subject, body, thread_id, provider_message_id, received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(mailbox.user_id, mailbox.id, msg.fromEmail || '', msg.subject || '',
+    String(msg.body || '').slice(0, 20000), msg.threadId || '', msg.providerMessageId,
+    msg.receivedAt || isoNow())
+  return 'untracked'
+}
+
 async function pullUnmatched() {
   const mailboxes = db.prepare(
-    "SELECT * FROM mailboxes WHERE provider = 'gmail' AND status = 'connected' AND is_suspended = 0"
+    "SELECT * FROM mailboxes WHERE deleted_at IS NULL AND provider IN ('gmail','outlook') AND status = 'connected' AND is_suspended = 0"
   ).all()
   if (!mailboxes.length) return {}
 
-  let found = 0
+  let untracked = 0
+  let attached = 0
   for (const mb of mailboxes) {
     let inbound = []
     try {
-      inbound = await gmailRecentInbound(mb, { withinDays: 2, max: 25 })
+      inbound = mb.provider === 'outlook'
+        ? await outlookRecentInbound(mb, { withinDays: 2, max: 25 })
+        : await gmailRecentInbound(mb, { withinDays: 2, max: 25 })
     } catch (err) {
       db.prepare('UPDATE mailboxes SET last_error = ? WHERE id = ?')
         .run(String(err?.message || err).slice(0, 300), mb.id)
@@ -369,31 +461,16 @@ async function pullUnmatched() {
     }
 
     for (const msg of inbound) {
-      // Already stored as a real campaign message? Then it is matched, and the
-      // per-thread sync owns it.
-      const known = db.prepare('SELECT 1 FROM messages WHERE provider_message_id = ?').get(msg.providerMessageId)
-      if (known) continue
-      const seen = db.prepare('SELECT 1 FROM unmatched_messages WHERE provider_message_id = ?').get(msg.providerMessageId)
-      if (seen) continue
-
-      // Does the sender match a lead in this workspace? If so the thread sync
-      // will pick it up on its own; this list is only for genuine orphans.
-      const lead = db.prepare('SELECT 1 FROM leads WHERE user_id = ? AND lower(trim(email)) = ?')
-        .get(mb.user_id, String(msg.fromEmail || '').toLowerCase())
-      if (lead) continue
-
-      db.prepare(
-        `INSERT INTO unmatched_messages
-           (workspace_id, mailbox_id, from_email, subject, body, thread_id, provider_message_id, received_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(mb.user_id, mb.id, msg.fromEmail || '', msg.subject || '',
-        String(msg.body || '').slice(0, 20000), msg.threadId || '', msg.providerMessageId,
-        msg.receivedAt || isoNow())
-      found++
+      const result = ingestRecentInbound(mb, msg)
+      if (result === 'attached') attached++
+      else if (result === 'untracked') untracked++
     }
     db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now') WHERE id = ?").run(mb.id)
   }
-  return { did: found ? `${found} untracked repl(ies) recorded` : '' }
+  const parts = []
+  if (attached) parts.push(`${attached} campaign repl(ies) attached`)
+  if (untracked) parts.push(`${untracked} untracked repl(ies) recorded`)
+  return { did: parts.join(', ') }
 }
 
 // ---- the whole pass ----------------------------------------------------------
@@ -427,6 +504,7 @@ export const jobs = {
   rollUpWarmupStats,
   adjustWarmup,
   pullUnmatched,
+  ingestRecentInbound,
   openDueRuns,
   dispatchSeedSends,
 }

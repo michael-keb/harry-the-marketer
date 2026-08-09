@@ -24,7 +24,6 @@ import OverTimeTab from '../reports/OverTimeTab.jsx'
 import MailboxesTab from '../reports/MailboxesTab.jsx'
 import RepliesTab from '../reports/RepliesTab.jsx'
 import ClientsTab from '../reports/ClientsTab.jsx'
-import TeamTab from '../reports/TeamTab.jsx'
 import CampaignDrilldown from '../reports/CampaignDrilldown.jsx'
 
 // The two-series bar chart reuses the shared palette rather than keeping its
@@ -39,7 +38,6 @@ const TABS = [
   { id: 'mailboxes', label: 'Mailboxes' },
   { id: 'replies', label: 'Replies' },
   { id: 'clients', label: 'Clients' },
-  { id: 'team', label: 'Team' },
   { id: 'campaign', label: 'Campaign drill-down' },
 ]
 
@@ -164,7 +162,6 @@ export default function Reports() {
       {tab === 'clients' && (
         <ClientsTab params={params} clients={clients} clientId={client} timezone={BROWSER_TZ} />
       )}
-      {tab === 'team' && <TeamTab params={params} />}
       {tab === 'campaign' && (
         <CampaignDrilldown
           campaigns={visibleCampaigns}
@@ -237,11 +234,19 @@ export function SeriesChart({ series, days = 30 }) {
           </div>
         )}
       </div>
-      <table className="sr-only">
-        <caption>Emails sent and replies per day</caption>
-        <thead><tr><th>Day</th><th>Sent</th><th>Replies</th></tr></thead>
-        <tbody>{filled.map((d) => <tr key={d.day}><td>{d.day}</td><td>{d.sent}</td><td>{d.replies}</td></tr>)}</tbody>
-      </table>
+      {/* The chart's data as a table, for anyone who cannot see the chart.
+          `sr-only` belongs on the wrapper, not on the table: it works by
+          shrinking to 1px and hiding the overflow, and a table refuses to size
+          below its min-content width. On the table itself this stayed 503px
+          wide, sat outside the viewport, and gave Reports a sideways scrollbar.
+          A block-level div shrinks as intended and clips the table inside it. */}
+      <div className="sr-only">
+        <table>
+          <caption>Emails sent and replies per day</caption>
+          <thead><tr><th>Day</th><th>Sent</th><th>Replies</th></tr></thead>
+          <tbody>{filled.map((d) => <tr key={d.day}><td>{d.day}</td><td>{d.sent}</td><td>{d.replies}</td></tr>)}</tbody>
+        </table>
+      </div>
     </div>
   )
 }

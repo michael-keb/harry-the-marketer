@@ -61,8 +61,19 @@ function classifyNode(id, shape, label) {
   }
   if (shape === 'diamond') return { id, type: 'decision', label: text }
   // Rectangles: Send / Wait actions.
-  const send = text.match(/^send\s*[:=]?\s*(.*)$/i)
-  if (send) return { id, type: 'send', label: text, instruction: send[1].trim() }
+  // Channel may be named: `Send sms: …`, `Send email: …`. Bare `Send:` is email
+  // so every existing playbook keeps working unchanged.
+  const send = text.match(/^send(?:\s+(email|sms|whatsapp|telegram))?\s*[:=]?\s*(.*)$/i)
+  if (send) {
+    const channel = (send[1] || 'email').toLowerCase()
+    return {
+      id,
+      type: 'send',
+      label: text,
+      channel,
+      instruction: (send[2] || '').trim(),
+    }
+  }
   const wait = text.match(/^wait\s*[:=]?\s*(.*)$/i)
   if (wait) {
     const ms = parseDuration(wait[1])

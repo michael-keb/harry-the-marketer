@@ -11,7 +11,7 @@ import { db, logEvent } from './db.js'
 import { resolveSend, sendingContext, bounceStats, recipientZone } from './gates.js'
 import {
   storedRules, saveRules, effectiveRules, workspaceRules, validate, RuleError,
-  WORKSPACE_DEFAULTS, QUIET_FLOOR,
+  WORKSPACE_DEFAULTS, QUIET_FLOOR, syncCampaignScheduleColumn,
 } from './send-rules.js'
 import { activeHolds, placeHold, releaseHold, describeHold, AUTOMATIC, SCOPES } from './holds.js'
 import { describeWindows } from './schedule.js'
@@ -29,9 +29,9 @@ const owner = (wsId) => db.prepare('SELECT * FROM users WHERE id = ?').get(wsId)
 // answer rather than an empty screen.
 const realMailbox = (wsId) =>
   db.prepare(
-    "SELECT * FROM mailboxes WHERE user_id = ? AND provider != 'sandbox' ORDER BY (status = 'connected') DESC, id LIMIT 1"
+    "SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND provider != 'sandbox' ORDER BY (status = 'connected') DESC, id LIMIT 1"
   ).get(wsId)
-  || db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY id LIMIT 1').get(wsId)
+  || db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1').get(wsId)
 
 function scopeTarget(wsId, scope, id) {
   if (scope === 'workspace') return { ok: true, campaign: null, mailbox: null }
@@ -40,7 +40,7 @@ function scopeTarget(wsId, scope, id) {
     return campaign ? { ok: true, campaign, mailbox: null } : { ok: false }
   }
   if (scope === 'mailbox') {
-    const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(id, wsId)
+    const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(id, wsId)
     return mailbox ? { ok: true, campaign: null, mailbox } : { ok: false }
   }
   return { ok: false }
@@ -100,6 +100,7 @@ export function registerSendControls(api) {
     }
     saveRules(req.wsId, scope, id, clean, req.user?.email || '')
     const view = rulesView(req.wsId, scope, id)
+    if (scope === 'campaign') syncCampaignScheduleColumn(id, view.effective)
     // A window that narrows to nothing is a saved setting that silently stops
     // every send. Saying so at the moment of saving is the difference between
     // a control and a trap.
@@ -178,7 +179,7 @@ export function registerSendControls(api) {
     // one. A sandbox skips the clock by design, so reporting "sending is open"
     // from one at 3am on a Sunday would be true and useless.
     const mailbox = campaign?.mailbox_id
-      ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(campaign.mailbox_id)
+      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
       : realMailbox(req.wsId)
     if (req.query.campaignId && !campaign) return res.status(404).json({ error: 'Not found' })
     const { rules, holds } = sendingContext({ owner: user, campaign, mailbox })
@@ -209,6 +210,97 @@ export function registerSendControls(api) {
   // changes it — so it is labelled as one and it re-runs the real resolver
   // rather than a simplified copy of the rules, which is the only way it stays
   // honest as levers are added.
+  // Grid-friendly schedule for a campaign: projected sends, queued rows, pending
+  // drafts and recent history — everything the commit-style heatmap needs.
+  api.get('/send-schedule', (req, res) => {
+    const user = owner(req.wsId)
+    const campaign = req.query.campaignId
+      ? db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(req.query.campaignId, req.wsId)
+      : null
+    if (req.query.campaignId && !campaign) return res.status(404).json({ error: 'Not found' })
+    const mailbox = campaign?.mailbox_id
+      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
+      : realMailbox(req.wsId)
+    if (!mailbox) {
+      return res.json({
+        mailbox: null, timezone: user?.send_timezone || 'UTC', windows: [], markers: [],
+        note: 'No mailbox connected yet.',
+      })
+    }
+
+    const limit = Math.min(300, Math.max(20, Number(req.query.limit) || 120))
+    const { rules, holds } = sendingContext({ owner: user, campaign, mailbox })
+    const projected = { ...mailbox }
+    const window = sendWindow(user)
+    const sends = []
+    let at = Date.now()
+    let blocked = null
+
+    for (let steps = 0; sends.length < limit && steps < limit * 8; steps++) {
+      const slot = resolveSend({ owner: user, campaign, mailbox: projected, rules, holds, at })
+      if (!slot.ok) {
+        if (!slot.until || slot.until <= at) { blocked = slot; break }
+        at = slot.until
+        continue
+      }
+      sends.push({ at: new Date(at).toISOString(), kind: 'projected' })
+      const today = new Date(at).toISOString().slice(0, 10)
+      projected.sent_today = projected.sent_today_date === today ? projected.sent_today + 1 : 1
+      projected.sent_today_date = today
+      at += nextGapMs(window, projected, at)
+      projected.next_send_at = at
+    }
+
+    const markers = [...sends]
+    if (campaign) {
+      for (const d of db.prepare(
+        "SELECT id, subject, node_id, created_at FROM drafts WHERE campaign_id = ? AND status = 'pending'"
+      ).all(campaign.id)) {
+        markers.push({
+          at: null,
+          kind: 'pending',
+          id: d.id,
+          label: d.subject || `Step ${d.node_id}`,
+        })
+      }
+      for (const m of db.prepare(
+        `SELECT id, subject, scheduled_at, created_at FROM messages
+         WHERE campaign_id = ? AND direction = 'out' AND send_status = 'queued'`
+      ).all(campaign.id)) {
+        const when = m.scheduled_at || m.created_at
+        markers.push({
+          at: when ? new Date(when.replace(' ', 'T') + 'Z').toISOString() : null,
+          kind: 'queued',
+          id: m.id,
+          label: m.subject || 'Queued reply',
+        })
+      }
+      for (const m of db.prepare(
+        `SELECT id, subject, created_at FROM messages
+         WHERE campaign_id = ? AND direction = 'out' AND send_status = 'sent'
+           AND created_at >= datetime('now', '-35 days')
+         ORDER BY created_at ASC`
+      ).all(campaign.id)) {
+        markers.push({
+          at: new Date(m.created_at.replace(' ', 'T') + 'Z').toISOString(),
+          kind: 'sent',
+          id: m.id,
+          label: m.subject || 'Sent',
+        })
+      }
+    }
+
+    res.json({
+      mailbox: { id: mailbox.id, email: mailbox.email },
+      timezone: rules.timezone,
+      windows: rules.windows,
+      hours: describeWindows(rules.windows),
+      markers,
+      blocked: blocked ? { gate: blocked.gate, reason: blocked.reason } : null,
+      note: 'A projection from the settings as they stand. Pending drafts need your OK before they appear in green.',
+    })
+  })
+
   api.get('/send-preview', (req, res) => {
     const user = owner(req.wsId)
     const campaign = req.query.campaignId
@@ -216,7 +308,7 @@ export function registerSendControls(api) {
       : null
     if (req.query.campaignId && !campaign) return res.status(404).json({ error: 'Not found' })
     const mailbox = campaign?.mailbox_id
-      ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(campaign.mailbox_id)
+      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
       : realMailbox(req.wsId)
     if (!mailbox) return res.json({ mailbox: null, sends: [], note: 'No mailbox connected yet.' })
 
@@ -266,7 +358,7 @@ export function registerSendControls(api) {
   api.get('/send-health', (req, res) => {
     const user = owner(req.wsId)
     const rules = workspaceRules(user)
-    const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY id').all(req.wsId)
+    const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id').all(req.wsId)
     res.json(mailboxes.map((m) => {
       const stats = bounceStats(m.id, rules.brakes.bounceSample)
       return {
@@ -293,7 +385,7 @@ export function registerSendControls(api) {
     const draft = draftOf(req.wsId, req.params.id)
     if (!draft) return res.status(404).json({ error: 'Not found' })
     const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(draft.campaign_id)
-    const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(campaign?.mailbox_id)
+    const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign?.mailbox_id)
     const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(draft.lead_id)
     db.prepare("UPDATE drafts SET send_after = 0 WHERE id = ?").run(draft.id)
     if (mailbox) db.prepare('UPDATE mailboxes SET next_send_at = 0 WHERE id = ?').run(mailbox.id)

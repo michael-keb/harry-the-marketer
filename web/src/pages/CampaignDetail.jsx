@@ -21,7 +21,9 @@ import { Spinner, ErrorState, Modal, Badge, useToast, clockTime } from '../ui.js
 import { Tabs, Confirm, LiveRegion } from '../parity-ui.jsx'
 import StatusControl, { LaunchChecklist } from '../campaigns/StatusControl.jsx'
 import MetricsStrip from '../campaigns/MetricsStrip.jsx'
-import { BehaviourPanel, SchedulePanel } from '../campaigns/SettingsPanel.jsx'
+import { BehaviourPanel } from '../campaigns/SettingsPanel.jsx'
+import CampaignSendControls from '../send-controls/CampaignSendControls.jsx'
+import SendScheduleGrid from '../campaigns/SendScheduleGrid.jsx'
 import MailboxesPanel from '../campaigns/MailboxesPanel.jsx'
 import LeadsPanel from '../campaigns/LeadsPanel.jsx'
 import SubsequencesPanel from '../campaigns/SubsequencesPanel.jsx'
@@ -44,6 +46,7 @@ Won([Won: call booked])        terminal — also Lost / Unsubscribed`
 
 const TABS = [
   { id: 'playbook', label: 'Playbook' },
+  { id: 'schedule', label: 'Schedule' },
   { id: 'leads', label: 'Leads' },
   { id: 'mailboxes', label: 'Sending from' },
   { id: 'settings', label: 'Settings' },
@@ -357,7 +360,7 @@ export default function CampaignDetail({ user }) {
 
       {mailboxes.length === 0 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-          You have no mailboxes yet — <Link className="underline" to="/app/mailboxes">connect Gmail or add a sandbox mailbox</Link> before launching.
+          You have no mailboxes yet — <Link className="underline" to="/app/connections?area=email">connect Gmail or add a sandbox mailbox</Link> before launching.
         </div>
       )}
 
@@ -374,8 +377,8 @@ export default function CampaignDetail({ user }) {
             : <> Nothing clears this on its own.</>}
           {' '}
           {legacy.sending.needs === 'reconnect'
-            ? <Link className="underline hover:text-slate-700" to="/app/mailboxes">Reconnect the mailbox</Link>
-            : <Link className="underline hover:text-slate-700" to="/app/settings/sending">Change the send controls</Link>}
+            ? <Link className="underline hover:text-slate-700" to="/app/connections?area=email">Reconnect the mailbox</Link>
+            : <button type="button" className="underline hover:text-slate-700" onClick={() => setTab('settings')}>Change this campaign&apos;s sending window</button>}
         </div>
       )}
 
@@ -501,10 +504,14 @@ export default function CampaignDetail({ user }) {
 
       {tab === 'mailboxes' && <MailboxesPanel campaign={campaign} onChanged={refresh} />}
 
+      {tab === 'schedule' && (
+        <SendScheduleGrid campaignId={id} />
+      )}
+
       {tab === 'settings' && (
         <div className="space-y-4">
+          <CampaignSendControls campaignId={id} campaignState={detail.state} onSaved={refresh} />
           <BehaviourPanel campaign={campaign} onSaved={refresh} />
-          <SchedulePanel campaign={campaign} onSaved={refresh} />
         </div>
       )}
 

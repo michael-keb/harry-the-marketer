@@ -117,7 +117,7 @@ export function createRunSenders({ testId, wsId, runNo, mailboxIds, seedEmails, 
        (test_id, run_no, mailbox_id, sender_email, seed_email, provider_id, send_status)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-  const find = db.prepare('SELECT email FROM mailboxes WHERE id = ? AND user_id = ?')
+  const find = db.prepare('SELECT email FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL')
   let queued = 0
   for (const mailboxId of mailboxIds) {
     const mailbox = find.get(mailboxId, wsId)
@@ -223,6 +223,16 @@ export async function openDueRuns(now = Date.now()) {
       providerId: setupOf(test.id).providerId || '',
     })
 
+    // Settle the status against what was actually queued, not against what was
+    // asked for. `createRunSenders` writes one row per (mailbox × seed), so a
+    // schedule with seed inboxes but no mailbox attached queues nothing — and
+    // the seed count alone said 'running'. That left a run marked live that no
+    // code path could ever move, which is the same class of untruth this file's
+    // header exists to rule out. The count is only known after the call, so the
+    // status is corrected after it.
+    db.prepare('UPDATE deliverability_test_runs SET status = ? WHERE test_id = ? AND run_no = ? AND status != ?')
+      .run(runStatusFor(queued), test.id, runNo, 'completed')
+
     logEvent(test.workspace_id, {
       type: 'deliverability_test_run_started',
       detail: queued
@@ -317,7 +327,7 @@ export async function dispatchSeedSends(now = Date.now()) {
     if (!claimed) continue
 
     const mailbox = row.mailbox_id
-      ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(row.mailbox_id)
+      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(row.mailbox_id)
       : null
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(row.workspace_id)
 

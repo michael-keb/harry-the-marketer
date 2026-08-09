@@ -295,7 +295,7 @@ export function register(api) {
     }
     if (!wanted.length) throw invalid('emails', 'emails must contain at least one address')
 
-    const find = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND lower(trim(email)) = ?')
+    const find = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND lower(trim(email)) = ?')
     const tagsOf = db.prepare(
       `SELECT t.id AS id, t.name AS name, t.color AS color
          FROM mailbox_tag_map m JOIN tags t ON t.id = m.tag_id

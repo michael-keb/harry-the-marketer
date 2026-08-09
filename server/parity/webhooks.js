@@ -280,6 +280,35 @@ function present(row, extra = {}) {
   }
 }
 
+// get.md AC 7: a paused endpoint must say it is paused, say why, and offer one
+// Resume. `is_active = 0` alone says none of that, so the reason is recovered
+// from the delivery trail that caused the pause — the run of consecutive
+// failures ending at the most recent attempt.
+function pausedState(row) {
+  if (row.is_active !== 0) return null
+  const recent = db.prepare(
+    'SELECT status_code, error, created_at, ok FROM webhook_deliveries WHERE webhook_id = ? ORDER BY id DESC LIMIT ?'
+  ).all(row.id, AUTOPAUSE_AFTER)
+  const run = []
+  for (const d of recent) {
+    if (d.ok === 1) break
+    run.push(d)
+  }
+  const last = run[0] || null
+  return {
+    paused: true,
+    // A pause with no failing run behind it was a person pressing Pause.
+    reason: run.length >= AUTOPAUSE_AFTER
+      ? `Paused automatically after ${run.length} consecutive failed deliveries` +
+        (last?.error ? ` — the last one said: ${String(last.error).slice(0, 120)}` : '')
+      : 'Paused — no events are being delivered to this endpoint',
+    automatic: run.length >= AUTOPAUSE_AFTER,
+    consecutive_failures: run.length,
+    since: last?.created_at || row.updated_at || null,
+    resume: { method: 'PATCH', path: `/api/webhooks/${row.id}`, body: { is_active: true } },
+  }
+}
+
 // ---- workspace-scoped lookups ----------------------------------------------
 
 // `is_active >= 0` filters the deletion tombstone everywhere, in one predicate.
@@ -680,6 +709,7 @@ export function register(api) {
       success: true,
       data: present(row, {
         overridden,
+        paused: pausedState(row),
         deliveries: deliveries.map((d) => ({ ...d, ok: d.ok === 1 })),
       }),
     }

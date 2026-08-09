@@ -13,18 +13,22 @@
 //   2. consent             — approval missing or stale, they have replied
 //   3. recipient           — their quiet hours, how recently we touched them
 //   4. calendar            — the windows, blackout dates, start and end dates
-//   5. volume              — workspace, mailbox, plan, follow-up reserve
+//   5. volume              — client allowance, workspace, mailbox, plan, reserve
 //   6. spacing             — the randomised gap between sends
 //
 // Every block returns a sentence a person can act on and, where it is knowable,
 // the moment it clears. "Holding" with no explanation is a defect, not a state.
 
 import { db } from './db.js'
+import { isOAuthProvider } from './providers.js'
 import { isOpen, nextOpen, localAt, describeWindows, blackoutOn } from './schedule.js'
 import { effectiveRules } from './send-rules.js'
 import { activeHolds, holdFor, describeHold } from './holds.js'
 import { lastTouch, companyKey, companyTouchCount, companyTouchedNames, touchedTodayByOtherChannel } from './touches.js'
 import { remainingToday, dailyCap, isWarmingUp } from './pacing.js'
+// The client partition's own ceiling. Counted where the allowance is stored, so
+// the gate and the Settings panel cannot drift apart on what "over" means.
+import { clientAllowance } from './parity/clients.js'
 
 const DAY_MS = 86_400_000
 
@@ -241,7 +245,7 @@ export function resolveSend({
   // Sandbox mailboxes exist to be tested in seconds, so the clock and the gap
   // do not apply to them — the ceiling and every refusal above still do. Same
   // bargain `pacing.canSendNow` has always struck, kept deliberately.
-  const onTheClock = mailbox ? mailbox.provider === 'gmail' && rules.paced !== false : true
+  const onTheClock = mailbox ? isOAuthProvider(mailbox.provider) && rules.paced !== false : true
 
   // Quiet hours are checked here, before the calendar, and deliberately *not*
   // behind `onTheClock`. Turning "send at a human pace" off means "do not space
@@ -307,6 +311,33 @@ export function resolveSend({
   }
 
   // -- 5. volume --------------------------------------------------------------
+
+  // The client's allowance, first among the ceilings because it is the widest:
+  // a mailbox cap stops one address until tomorrow, this stops every campaign
+  // belonging to one brand until a person changes something. Reporting the
+  // narrower blocker first would have the campaign header say "sent its 50 for
+  // today" when the real answer is "this client is out of allowance".
+  //
+  // Docs/clients/update.md AC 4: lowering an allowance below what the client has
+  // used "pauses sending for that client with a clear reason rather than
+  // silently failing mid-campaign". This is that pause. It lives here rather
+  // than in a status column on `campaigns` because a breach is a condition, not
+  // an event: raise the allowance and sending resumes on the next tick, with
+  // nothing to un-pause by hand and no campaign left stopped by a number that
+  // has since changed.
+  //
+  // `client_id` is null for every single-brand workspace, so the count below is
+  // never reached by anyone who has no clients.
+  if (campaign?.client_id) {
+    const spent = clientAllowance(owner.id, campaign.client_id)
+    if (spent?.over) {
+      return block(
+        'client_allowance',
+        `${spent.name} has used ${spent.used} of its ${spent.allowed}-email allowance — raise it in Settings → Clients, or return ${spent.name} to the agency pool, before its campaigns send again`,
+        null, 'human'
+      )
+    }
+  }
 
   if (mailbox) {
     const left = remainingToday(mailbox, at)

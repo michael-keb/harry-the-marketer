@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { Spinner } from '../ui.jsx'
 import AuthLayout from './AuthLayout.jsx'
+import GoogleIcon from './GoogleIcon.jsx'
 import { useAuthConfig, safeNext } from './useAuthConfig.js'
 
 export default function Login({ onLoggedIn }) {
@@ -63,7 +64,8 @@ export default function Login({ onLoggedIn }) {
 
         {config?.auth0 && (
           <a href={auth0Href} className="btn-primary w-full justify-center text-base py-2.5">
-            Continue with Auth0
+            <GoogleIcon />
+            Continue with Google
           </a>
         )}
 

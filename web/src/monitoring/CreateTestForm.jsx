@@ -220,7 +220,7 @@ export default function CreateTestForm({ folders, providers, onClose, onCreated,
           {mailboxes === null && <p className="mt-1 text-xs text-slate-500">Loading mailboxes…</p>}
           {noMailboxes && (
             <p className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
-              No mailbox is connected to this workspace, so there is nothing to send seed emails from. Connect one on the Mailboxes page first — a manual test cannot be created without one.
+              No mailbox is connected to this workspace, so there is nothing to send seed emails from. Connect one on the Connections page first — a manual test cannot be created without one.
             </p>
           )}
           {mailboxes && mailboxes.length > 0 && (

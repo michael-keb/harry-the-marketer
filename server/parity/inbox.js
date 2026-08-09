@@ -91,6 +91,11 @@ export const INBOX_STATES = [
 // as `rowType` so a client never has to guess which shape it received.
 const MESSAGE_STATES = new Set(['scheduled', 'sent'])
 
+// The `lead_tasks.priority` CHECK constraint, restated where the inbox-side
+// task route can see it. Kept identical to PRIORITIES in server/parity/notes.js
+// on purpose: two routes writing one column must agree on what it accepts.
+const TASK_PRIORITIES = ['low', 'medium', 'high']
+
 const SORTS = [
   'reply_desc', 'reply_asc',
   'sent_desc', 'sent_asc',
@@ -108,6 +113,30 @@ const CEILINGS = {
   search: 30,
 }
 
+// get-sent.md documents its own, wider campaign ceiling — 15 rather than the
+// replies endpoint's 5 — and says so explicitly ("this endpoint's ceiling,
+// wider than the replies endpoint's 5"). Collapsing ten endpoints into one list
+// must not quietly impose the tightest cap on the state that was allowed the
+// loosest, because that turns a documented capability into a 422.
+const STATE_CEILINGS = {
+  sent: { campaignId: 15 },
+}
+
+// The engagement statuses every list spec names, and what each one means over
+// the columns Harry actually has. `Not Replied` is the one worth stating: the
+// specs define it as *opened with no reply*, not "no reply", and get-sent.md's
+// whole user story is finding those people.
+const EMAIL_STATUSES = {
+  Opened: "COALESCE(opened_at,'') != ''",
+  Clicked: "COALESCE(clicked_at,'') != ''",
+  Replied: 'inbound_count > 0',
+  'Not Replied': "COALESCE(opened_at,'') != '' AND inbound_count = 0",
+  Unsubscribed: "LOWER(COALESCE(lead_status,'')) = 'unsubscribed'",
+  Bounced: "LOWER(COALESCE(lead_status,'')) = 'bounced'",
+  // Accepted: it left, and nothing has come back — no open, no click, no reply.
+  Accepted: "outbound_count > 0 AND COALESCE(opened_at,'') = '' AND COALESCE(clicked_at,'') = '' AND inbound_count = 0",
+}
+
 // Harry's own wording for a provider failure, with a next step attached, so no
 // raw provider string ever reaches the UI (reply-status.md).
 const STATUS_MESSAGE = {
@@ -122,8 +151,8 @@ const STATUS_MESSAGE = {
 
 const now = () => new Date()
 
-function ceiling(field, count) {
-  const max = CEILINGS[field]
+function ceiling(field, count, limits = CEILINGS) {
+  const max = limits[field]
   if (max !== undefined && count > max) {
     throw new HttpError(422, {
       error: 'validation_failed',
@@ -136,11 +165,11 @@ function ceiling(field, count) {
 }
 
 // Query-string list: `?campaignId=1&campaignId=2` or `?campaignId=1,2`.
-function queryIds(query, field) {
+function queryIds(query, field, limits = CEILINGS) {
   const raw = query?.[field]
   if (raw === undefined || raw === null || raw === '') return []
   const parts = (Array.isArray(raw) ? raw : String(raw).split(',')).map((v) => String(v).trim()).filter(Boolean)
-  ceiling(field, parts.length)
+  ceiling(field, parts.length, limits)
   const ids = []
   for (const part of parts) {
     const n = Number(part)
@@ -236,8 +265,63 @@ function remindersFor(wsId, tkey, at = now()) {
   ).all(wsId, tkey).map((r) => ({ ...r, is_overdue: r.status === 'pending' && Date.parse(r.reminder_at) < at.getTime() }))
 }
 
+// Reasons are stored as a JSON array. A row written before the column existed
+// reads as '' — an empty list, not a crash and not a null the client has to
+// special-case.
+function parseReasons(raw) {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((r) => typeof r === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 const minor = (major) => Math.round(Number(major) * 100)
 const major = (minorUnits) => Math.round(Number(minorUnits || 0)) / 100
+
+// A recorded zero and nothing recorded are different answers (update-revenue.md
+// TC-6 and TC-7), and `revenue_amount` alone cannot tell them apart because its
+// default is 0. `revenue_updated_at` is the discriminator: a write sets it, a
+// clear empties it again, and the events trail keeps who did which.
+const revenueOf = (row) => ({
+  amount: major(row?.revenue_amount),
+  amount_minor: Math.round(row?.revenue_amount || 0),
+  currency: row?.revenue_currency || 'USD',
+  recorded: !!row?.revenue_updated_at,
+  updated_at: row?.revenue_updated_at || '',
+})
+
+// The single status a row reports, read in the same order the filter would
+// match it, so `email_status` on a row and `emailStatus` as a filter can never
+// disagree about what that row is.
+function emailStatusOf(row) {
+  if (String(row.lead_status || '').toLowerCase() === 'unsubscribed') return 'Unsubscribed'
+  if (String(row.lead_status || '').toLowerCase() === 'bounced') return 'Bounced'
+  if (row.inbound_count > 0) return 'Replied'
+  if (row.clicked_at) return 'Clicked'
+  if (row.opened_at) return 'Not Replied'
+  if (row.outbound_count > 0) return 'Accepted'
+  return ''
+}
+
+// Single value or array, case-insensitive, against the seven statuses every
+// list spec names. An unknown one is a 422 listing the valid values rather than
+// a silently empty list (get-sent.md TC-8).
+function emailStatuses(source) {
+  const raw = source?.emailStatus
+  if (raw === undefined || raw === null || raw === '') return []
+  const parts = (Array.isArray(raw) ? raw : String(raw).split(',')).map((v) => String(v).trim()).filter(Boolean)
+  const valid = Object.keys(EMAIL_STATUSES)
+  const out = []
+  for (const part of parts) {
+    const match = valid.find((v) => v.toLowerCase() === part.toLowerCase())
+    if (!match) throw invalid('emailStatus', `emailStatus must be one of: ${valid.join(', ')}`)
+    if (!out.includes(match)) out.push(match)
+  }
+  return out
+}
 
 // ------------------------------------------------------------- the one list --
 
@@ -245,19 +329,45 @@ const major = (minorUnits) => Math.round(Number(minorUnits || 0)) / 100
 // a view is a stored argument list rather than a second query engine.
 function parseFilters(source, wsId) {
   const state = oneOf(source, 'state', INBOX_STATES, { fallback: 'active' })
-  const sort = oneOf(source, 'sort', SORTS, { fallback: MESSAGE_STATES.has(state) ? (state === 'scheduled' ? 'scheduled_asc' : 'sent_desc') : 'reply_desc' })
+  // get-reminders.md names REMINDER_TIME_ASC the recommended default ("overdue
+  // and earliest first — this is the recommended order for a daily review"), so
+  // the reminders state gets it rather than inheriting the replies default.
+  const defaultSort = MESSAGE_STATES.has(state)
+    ? (state === 'scheduled' ? 'scheduled_asc' : 'sent_desc')
+    : state === 'reminders' ? 'reminder_asc' : 'reply_desc'
+  const sort = oneOf(source, 'sort', SORTS, { fallback: defaultSort })
   const search = str(source, 'search', { max: 5000, fallback: '' })
   if (search.length > CEILINGS.search) ceiling('search', search.length)
+  const limits = { ...CEILINGS, ...(STATE_CEILINGS[state] || {}) }
 
   const filters = {
     state,
     sort,
     search,
-    campaignId: queryIds(source, 'campaignId'),
-    mailboxId: queryIds(source, 'mailboxId'),
-    categoryId: queryIds(source, 'categoryId'),
+    campaignId: queryIds(source, 'campaignId', limits),
+    mailboxId: queryIds(source, 'mailboxId', limits),
+    categoryId: queryIds(source, 'categoryId', limits),
     intent: str(source, 'intent', { max: 120, fallback: '' }),
     assignee: str(source, 'assignee', { max: 320, fallback: '' }),
+    // "Leads sitting at node X" — get-views.md's `subSequenceId`, which in Harry
+    // is a playbook node rather than a separate sequence object. A view saved on
+    // it must empty itself as leads advance, which is the point of TC-10.
+    nodeId: str(source, 'nodeId', { max: 120, fallback: '' }),
+    // Refused rather than ignored on the message folders. Every predicate in
+    // EMAIL_STATUSES is written against thread-level aggregates —
+    // `inbound_count`, `outbound_count`, `lead_status` — which `listMessages`
+    // does not compute, so `state=sent&emailStatus=Replied` parsed cleanly,
+    // validated, and then filtered nothing. A filter that silently does nothing
+    // is worse than one that is unavailable: the list looks filtered and is
+    // not. Saying so is the honest interim until the message query grows the
+    // same aggregates.
+    emailStatus: (() => {
+      const parsed = emailStatuses(source)
+      if (parsed.length && MESSAGE_STATES.has(state)) {
+        throw invalid('emailStatus', `emailStatus filters conversations, not individual emails — it cannot be combined with state=${state}`)
+      }
+      return parsed
+    })(),
     unread: source?.unread === undefined ? null : bool(source, 'unread'),
     important: source?.important === undefined ? null : bool(source, 'important'),
     hasReminder: source?.hasReminder === undefined ? null : bool(source, 'hasReminder'),
@@ -272,7 +382,7 @@ function parseFilters(source, wsId) {
   // Every id in a filter must resolve inside the workspace — a stale id is a
   // named 422, never a silently unfiltered list.
   for (const id of filters.campaignId) if (!db.prepare('SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?').get(id, wsId)) throw invalid('campaignId', `No such campaign: ${id}`)
-  for (const id of filters.mailboxId) if (!db.prepare('SELECT 1 FROM mailboxes WHERE id = ? AND user_id = ?').get(id, wsId)) throw invalid('mailboxId', `No such mailbox: ${id}`)
+  for (const id of filters.mailboxId) if (!db.prepare('SELECT 1 FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(id, wsId)) throw invalid('mailboxId', `No such mailbox: ${id}`)
   for (const id of filters.categoryId) if (!db.prepare('SELECT 1 FROM lead_categories WHERE id = ? AND workspace_id = ?').get(id, wsId)) throw invalid('categoryId', `No such category: ${id}`)
   return filters
 }
@@ -290,10 +400,19 @@ WITH t AS (
     MAX(COALESCE(m.mailbox_id, 0)) AS mailbox_id,
     COUNT(*) AS message_count,
     SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) AS inbound_count,
+    SUM(CASE WHEN m.direction = 'out' THEN 1 ELSE 0 END) AS outbound_count,
+    -- Engagement is a property of the conversation, not of one email: an open
+    -- on the second follow-up still means this person opened.
+    MAX(COALESCE(m.opened_at, '')) AS opened_at,
+    MAX(COALESCE(m.clicked_at, '')) AS clicked_at,
     MIN(CASE WHEN m.direction = 'in' THEN COALESCE(m.read_at, '') END) AS min_read_at,
     MIN(COALESCE(m.archived_at, '')) AS min_archived_at,
     MIN(COALESCE(m.snoozed_until, '')) AS min_snoozed_until,
-    MAX(COALESCE(m.is_important, 0)) AS is_important
+    MAX(COALESCE(m.is_important, 0)) AS is_important,
+    -- The thread's importance is its most important message: one reply saying
+    -- "budget approved" makes the whole conversation worth opening, and MAX is
+    -- what stops a later "thanks!" burying it again.
+    MAX(COALESCE(m.importance_score, 0)) AS importance_score
   FROM messages m
   WHERE m.user_id = ?
   GROUP BY tkey
@@ -311,12 +430,13 @@ SELECT
   lm.subject AS last_subject, lm.body AS last_body, lm.created_at AS last_at,
   lm.direction AS last_direction, lm.from_email AS last_from, lm.to_email AS last_to,
   im.created_at AS last_reply_at, im.intent AS last_intent,
+  im.importance_reasons AS last_importance_reasons,
   om.created_at AS last_sent_at,
   l.email AS lead_email, l.first_name, l.last_name, l.company, l.title, l.status AS lead_status,
   c.name AS campaign_name, c.status AS campaign_status,
   mb.email AS mailbox_email,
   cl.id AS campaign_lead_id, cl.state AS lead_state, cl.node_id, cl.outcome,
-  cl.assigned_email, cl.category_id, cl.revenue_amount, cl.revenue_currency,
+  cl.assigned_email, cl.category_id, cl.revenue_amount, cl.revenue_currency, cl.revenue_updated_at,
   cl.paused_at, cl.resume_at,
   (SELECT MIN(r.reminder_at) FROM lead_reminders r
     WHERE r.workspace_id = ${Number(wsId)} AND r.thread_id = t.tkey AND r.status = 'pending') AS reminder_at
@@ -374,6 +494,12 @@ function threadPredicate(filters, wsId, callerEmail, at) {
   if (filters.mailboxId.length) { where.push(`mailbox_id IN (${filters.mailboxId.map(() => '?').join(',')})`); args.push(...filters.mailboxId) }
   if (filters.categoryId.length) { where.push(`category_id IN (${filters.categoryId.map(() => '?').join(',')})`); args.push(...filters.categoryId) }
   if (filters.intent) { where.push("LOWER(COALESCE(last_intent,'')) = ?"); args.push(filters.intent.toLowerCase()) }
+  if (filters.nodeId) { where.push("COALESCE(node_id,'') = ?"); args.push(filters.nodeId) }
+  // Several statuses OR together: "opened or clicked" is one segment, not two
+  // requests (get-sent.md TC-7).
+  if (filters.emailStatus.length) {
+    where.push(`(${filters.emailStatus.map((s) => `(${EMAIL_STATUSES[s]})`).join(' OR ')})`)
+  }
   if (filters.unread === true) where.push(unread)
   if (filters.unread === false) where.push(`NOT ${unread}`)
   if (filters.important === true) where.push('is_important = 1')
@@ -405,8 +531,12 @@ function sortColumn(sort) {
 
 function shapeThread(row, at) {
   const snoozedActive = !!row.min_snoozed_until && Date.parse(row.min_snoozed_until) > at.getTime()
+  // One decimal, not whole hours. get-unread.md TC-9 asks for "waiting 2.5
+  // hours" against a reply received two and a half hours ago; rounding to the
+  // nearest hour reported 3 and made the ordering rationale ("answer people in
+  // the order that keeps them warm") unverifiable for anything under an hour.
   const replyAgeHours = row.last_reply_at
-    ? Math.max(0, Math.round((at.getTime() - Date.parse(row.last_reply_at + 'Z')) / 36e5))
+    ? Math.max(0, Math.round((at.getTime() - Date.parse(row.last_reply_at + 'Z')) / 36e5 * 10) / 10)
     : null
   return {
     rowType: 'thread',
@@ -435,6 +565,8 @@ function shapeThread(row, at) {
     message_count: row.message_count,
     is_read: row.inbound_count === 0 ? true : !!row.min_read_at,
     is_important: !!row.is_important,
+    importance_score: row.importance_score || 0,
+    importance_reasons: parseReasons(row.last_importance_reasons),
     is_archived: !!row.min_archived_at,
     is_snoozed: snoozedActive,
     snoozed_until: snoozedActive ? row.min_snoozed_until : '',
@@ -445,9 +577,8 @@ function shapeThread(row, at) {
     lead_state: row.lead_state || '',
     node_id: row.node_id || '',
     outcome: row.outcome || '',
-    revenue: row.campaign_lead_id
-      ? { amount: major(row.revenue_amount), amount_minor: Math.round(row.revenue_amount || 0), currency: row.revenue_currency || 'USD' }
-      : null,
+    revenue: row.campaign_lead_id ? revenueOf(row) : null,
+    email_status: emailStatusOf(row),
     cursor_key: null, // filled by listThreads
   }
 }
@@ -576,33 +707,69 @@ function unreadCount(wsId, callerEmail) {
 // One writer for read / archived / snoozed / important. Every column lives on
 // `messages`, so a thread-level change writes every row of the thread inside
 // one transaction — a half-archived thread is not a state this can produce.
+//
+// Each conversation is its own unit of success or failure, though. This used to
+// wrap the whole loop in a single transaction, which made a batch
+// all-or-nothing: select five conversations, have one turn out to be deleted,
+// and the 404 rolled back the four that had worked. The results were then built
+// with a literal `ok: true` on every row — so a batch that had silently done
+// nothing was indistinguishable from one that had done everything.
+//
+// The transaction moved inside the loop rather than disappearing. A thread stays
+// atomic across its own messages, which is the guarantee worth keeping. A batch
+// does not, because the conversations in it are unrelated and one being gone
+// says nothing about the others.
 function applyThreadState(wsId, actor, anchorIds, patch) {
   const results = []
-  tx(() => {
-    for (const id of anchorIds) {
-      const { messages } = resolveThread(wsId, id)
-      const ids = messages.map((m) => m.id)
-      const marks = ids.map(() => '?').join(',')
-      if (patch.read !== undefined) {
-        if (patch.read) db.prepare(`UPDATE messages SET is_read = 1, read_at = ?, read_by = ? WHERE id IN (${marks})`).run(nowIso(), actor, ...ids)
-        else db.prepare(`UPDATE messages SET is_read = 0, read_at = '', read_by = '' WHERE id IN (${marks})`).run(...ids)
-      }
-      if (patch.archived !== undefined) {
-        if (patch.archived) db.prepare(`UPDATE messages SET archived_at = ?, archived_by = ? WHERE id IN (${marks})`).run(nowIso(), actor, ...ids)
-        else db.prepare(`UPDATE messages SET archived_at = '', archived_by = '' WHERE id IN (${marks})`).run(...ids)
-      }
-      if (patch.snoozedUntil !== undefined) {
-        if (patch.snoozedUntil) db.prepare(`UPDATE messages SET snoozed_until = ?, snoozed_by = ? WHERE id IN (${marks})`).run(patch.snoozedUntil, actor, ...ids)
-        else db.prepare(`UPDATE messages SET snoozed_until = '', snoozed_by = '' WHERE id IN (${marks})`).run(...ids)
-      }
-      if (patch.important !== undefined) {
-        db.prepare(`UPDATE messages SET is_important = ?, important_by = ? WHERE id IN (${marks})`)
-          .run(patch.important ? 1 : 0, patch.important ? actor : '', ...ids)
-      }
-      const after = db.prepare(`SELECT * FROM messages WHERE id IN (${marks}) ORDER BY id`).all(...ids)
-      results.push({ id: messages[0].id, ok: true, ...threadState(after) })
+  // Two ids in the same conversation are one piece of work, and resolution is
+  // what reveals that — so the de-duplication happens here rather than in the
+  // caller, which only has raw message ids to go on.
+  const done = new Set()
+  for (const id of anchorIds) {
+    try {
+      tx(() => {
+        const { messages, anchorId } = resolveThread(wsId, id)
+        if (done.has(anchorId)) return
+        done.add(anchorId)
+        const ids = messages.map((m) => m.id)
+        const marks = ids.map(() => '?').join(',')
+        if (patch.read !== undefined) {
+          if (patch.read) db.prepare(`UPDATE messages SET is_read = 1, read_at = ?, read_by = ? WHERE id IN (${marks})`).run(nowIso(), actor, ...ids)
+          else db.prepare(`UPDATE messages SET is_read = 0, read_at = '', read_by = '' WHERE id IN (${marks})`).run(...ids)
+        }
+        if (patch.archived !== undefined) {
+          if (patch.archived) db.prepare(`UPDATE messages SET archived_at = ?, archived_by = ? WHERE id IN (${marks})`).run(nowIso(), actor, ...ids)
+          else db.prepare(`UPDATE messages SET archived_at = '', archived_by = '' WHERE id IN (${marks})`).run(...ids)
+        }
+        if (patch.snoozedUntil !== undefined) {
+          if (patch.snoozedUntil) db.prepare(`UPDATE messages SET snoozed_until = ?, snoozed_by = ? WHERE id IN (${marks})`).run(patch.snoozedUntil, actor, ...ids)
+          else db.prepare(`UPDATE messages SET snoozed_until = '', snoozed_by = '' WHERE id IN (${marks})`).run(...ids)
+        }
+        if (patch.important !== undefined) {
+          // The actor is recorded for un-starring as well as starring. It is not
+          // only attribution: `important_by` is what tells the automatic scorer
+          // a person has already ruled here, and clearing it on un-star would
+          // let the next re-score put the star straight back.
+          db.prepare(`UPDATE messages SET is_important = ?, important_by = ? WHERE id IN (${marks})`)
+            .run(patch.important ? 1 : 0, actor, ...ids)
+        }
+        const after = db.prepare(`SELECT * FROM messages WHERE id IN (${marks}) ORDER BY id`).all(...ids)
+        results.push({ id: messages[0].id, ok: true, ...threadState(after) })
+      })
+    } catch (err) {
+      // The row carries its own verdict. `resolveThread` throws the same
+      // not-found this surface throws everywhere else, so a caller sees the
+      // familiar status and message against the id that caused it rather than
+      // against the batch.
+      results.push({
+        id: Number(id),
+        ok: false,
+        status: err?.status ?? 500,
+        error: err?.body?.error ?? 'server_error',
+        message: err?.body?.message ?? 'That conversation could not be updated',
+      })
     }
-  })
+  }
   return results
 }
 
@@ -679,9 +846,7 @@ export function register(api) {
       ...threadState(messages),
       lead,
       campaign: campaign ? { id: campaign.id, name: campaign.name, status: campaign.status } : null,
-      campaignLead: cl
-        ? { ...cl, revenue: { amount: major(cl.revenue_amount), amount_minor: Math.round(cl.revenue_amount || 0), currency: cl.revenue_currency || 'USD' } }
-        : null,
+      campaignLead: cl ? { ...cl, revenue: revenueOf(cl) } : null,
       reminders: remindersFor(req.wsId, tkey),
       messages: messages.map((m) => ({
         id: m.id,
@@ -690,6 +855,14 @@ export function register(api) {
         body: m.body,
         from_email: m.from_email,
         to_email: m.to_email,
+        // Who else got it. The spec asks for copied recipients to be "recorded
+        // in the thread view", and a reply that quietly went to three people is
+        // exactly the thing you need to see when picking the conversation up.
+        cc_emails: m.cc_emails || '',
+        bcc_emails: m.bcc_emails || '',
+        // Always as a pair. The score alone is the thing the spec rules out.
+        importance_score: m.importance_score || 0,
+        importance_reasons: parseReasons(m.importance_reasons),
         intent: m.intent || '',
         node_id: m.node_id || '',
         sequence_number: m.sequence_number || 0,
@@ -720,17 +893,45 @@ export function register(api) {
     return { ok: true, ...result, updated_at: nowIso() }
   }))
 
-  // Bulk sibling. All-or-nothing on ownership (an id outside the workspace
-  // fails the whole call before anything is written), then one events row for
-  // the action rather than one per thread.
+  // Bulk sibling.
+  //
+  // Ownership is still checked for every id before anything is written, and one
+  // id the caller does not own still refuses the whole call. That is deliberate
+  // and it is why this diverges from mark-read.md TC-9, which asks for partial
+  // success with a per-row 404: an id outside the workspace is not a stale row,
+  // it is a question about somebody else's data, and answering "that one
+  // failed, the rest worked" confirms the others exist. TC-9's own premise — a
+  // conversation deleted mid-batch — is not reachable here anyway, because
+  // Harry has no route that deletes one; archiving is as far as it goes.
+  //
+  // What did change is that the per-row results are now real. Each conversation
+  // gets its own transaction, so a row that vanishes underneath the write (a
+  // cascade from a deleted campaign or lead, say) fails alone instead of
+  // rolling back the other forty-nine, and `updated` counts what actually
+  // changed rather than being a hardcoded `ok: true` on every row.
   api.patch('/inbox/threads', handler((req) => {
     const patch = readStatePatch(req.body)
     const ids = idList(req.body, 'ids', { required: true, max: 500 })
-    const anchors = ids.map((id) => resolveThread(req.wsId, id).anchorId)
-    const unique = [...new Set(anchors)]
-    const results = applyThreadState(req.wsId, req.user.email, unique, patch)
-    audit(req, { type: 'inbox_state_bulk', detail: `${patchSummary(patch)} on ${results.length} threads by ${req.user.email}` })
-    return { ok: true, updated: results.length, results, updated_at: nowIso() }
+    for (const id of ids) resolveThread(req.wsId, id) // throws 404 on anything not ours
+    const results = applyThreadState(req.wsId, req.user.email, [...new Set(ids)], patch)
+    const updated = results.filter((r) => r.ok).length
+    const failed = results.length - updated
+    audit(req, {
+      type: 'inbox_state_bulk',
+      detail: `${patchSummary(patch)} on ${updated} thread${updated === 1 ? '' : 's'}` +
+        `${failed ? ` (${failed} could not be updated)` : ''} by ${req.user.email}`,
+    })
+    return {
+      // `ok` is about the request, which was understood and acted on. Whether
+      // every row succeeded is `updated` and `failed` — collapsing those into
+      // one boolean is what hid this in the first place.
+      ok: true,
+      requested: results.length,
+      updated,
+      failed,
+      results,
+      updated_at: nowIso(),
+    }
   }))
 
   // ---- saved views ----------------------------------------------------------
@@ -747,7 +948,7 @@ export function register(api) {
         if (!db.prepare('SELECT 1 FROM campaigns WHERE id = ? AND user_id = ?').get(id, req.wsId)) broken.push(`campaignId:${id}`)
       }
       for (const id of [].concat(filters.mailboxId || [])) {
-        if (!db.prepare('SELECT 1 FROM mailboxes WHERE id = ? AND user_id = ?').get(id, req.wsId)) broken.push(`mailboxId:${id}`)
+        if (!db.prepare('SELECT 1 FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(id, req.wsId)) broken.push(`mailboxId:${id}`)
       }
       return { ...v, filters, is_broken: broken.length > 0, broken }
     })
@@ -877,6 +1078,11 @@ export function register(api) {
     const { limit, cursor } = page(req.query, { defaultLimit: 50, maxLimit: 200 })
     const status = oneOf(req.query, 'status', ['pending', 'fired', 'cleared', 'all'], { fallback: 'pending' })
     const due = oneOf(req.query, 'due', ['overdue', 'today', 'all'], { fallback: 'all' })
+    // REMINDER_TIME_ASC is the default because the view exists for a daily
+    // review of what you are already late on; DESC exists so the order can be
+    // reversed exactly, which is what get-reminders.md TC-7 asserts.
+    const sort = oneOf(req.query, 'sort', ['reminder_asc', 'reminder_desc'], { fallback: 'reminder_asc' })
+    const desc = sort === 'reminder_desc'
     const at = now()
     const where = ['workspace_id = ?']
     const args = [req.wsId]
@@ -888,8 +1094,21 @@ export function register(api) {
       const end = new Date(start.getTime() + 864e5)
       args.push(start.toISOString(), end.toISOString())
     }
-    if (cursor) { where.push('id > ?'); args.push(cursor) }
-    const rows = db.prepare(`SELECT * FROM lead_reminders WHERE ${where.join(' AND ')} ORDER BY reminder_at, id LIMIT ?`).all(...args, limit + 1)
+    // Keyset on the tuple the rows are actually ordered by. The cursor used to
+    // be `id > ?` regardless of order, which skipped and repeated rows the
+    // moment reminder times and insertion order disagreed — and they always do,
+    // because reminders are set for the future in whatever order people choose.
+    if (cursor) {
+      const prev = db.prepare('SELECT reminder_at, id FROM lead_reminders WHERE id = ? AND workspace_id = ?').get(cursor, req.wsId)
+      if (prev) {
+        where.push(desc
+          ? '(reminder_at < ? OR (reminder_at = ? AND id < ?))'
+          : '(reminder_at > ? OR (reminder_at = ? AND id > ?))')
+        args.push(prev.reminder_at, prev.reminder_at, prev.id)
+      }
+    }
+    const dir = desc ? 'DESC' : 'ASC'
+    const rows = db.prepare(`SELECT * FROM lead_reminders WHERE ${where.join(' AND ')} ORDER BY reminder_at ${dir}, id ${dir} LIMIT ?`).all(...args, limit + 1)
     // Overdue is derived at read time and never stored, so it cannot drift.
     return paged(rows.map((r) => ({ ...r, is_overdue: r.status === 'pending' && Date.parse(r.reminder_at) < at.getTime() })), limit)
   }))
@@ -926,10 +1145,18 @@ export function register(api) {
     const { messages } = resolveThread(req.wsId, req.params.id)
     const body = str(req.body, 'body', { required: true, max: 50000 })
     if (req.body?.confirm !== true) throw invalid('confirm', 'Nothing sends without your OK — send confirm: true')
+    // reply.md asks for attachments. This route used to read no such field, so
+    // a composer that sent one got a 200 and an email with nothing attached —
+    // the same shape as the cc/bcc defect: accepted, echoed nowhere, never
+    // sent. Neither provider path can carry a file yet (server/mailer.js and
+    // server/google.js build a text/HTML alternative and nothing else), so the
+    // honest answer is the one server/parity/utilities.js already gives on its
+    // own send route: refuse, and say why.
+    refuseAttachments(req.body)
     const anchor = messages.find((m) => m.campaign_id && m.lead_id) || messages[0]
     const campaign = anchor.campaign_id ? db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(anchor.campaign_id, req.wsId) : null
     const lead = anchor.lead_id ? db.prepare('SELECT * FROM leads WHERE id = ? AND user_id = ?').get(anchor.lead_id, req.wsId) : null
-    const mailbox = anchor.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(anchor.mailbox_id, req.wsId) : null
+    const mailbox = anchor.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(anchor.mailbox_id, req.wsId) : null
     if (!campaign || !lead || !mailbox) throw invalid('id', 'That conversation is missing its campaign, lead or mailbox')
     // One check, covering the block list, unsubscribes and hard bounces alike.
     // This used to guard only `unsubscribed`, so a bounced lead reached the
@@ -942,35 +1169,69 @@ export function register(api) {
     const blocked = suppressionFor(req.wsId, { address: lead.email, lead })
     if (blocked) throw invalid('id', blocked.message)
 
+    // Copied recipients. This route is the one the Inbox actually calls, and it
+    // used to have no cc/bcc at all — the contract lived only on the campaigns
+    // reply route, so the mail client could not copy anybody. `sendEmail` takes
+    // both, checks suppression on every one of them, and records them on the
+    // message row, so nothing here re-implements any of that.
+    const cc = addressList(req.body, 'cc')
+    const bcc = addressList(req.body, 'bcc')
+    // Checked here as well as in `sendEmail`. The transport's check is the one
+    // that makes the rule true, but it raises SuppressedError, which escapes a
+    // handler as an HTTP 500 — a refusal presented as a crash, exactly the
+    // defect already fixed above for the lead's own address. Naming the field
+    // turns it into the 422 the composer knows how to render.
+    for (const [field, list] of [['cc', cc], ['bcc', bcc]]) {
+      for (const address of list) {
+        const stop = suppressionFor(req.wsId, { address })
+        if (stop) throw invalid(field, `${address} — ${stop.message}`)
+      }
+    }
+
     const lastSubject = messages[messages.length - 1].subject || ''
     const subject = str(req.body, 'subject', { max: 500, fallback: lastSubject.startsWith('Re:') ? lastSubject : `Re: ${lastSubject}` })
     const sendAtRaw = str(req.body, 'sendAt', { max: 40, fallback: '' })
     const sendAt = sendAtRaw ? new Date(sendAtRaw) : null
     if (sendAtRaw && Number.isNaN(sendAt.getTime())) throw invalid('sendAt', 'sendAt must be an ISO 8601 datetime')
 
+    // Appended once. A reply drafted from a previous one already quotes the
+    // signature back, and appending again is the failure users notice.
+    const signature = String(mailbox.signature || '').trim()
+    const wantsSignature = bool(req.body, 'addSignature', false) || bool(req.body, 'add_signature', false)
+    const outgoing = wantsSignature && signature && !body.includes(signature)
+      ? `${body.trimEnd()}\n\n${signature}`
+      : body
+
     if (sendAt && sendAt.getTime() > Date.now()) {
       // Queued, not sent. Cancellable through DELETE /api/scheduled/:id, and
-      // the pacing engine decides the actual minute when it comes due.
+      // the pacing engine decides the actual minute when it comes due. The
+      // copies are written now so they survive the wait rather than being
+      // reconstructed from a request that is long gone.
       const info = tx(() => db.prepare(
-        `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, thread_id, node_id, manual_reply, scheduled_at, send_status, is_read, read_at)
-         VALUES (?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, 'manual', 1, ?, 'queued', 1, ?)`
-      ).run(req.wsId, campaign.id, lead.id, mailbox.id, subject, body, mailbox.email, lead.email,
-        anchor.thread_id || '', sendAt.toISOString(), nowIso()))
+        `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, cc_emails, bcc_emails, thread_id, node_id, manual_reply, scheduled_at, send_status, is_read, read_at)
+         VALUES (?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, 'manual', 1, ?, 'queued', 1, ?)`
+      ).run(req.wsId, campaign.id, lead.id, mailbox.id, subject, outgoing, mailbox.email, lead.email,
+        cc.join(', '), bcc.join(', '), anchor.thread_id || '', sendAt.toISOString(), nowIso()))
       audit(req, { campaignId: campaign.id, leadId: lead.id, type: 'manual_reply_scheduled', detail: `${sendAt.toISOString()} by ${req.user.email}` })
-      return { ok: true, scheduled: true, messageId: Number(info.lastInsertRowid), scheduledAt: sendAt.toISOString() }
+      return { ok: true, scheduled: true, messageId: Number(info.lastInsertRowid), scheduledAt: sendAt.toISOString(), cc, bcc }
     }
 
     // The same send path agent email uses: same quota, same tracking pixel,
-    // same opt-out footer, same List-Unsubscribe header.
+    // same opt-out footer, same List-Unsubscribe header — and the same
+    // suppression check on every copied recipient, because being cc'd is still
+    // being emailed.
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.wsId)
-    const sent = await sendEmail({ mailbox, user: user || { id: req.wsId }, campaign, lead, nodeId: 'manual', subject, body })
+    const sent = await sendEmail({ mailbox, user: user || { id: req.wsId }, campaign, lead, nodeId: 'manual', subject, body: outgoing, cc, bcc })
     const written = db.prepare('SELECT id FROM messages WHERE provider_message_id = ? ORDER BY id DESC LIMIT 1').get(sent.providerMessageId)
     if (written) {
       db.prepare("UPDATE messages SET manual_reply = 1, send_status = 'sent' WHERE id = ?").run(written.id)
     }
-    audit(req, { campaignId: campaign.id, leadId: lead.id, type: 'manual_reply', detail: `by ${req.user.email}` })
+    audit(req, {
+      campaignId: campaign.id, leadId: lead.id, type: 'manual_reply',
+      detail: `by ${req.user.email}${cc.length ? `, cc ${cc.join(', ')}` : ''}${bcc.length ? `, bcc ${bcc.length}` : ''}`,
+    })
     meter('inbox.reply', 0, true, mailbox.email)
-    return { ok: true, scheduled: false, messageId: written?.id ?? null, threadId: sent.threadId }
+    return { ok: true, scheduled: false, messageId: written?.id ?? null, threadId: sent.threadId, cc, bcc, signed: outgoing !== body }
   }))
 
   // Harry's own forward contract. The source page documents no request fields
@@ -981,17 +1242,14 @@ export function register(api) {
     refuseBypass(req.body)
     const { messages } = resolveThread(req.wsId, req.params.messageId)
     const to = emailField(req.body, 'to', { required: true })
-    const cc = [].concat(req.body?.cc || []).map((v) => String(v).trim().toLowerCase()).filter(Boolean)
-    const bcc = [].concat(req.body?.bcc || []).map((v) => String(v).trim().toLowerCase()).filter(Boolean)
-    for (const [field, list] of [['cc', cc], ['bcc', bcc]]) {
-      for (const addr of list) if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) throw invalid(field, `${field} contains an invalid address: ${addr}`)
-    }
+    const cc = addressList(req.body, 'cc')
+    const bcc = addressList(req.body, 'bcc')
     if (req.body?.confirm !== true) throw invalid('confirm', 'Nothing sends without your OK — send confirm: true')
     for (const addr of [to, ...cc, ...bcc]) assertNotBlocked(req.wsId, addr, 'to')
 
     const source = db.prepare('SELECT * FROM messages WHERE id = ? AND user_id = ?').get(Number(req.params.messageId), req.wsId)
     const anchor = messages.find((m) => m.campaign_id && m.lead_id) || messages[0]
-    const mailbox = anchor.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(anchor.mailbox_id, req.wsId) : null
+    const mailbox = anchor.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(anchor.mailbox_id, req.wsId) : null
     if (!mailbox) throw invalid('messageId', 'That conversation has no mailbox to forward from')
     const includeThread = bool(req.body, 'includeThread', true)
     const note = str(req.body, 'note', { max: 5000, fallback: '' })
@@ -1070,13 +1328,28 @@ export function register(api) {
     }
     const currency = str(req.body, 'currency', { max: 3, fallback: cl.revenue_currency || 'USD' }).toUpperCase()
     const previous = Math.round(cl.revenue_amount || 0)
+    const wasRecorded = !!cl.revenue_updated_at
+    // Clearing empties `revenue_updated_at` as well as the amount. Zero is a
+    // real answer people record deliberately ("we won it, it was free"), and
+    // leaving the timestamp behind on a clear made a cleared row and a recorded
+    // zero identical in the database — so the UI could only ever show one of
+    // them. Who cleared it, and when, is in the events trail below.
     tx(() => db.prepare('UPDATE campaign_leads SET revenue_amount = ?, revenue_currency = ?, revenue_updated_at = ?, revenue_updated_by = ? WHERE id = ?')
-      .run(amountMinor, currency, nowIso(), req.user.email, cl.id))
+      .run(amountMinor, currency, raw === null ? '' : nowIso(), raw === null ? '' : req.user.email, cl.id))
     audit(req, {
       campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'revenue_updated',
-      detail: `${major(previous)} -> ${raw === null ? 'cleared' : major(amountMinor)} ${currency} by ${req.user.email}`,
+      detail: `${wasRecorded ? major(previous) : '(not recorded)'} -> ${raw === null ? 'cleared' : major(amountMinor)} ${currency} by ${req.user.email}`,
     })
-    return { ok: true, id: cl.id, amount: raw === null ? null : major(amountMinor), amount_minor: amountMinor, currency, previous_amount: major(previous) }
+    return {
+      ok: true,
+      id: cl.id,
+      amount: raw === null ? null : major(amountMinor),
+      amount_minor: amountMinor,
+      currency,
+      recorded: raw !== null,
+      previous_amount: wasRecorded ? major(previous) : null,
+      updated_at: raw === null ? '' : nowIso(),
+    }
   }))
 
   api.patch('/campaign-leads/:id/resume', handler((req) => {
@@ -1169,17 +1442,54 @@ export function register(api) {
     return { ok: true, id: cl.id, assignedTo: assignee, previous, gatesApproval: false }
   }))
 
+  // Bulk sibling of the single assignment.
+  //
+  // Each pairing is its own unit of work, as it is for the bulk read/archive
+  // route, and for the same reason: five selected conversations are unrelated,
+  // and one of them being gone says nothing about the other four. The per-row
+  // verdict is read back from the database rather than asserted — the previous
+  // version returned a literal `ok: true` on every row inside one transaction,
+  // so a rollback and a clean run were indistinguishable to the caller.
+  //
+  // Ownership is still pre-checked for every id, so a conversation belonging to
+  // another workspace refuses the whole call rather than confirming, row by
+  // row, which of the others exist. That is the same divergence mark-read.md
+  // TC-9 already carries, stated once here rather than argued twice.
   api.patch('/campaign-leads/assignee', handler((req) => {
     const ids = idList(req.body, 'ids', { required: true, max: 500 })
     const assignee = assigneeFrom(req.body, req.wsId)
-    const pairings = ids.map((id) => ownedPairing(id, req.wsId))
-    const results = tx(() => pairings.map((cl) => {
-      db.prepare("UPDATE campaign_leads SET assigned_email = ?, assigned_at = ?, assigned_by = ?, updated_at = datetime('now') WHERE id = ?")
-        .run(assignee, assignee ? nowIso() : '', assignee ? req.user.email : '', cl.id)
-      return { id: cl.id, ok: true, previous: cl.assigned_email || '', assignedTo: assignee }
-    }))
-    audit(req, { type: 'assigned_bulk', detail: `${results.length} conversations -> ${assignee || '(nobody)'} by ${req.user.email}` })
-    return { ok: true, updated: results.length, results }
+    for (const id of ids) ownedPairing(id, req.wsId)
+    const results = []
+    for (const id of ids) {
+      try {
+        tx(() => {
+          const cl = ownedPairing(id, req.wsId)
+          db.prepare("UPDATE campaign_leads SET assigned_email = ?, assigned_at = ?, assigned_by = ?, updated_at = datetime('now') WHERE id = ?")
+            .run(assignee, assignee ? nowIso() : '', assignee ? req.user.email : '', cl.id)
+          const after = db.prepare('SELECT assigned_email FROM campaign_leads WHERE id = ?').get(cl.id)
+          if ((after?.assigned_email || '') !== assignee) {
+            throw new HttpError(500, { error: 'server_error', message: 'That conversation could not be assigned' })
+          }
+          results.push({ id: cl.id, ok: true, previous: cl.assigned_email || '', assignedTo: assignee })
+        })
+      } catch (err) {
+        results.push({
+          id: Number(id),
+          ok: false,
+          status: err?.status ?? 500,
+          error: err?.body?.error ?? 'server_error',
+          message: err?.body?.message ?? 'That conversation could not be assigned',
+        })
+      }
+    }
+    const updated = results.filter((r) => r.ok).length
+    const failed = results.length - updated
+    audit(req, {
+      type: 'assigned_bulk',
+      detail: `${updated} conversation${updated === 1 ? '' : 's'} -> ${assignee || '(nobody)'}` +
+        `${failed ? ` (${failed} could not be assigned)` : ''} by ${req.user.email}`,
+    })
+    return { ok: true, requested: results.length, updated, failed, results }
   }))
 
   // Move the pairing to a subsequence — a child campaign. A campaign is never
@@ -1193,7 +1503,16 @@ export function register(api) {
     if (!cl) throw invalid('id', 'That lead is not in the source campaign')
     const targetId = int(req.body, 'subsequenceId', { required: true, min: 1 })
     const startAfterSeconds = int(req.body, 'startAfterSeconds', { min: 0, max: 60 * 60 * 24 * 365, fallback: 0 })
-    const stopOnSourceReply = bool(req.body, 'stopOnSourceReply', false)
+    // "Stop if they reply to the current campaign" (push-to-subsequence.md AC3,
+    // TC-9). Honoured now, per lead, on the pairing this push creates.
+    //
+    // It used to be written to `campaigns.stop_on_source_reply` — a campaign-wide
+    // column — so one lead's move changed the setting for every other lead
+    // already in that subsequence; and nothing in server/engine.js read that
+    // column either, so the checkbox promised something no code did. Both spellings
+    // are accepted: `stop_lead_on_parent_campaign_reply` is the documented name.
+    const stopOnSourceReply = bool(req.body, 'stopOnSourceReply', false) ||
+      bool(req.body, 'stop_lead_on_parent_campaign_reply', false)
 
     const target = db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(targetId, req.wsId)
     if (!target) throw invalid('subsequenceId', `No such subsequence: ${targetId}`)
@@ -1204,29 +1523,56 @@ export function register(api) {
     if (lead?.status !== 'active') throw invalid('id', `That lead is ${lead?.status || 'unavailable'}`)
     if (isBlocked(req.wsId, lead.email)) throw invalid('id', 'That lead is on this workspace\'s block list')
     if (!target.mailbox_id) throw invalid('subsequenceId', 'That subsequence has no mailbox attached')
+    // Already there. This used to be an ON CONFLICT DO UPDATE that reset the
+    // existing pairing to `queued` and cleared its outcome — so re-pushing a
+    // lead who had already finished the subsequence silently restarted them
+    // through it. The spec asks for a refusal, and a refusal is also the only
+    // behaviour that cannot lose a completed run's record.
+    const already = db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(target.id, lead.id)
+    if (already) {
+      throw invalid('subsequenceId', `${lead.email} is already in "${target.name}" — they cannot be pushed into it twice`)
+    }
+    // The same validation campaign launch applies. A playbook that does not
+    // parse cannot compose anything, so moving a lead into it would strand them.
+    const targetCtx = campaignCtx(target.id)
+    if (!targetCtx?.graph?.valid) {
+      throw invalid('subsequenceId', `"${target.name}" has no valid playbook yet — fix the diagram before moving leads into it`)
+    }
 
     const startAfter = startAfterSeconds > 0 ? new Date(Date.now() + startAfterSeconds * 1000).toISOString() : ''
     tx(() => {
       // The source pairing is closed, never deleted, so Reports attribution
       // and the activity trail survive the move.
       db.prepare("UPDATE campaign_leads SET state = 'stopped', outcome = 'moved', updated_at = datetime('now') WHERE id = ?").run(cl.id)
+      // The watermark: everything already on the source thread, including the
+      // reply being triaged right now, is on the near side of the move. Read
+      // inside the transaction so a reply arriving mid-request is on one side of
+      // it or the other and never on both.
+      const watermark = db.prepare(
+        "SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE campaign_id = ? AND lead_id = ?"
+      ).get(anchor.campaign_id, lead.id).id
       db.prepare(
-        `INSERT INTO campaign_leads (campaign_id, lead_id, state, resume_at, moved_from_campaign_id)
-         VALUES (?, ?, 'queued', ?, ?)
-         ON CONFLICT (campaign_id, lead_id) DO UPDATE SET
-           state = 'queued', resume_at = excluded.resume_at, moved_from_campaign_id = excluded.moved_from_campaign_id,
-           outcome = '', updated_at = datetime('now')`
-      ).run(target.id, lead.id, startAfter, anchor.campaign_id)
-      if (stopOnSourceReply) {
-        db.prepare('UPDATE campaigns SET stop_on_source_reply = 1 WHERE id = ?').run(target.id)
-      }
+        `INSERT INTO campaign_leads (campaign_id, lead_id, state, resume_at, moved_from_campaign_id,
+                                     stop_on_source_reply, moved_after_message_id)
+         VALUES (?, ?, 'queued', ?, ?, ?, ?)`
+      ).run(target.id, lead.id, startAfter, anchor.campaign_id, stopOnSourceReply ? 1 : 0, watermark)
     })
+    // §2's last criterion asks the trail to name the delay and the
+    // stop-on-parent-reply setting as well as the actor and both campaigns.
     audit(req, {
       campaignId: target.id, leadId: lead.id, type: 'pushed_to_subsequence',
-      detail: `${anchor.campaign_id} -> ${target.id} after ${startAfterSeconds}s by ${req.user.email}`,
+      detail: `${anchor.campaign_id} -> ${target.id} after ${startAfterSeconds}s by ${req.user.email}` +
+        `${stopOnSourceReply ? ' — stops if they reply to the source campaign' : ''}`,
     })
     const moved = db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(target.id, lead.id)
-    return { ok: true, from: anchor.campaign_id, to: target.id, campaignLeadId: moved.id, startAfter, stopOnSourceReply }
+    return {
+      ok: true, from: anchor.campaign_id, to: target.id, campaignLeadId: moved.id,
+      startAfter, willStartAt: startAfter || nowIso(),
+      // Read back off the row rather than echoed from the request: this field
+      // spent its whole life as a literal, and a literal is what made it a lie.
+      stopOnSourceReply: moved.stop_on_source_reply === 1,
+      stop_on_parent_reply: moved.stop_on_source_reply === 1,
+    }
   }))
 
   // ---- notes and tasks raised from a thread ---------------------------------
@@ -1253,20 +1599,45 @@ export function register(api) {
     if (!anchor.lead_id) throw invalid('id', 'That conversation is not attached to a lead')
     const title = str(req.body, 'name', { required: true, max: 200 })
     const description = str(req.body, 'description', { max: 10000, fallback: '' })
+    // Docs/inbox/create-task.md names `due_date`; server/parity/notes.js and the
+    // web client say `dueAt`. Both are accepted rather than either being broken.
     const dueRaw = str(req.body, 'dueAt', { max: 40, fallback: '' })
+      || str(req.body, 'due_date', { max: 40, fallback: '' })
     let dueAt = ''
     if (dueRaw) {
       const parsed = new Date(dueRaw)
       if (Number.isNaN(parsed.getTime())) throw invalid('dueAt', 'dueAt must be an ISO 8601 datetime')
       dueAt = parsed.toISOString()
     }
+    // §2: "no explicit priority defaults to MEDIUM; LOW and HIGH are the only
+    // other accepted values and anything else is rejected with a field-level
+    // message" (TC-7, TC-8).
+    //
+    // This route used to ignore `priority` outright. The column has a default of
+    // 'medium', so TC-8 looked satisfied — but a task raised from a thread as
+    // HIGH was silently stored as medium, and `priority: "URGENT"` was accepted
+    // with a 200 and quietly dropped. Both are the shape this codebase keeps
+    // being caught by: a field echoed back, or defaulted, and never acted on.
+    //
+    // The documented spellings are upper case and the column's CHECK constraint
+    // is lower case, so the value is folded before it is checked; the response
+    // carries `priority` as stored and `priority_label` in the documented
+    // casing, so a client written against either reads the same task.
+    const priorityRaw = str(req.body, 'priority', { max: 20, fallback: '' })
+    const priority = priorityRaw
+      ? oneOf({ priority: priorityRaw.toLowerCase() }, 'priority', TASK_PRIORITIES, { required: true })
+      : 'medium'
     const assigned = req.body?.assignee === undefined ? '' : assigneeFrom({ assignee: req.body.assignee }, req.wsId)
     const info = tx(() => db.prepare(
-      'INSERT INTO lead_tasks (workspace_id, lead_id, campaign_id, title, body, due_at, assigned_email, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(req.wsId, anchor.lead_id, anchor.campaign_id, title, description, dueAt, assigned, req.user.email))
+      'INSERT INTO lead_tasks (workspace_id, lead_id, campaign_id, title, body, due_at, priority, assigned_email, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(req.wsId, anchor.lead_id, anchor.campaign_id, title, description, dueAt, priority, assigned, req.user.email))
     audit(req, { campaignId: anchor.campaign_id, leadId: anchor.lead_id, type: 'task_created', detail: `${title} from inbox by ${req.user.email}` })
     const row = db.prepare('SELECT * FROM lead_tasks WHERE id = ?').get(info.lastInsertRowid)
-    return { ...row, is_overdue: !!row.due_at && Date.parse(row.due_at) < Date.now() }
+    return {
+      ...row,
+      priority_label: String(row.priority || 'medium').toUpperCase(),
+      is_overdue: !!row.due_at && Date.parse(row.due_at) < Date.now(),
+    }
   }))
 
   // ---- suppression ----------------------------------------------------------
@@ -1352,6 +1723,42 @@ function validateViewFilters(raw, wsId) {
   for (const [k, v] of Object.entries(parsed)) {
     if (v === null || v === '' || (Array.isArray(v) && v.length === 0)) continue
     out[k] = v
+  }
+  return out
+}
+
+// Attachments, refused honestly rather than dropped.
+//
+// An empty array is not an attachment and must not block a send — a composer
+// that always posts the field would otherwise be unable to send anything.
+function refuseAttachments(body) {
+  const raw = body?.attachments
+  if (raw === undefined || raw === null || raw === '') return
+  if (!Array.isArray(raw)) throw invalid('attachments', 'attachments must be an array')
+  if (raw.length === 0) return
+  throw new HttpError(501, {
+    error: 'not_implemented',
+    field: 'attachments',
+    message: 'attachments cannot be sent yet — the mail transport cannot carry them, and a reply that quietly dropped the file would be worse than one that says so',
+  })
+}
+
+// cc / bcc: an array or a comma-separated string, lowercased and de-duplicated.
+// The field name stays un-indexed (`cc`, not `cc[0]`) because that is what the
+// Inbox composer already renders its inline error against, and the offending
+// address is named in the message itself.
+function addressList(body, field, { max = 25 } = {}) {
+  const raw = body?.[field]
+  if (raw === undefined || raw === null || raw === '') return []
+  const parts = (Array.isArray(raw) ? raw : String(raw).split(','))
+    .map((v) => String(v).trim().toLowerCase()).filter(Boolean)
+  if (parts.length > max) throw invalid(field, `${field} may contain at most ${max} addresses`)
+  const out = []
+  for (const address of parts) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
+      throw invalid(field, `${field} contains an invalid address: ${address}`)
+    }
+    if (!out.includes(address)) out.push(address)
   }
   return out
 }

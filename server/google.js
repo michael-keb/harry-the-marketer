@@ -9,6 +9,7 @@ import { db, logEvent } from './db.js'
 import { env, googleConfigured } from './env.js'
 import { requireUser, workspace } from './auth.js'
 import { suppressionFor, SuppressedError } from './suppression.js'
+import { REVIVE_MAILBOX_SQL } from './parity/schema.js'
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.send',
@@ -19,6 +20,10 @@ const SCOPES = [
 ].join(' ')
 
 const redirectUri = () => `${env.APP_URL}/api/google/callback`
+
+function isActiveMailbox(row) {
+  return Boolean(row && row.deleted_at == null && row.status === 'connected' && row.refresh_token)
+}
 
 // ---- token management -------------------------------------------------------
 
@@ -54,6 +59,7 @@ async function gmailFetch(mailbox, path, options = {}) {
   const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
     ...options,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {}) },
+    signal: AbortSignal.timeout(30_000),
   })
   if (!res.ok) throw new Error(`gmail ${path} failed (${res.status}): ${(await res.text()).slice(0, 300)}`)
   return res.json()
@@ -78,15 +84,22 @@ function b64url(str) {
 // cannot be routed around by adding a fifth caller. `workspaceId` is required
 // precisely so that a caller who cannot say whose suppression list applies
 // fails loudly at the call site instead of quietly skipping the check.
-export async function gmailSend(mailbox, { to, subject, body, html, threadId, inReplyTo, listUnsubscribe, workspaceId }) {
+export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body, html, threadId, inReplyTo, listUnsubscribe, workspaceId }) {
   const wsId = workspaceId ?? mailbox?.user_id
   if (!wsId) {
     throw new Error('gmailSend requires workspaceId — refusing to send without a suppression check')
   }
-  // `to` may be a comma-joined list (forwards). Every recipient is checked;
-  // one suppressed address refuses the whole send rather than silently
-  // dropping that recipient, because a partial forward is a worse surprise.
-  for (const address of String(to).split(',').map((a) => a.trim()).filter(Boolean)) {
+  const list = (v) => (Array.isArray(v) ? v : String(v || '').split(','))
+    .map((a) => String(a).trim()).filter(Boolean)
+  const ccList = list(cc)
+  const bccList = list(bcc)
+
+  // `to` may be a comma-joined list (forwards). Every recipient is checked —
+  // including cc and bcc, because someone who has asked never to hear from us
+  // has not made an exception for being copied. One suppressed address refuses
+  // the whole send rather than silently dropping that recipient, because a
+  // partial send is a worse surprise than a refused one.
+  for (const address of [...list(to), ...ccList, ...bccList]) {
     const bare = (address.match(/<([^>]+)>/) || [null, address])[1]
     const blocked = suppressionFor(wsId, { address: bare })
     if (blocked) throw new SuppressedError(blocked)
@@ -98,6 +111,12 @@ export async function gmailSend(mailbox, { to, subject, body, html, threadId, in
     `Subject: ${subject.replace(/[\r\n]/g, ' ')}`,
     'MIME-Version: 1.0',
   ]
+  // Gmail's `messages.send` takes the recipients from the MIME headers and
+  // strips `Bcc` from every delivered copy, so both belong here. Sending the
+  // blind copies as separate messages instead would duplicate the mail and
+  // break threading, which is worse than trusting documented behaviour.
+  if (ccList.length) headers.splice(2, 0, `Cc: ${ccList.join(', ')}`)
+  if (bccList.length) headers.splice(ccList.length ? 3 : 2, 0, `Bcc: ${bccList.join(', ')}`)
   if (inReplyTo) {
     headers.push(`In-Reply-To: ${inReplyTo}`, `References: ${inReplyTo}`)
   }
@@ -206,7 +225,20 @@ export const googleRouter = express.Router()
 const pendingStates = new Map() // state -> { userId, expiry }
 
 googleRouter.get('/api/google/connect', requireUser, workspace, (req, res) => {
-  if (!googleConfigured()) return res.redirect('/app/mailboxes?error=google_not_configured')
+  if (!googleConfigured()) return res.redirect('/app/connections?error=google_not_configured')
+
+  const hint = String(req.query.email || '').trim().toLowerCase()
+  if (hint) {
+    const existing = db.prepare(
+      "SELECT * FROM mailboxes WHERE user_id = ? AND provider = 'gmail' AND email = ? AND deleted_at IS NULL"
+    ).get(req.wsId, hint)
+    if (isActiveMailbox(existing)) {
+      return res.redirect(
+        `/app/connections?already_connected=1&email=${encodeURIComponent(hint)}`
+      )
+    }
+  }
+
   const state = crypto.randomBytes(16).toString('hex')
   pendingStates.set(state, { userId: req.wsId, expiry: Date.now() + 10 * 60 * 1000 })
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')
@@ -217,6 +249,7 @@ googleRouter.get('/api/google/connect', requireUser, workspace, (req, res) => {
   url.searchParams.set('access_type', 'offline')
   url.searchParams.set('prompt', 'consent') // always get a refresh token
   url.searchParams.set('state', state)
+  if (hint) url.searchParams.set('login_hint', hint)
   res.redirect(url.toString())
 })
 
@@ -227,12 +260,12 @@ googleRouter.get('/api/google/callback', async (req, res) => {
       const msg = error === 'access_denied'
         ? 'Google blocked access — add your Gmail as a Test user on the OAuth consent screen (or finish Google verification). See GOOGLE-OAUTH-VERIFICATION.md'
         : String(error)
-      return res.redirect(`/app/mailboxes?error=${encodeURIComponent(msg)}`)
+      return res.redirect(`/app/connections?error=${encodeURIComponent(msg)}`)
     }
     const pending = pendingStates.get(state)
     pendingStates.delete(state)
     for (const [s, p] of pendingStates) if (p.expiry < Date.now()) pendingStates.delete(s)
-    if (!pending || pending.expiry < Date.now()) return res.redirect('/app/mailboxes?error=invalid_state')
+    if (!pending || pending.expiry < Date.now()) return res.redirect('/app/connections?error=invalid_state')
 
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -255,21 +288,36 @@ googleRouter.get('/api/google/callback', async (req, res) => {
     const info = await infoRes.json()
 
     const expiry = Date.now() + (tokens.expires_in || 3600) * 1000
+    const email = info.email.toLowerCase()
     const existing = db.prepare("SELECT * FROM mailboxes WHERE user_id = ? AND provider = 'gmail' AND email = ?")
-      .get(pending.userId, info.email.toLowerCase())
+      .get(pending.userId, email)
+
+    if (isActiveMailbox(existing)) {
+      return res.redirect(
+        `/app/connections?already_connected=1&email=${encodeURIComponent(email)}`
+      )
+    }
+
     if (existing) {
+      // A removed mailbox is revived rather than left marked: the row is still
+      // there because the delete is soft, and UNIQUE (user_id, provider, email)
+      // means reconnecting cannot make a second one. Warm-up restarts from the
+      // beginning — Docs/email-accounts/delete.md TC-11.
+      if (String(existing.deleted_at || '') !== '') {
+        db.prepare(REVIVE_MAILBOX_SQL).run(info.name || existing.display_name, existing.id)
+      }
       db.prepare(
         "UPDATE mailboxes SET access_token = ?, refresh_token = COALESCE(NULLIF(?, ''), refresh_token), token_expiry = ?, status = 'connected', last_error = '', display_name = ? WHERE id = ?"
       ).run(tokens.access_token, tokens.refresh_token || '', expiry, info.name || existing.display_name, existing.id)
     } else {
       db.prepare(
-        "INSERT INTO mailboxes (user_id, provider, email, display_name, access_token, refresh_token, token_expiry) VALUES (?, 'gmail', ?, ?, ?, ?, ?)"
-      ).run(pending.userId, info.email.toLowerCase(), info.name || '', tokens.access_token, tokens.refresh_token || '', expiry)
+        "INSERT INTO mailboxes (user_id, provider, email, display_name, access_token, refresh_token, token_expiry, deleted_at) VALUES (?, 'gmail', ?, ?, ?, ?, ?, NULL)"
+      ).run(pending.userId, email, info.name || '', tokens.access_token, tokens.refresh_token || '', expiry)
     }
-    logEvent(pending.userId, { type: 'mailbox_connected', detail: `gmail:${info.email}` })
-    res.redirect('/app/mailboxes?connected=1')
+    logEvent(pending.userId, { type: 'mailbox_connected', detail: `gmail:${email}` })
+    res.redirect('/app/connections?connected=1')
   } catch (err) {
     console.error('[google] callback error', err)
-    res.redirect(`/app/mailboxes?error=${encodeURIComponent('Google connection failed — check server logs')}`)
+    res.redirect(`/app/connections?error=${encodeURIComponent('Google connection failed — check server logs')}`)
   }
 })

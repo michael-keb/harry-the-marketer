@@ -334,8 +334,13 @@ export async function vocabulary(kind, params = {}) {
 
   const cached = readCache(kind, key)
   if (cached) {
-    meter(`prospects.filters.${kind}`, Date.now() - started, true, 'cache=hit')
-    return { rows: cached.rows, fetchedAt: cached.fetchedAt, cached: true, configured: true }
+    // The rows are real — they came from a live call — but `configured` describes
+    // the CONNECTION, not the payload. A cache hit in a workspace with no
+    // credentials must still say the provider is not connected, or the UI reports
+    // a working integration on the strength of somebody else's old lookup.
+    const live = upstream.configured()
+    meter(`prospects.filters.${kind}`, Date.now() - started, true, `cache=hit configured=${live}`)
+    return { rows: cached.rows, fetchedAt: cached.fetchedAt, cached: true, configured: live }
   }
 
   if (!upstream.configured()) {
@@ -350,6 +355,21 @@ export async function vocabulary(kind, params = {}) {
   return { rows, fetchedAt: nowIso(), cached: false, configured: true, pagination: res?.pagination || null }
 }
 
+// Was there a list to draw a conclusion from? A live call or a cache hit both
+// mean real rows came back. Neither means nothing was looked at, and every
+// count and every `hasMore` below is a claim about the provider's list rather
+// than about the request — so with no list they are unknown, not zero.
+function sawAList(out) {
+  return Boolean(out.configured || out.cached)
+}
+
+// `hasMore` for the four lookups that document no pagination object: derived
+// from the page being full, which is their only end-of-list signal — and null
+// when there was no page, because "you have seen the whole list" is a finding.
+function hasMoreFrom(out, items, limit) {
+  return sawAList(out) ? items.length === limit : null
+}
+
 // The shared response envelope for a vocabulary route. `pagination` is present
 // for the lookups that document one; the flat lookups get `hasMore` derived
 // from the page being full, which is the only end-of-list signal they have.
@@ -362,10 +382,62 @@ function vocabResponse(kind, out, { limit, offset }, extra = {}) {
     fetchedAt: out.fetchedAt,
     ...extra,
   }
-  if (spec.flat) base.hasMore = items.length === limit
-  else base.pagination = out.pagination || { limit, offset, page: Math.floor(offset / Math.max(limit, 1)) + 1, count: items.length }
+  if (spec.flat) base.hasMore = hasMoreFrom(out, items, limit)
+  else {
+    // `limit`, `offset` and `page` echo the request and are true either way.
+    // `count` is the provider's answer — "this many cities match" — so with no
+    // provider and no cache it is null. Zero there reads as "nothing matches"
+    // and sends the user off relaxing a filter that was never applied.
+    base.pagination = out.pagination || {
+      limit,
+      offset,
+      page: Math.floor(offset / Math.max(limit, 1)) + 1,
+      count: sawAList(out) ? items.length : null,
+    }
+  }
   if (!out.configured) return { ...notConfigured(), ...base }
   return { configured: true, ...base }
+}
+
+// Three of the lookups document a taxonomy the client is not meant to page:
+// the seniority ladder, the industry tree and the flat sub-industry list. The
+// route walks the provider's pages until one comes back short, so the picker
+// shows the whole vocabulary in one response. Bounded, because a provider that
+// ignores `offset` would otherwise loop for ever.
+const MAX_VOCAB_PAGES = 20
+
+async function vocabularyExhaustive(kind, params = {}) {
+  const limit = Number(params.limit) || MAX_VOCAB_LIMIT
+  let offset = Number(params.offset) || 0
+  const rows = []
+  const seen = new Set()
+  let cached = true
+  let configuredNow = false
+  let fetchedAt = null
+  let pages = 0
+
+  while (pages < MAX_VOCAB_PAGES) {
+    const out = await vocabulary(kind, { ...params, limit, offset })
+    pages++
+    configuredNow = out.configured
+    cached = cached && out.cached
+    if (fetchedAt === null) fetchedAt = out.fetchedAt
+    for (const row of out.rows) {
+      // A provider that ignores `offset` would otherwise repeat page one for
+      // ever; identity is the row's own id where it has one.
+      const key = row?.id !== undefined && row?.id !== null ? `id:${row.id}` : JSON.stringify(row)
+      if (seen.has(key)) continue
+      seen.add(key)
+      rows.push(row)
+    }
+    if (!sawAList(out)) break
+    if (out.rows.length < limit) break
+    offset += limit
+  }
+  // No provider `pagination` block is carried through: it would describe the
+  // LAST page fetched while `items` holds every page, so the envelope is
+  // synthesised from the assembled list instead.
+  return { rows, fetchedAt, cached, configured: configuredNow, pagination: null, pages }
 }
 
 function vocabParams(query, { defaultLimit = MAX_VOCAB_LIMIT } = {}) {
@@ -437,12 +509,33 @@ function parseJson(text, fallback) {
   try { return JSON.parse(text) } catch { return fallback }
 }
 
+// Provider fetched-list rows, keyed by their human name. `fetch-contacts` never
+// returns the id of the fetched list it created, and Harry has no column to keep
+// one in, so `search_string` is the only handle the documented payloads share.
+// Keyed here once, because two callers need the same join and joining on
+// `provider_filter_id` — a SEARCH's id, from a different id space entirely —
+// silently matches the wrong row or none at all.
+function fetchedByName(fetchedLeads) {
+  const map = new Map()
+  for (const row of Array.isArray(fetchedLeads) ? fetchedLeads : []) {
+    const key = String(row?.search_string || '').trim().toLowerCase()
+    if (key && !map.has(key)) map.set(key, row)
+  }
+  return map
+}
+
 function shapeSearch(row, extra = {}) {
   return {
     id: row.id,
     name: row.name,
     filters: parseJson(row.filters, {}),
-    totalCount: row.total_count,
+    // A search that has never been run has the column's default of zero, which
+    // is indistinguishable from "the provider matched nobody". Rendering that
+    // as a count would put "0 people" beside a search that was never executed —
+    // and the recent-searches payload documents no count at all. So zero is
+    // reported as unknown; only a figure the provider actually returned is a
+    // number here.
+    totalCount: row.total_count > 0 ? row.total_count : null,
     isSaved: Boolean(row.is_saved),
     createdBy: row.created_by,
     lastReviewedAt: row.last_reviewed_at || null,
@@ -578,6 +671,43 @@ function cacheSet(store, key, value) {
   return value
 }
 
+// A fetch changes the credit balance, so EVERY analytics figure this workspace
+// holds is stale afterwards — the account-wide one and each per-search one.
+// Clearing only the account key left the per-search figures quoting a balance
+// the fetch had already spent.
+function invalidateAnalytics(wsId) {
+  for (const key of analyticsCache.keys()) {
+    if (key === `${wsId}:` || key.startsWith(`${wsId}:`)) analyticsCache.delete(key)
+  }
+}
+
+// The caps are account-wide, so any snapshot this workspace holds carries them.
+// The freshest one is used, rather than only the account-wide key, so a fetch is
+// bounded whenever Harry has been told what the bounds are.
+function capSnapshot(wsId) {
+  let best = null
+  for (const [key, hit] of analyticsCache) {
+    if (!key.startsWith(`${wsId}:`)) continue
+    if (Date.now() - hit.at > ANALYTICS_TTL_MS) continue
+    if (!best || hit.at > best.at) best = hit
+  }
+  return best?.value || null
+}
+
+// The provider's `trend` word against its own two month figures. Only the two
+// words the docs actually show are judged; anything else is left alone rather
+// than mapped to a direction that might point the wrong way.
+export function inconsistentTrend(block) {
+  if (!block) return false
+  const trend = String(block.trend || '').toLowerCase()
+  const current = Number(block.current)
+  const previous = Number(block.previousMonth)
+  if (!trend || !Number.isFinite(current) || !Number.isFinite(previous)) return false
+  if (trend === 'increase' && current <= previous) return true
+  if (trend === 'decrease' && current >= previous) return true
+  return false
+}
+
 // Fetches are idempotent within a short window, keyed on everything that
 // decides what is charged for. A double click or a retried request returns the
 // first result rather than paying twice.
@@ -616,8 +746,12 @@ export function register(api) {
       const full = readCache('countries', cacheKey({ search: '', limit: MAX_VOCAB_LIMIT, offset: 0 }))
       if (full) {
         const needle = search.toLowerCase()
-        const rows = full.rows.filter((r) => String(r.country_name || '').toLowerCase().startsWith(needle))
-        return vocabResponse('countries', { rows, fetchedAt: full.fetchedAt, cached: true, configured: true },
+        const matched = full.rows.filter((r) => String(r.country_name || '').toLowerCase().startsWith(needle))
+        // Page the local filter the same way the provider would, so `pagination`
+        // describes what was actually returned rather than the whole match set.
+        const rows = matched.slice(offset, offset + limit)
+        return vocabResponse('countries',
+          { rows, fetchedAt: full.fetchedAt, cached: true, configured: upstream.configured() },
           { limit, offset })
       }
     }
@@ -634,15 +768,44 @@ export function register(api) {
     const { limit, offset, search } = vocabParams(req.query)
     const countryIds = str(req.query, 'countryIds', { max: MAX_SEARCH_TEXT })
       .split(',').map((s) => s.trim()).filter(Boolean)
+    // State ids a draft is holding. They are checked against the list this call
+    // returns so a selection invalidated by a country change is flagged.
+    const selectedStateIds = str(req.query, 'stateIds', { max: MAX_SEARCH_TEXT })
+      .split(',').map((s) => s.trim()).filter(Boolean)
 
-    const cachedCountries = readCache('countries', cacheKey({ search: '', limit: MAX_VOCAB_LIMIT, offset: 0 }))
-    const byId = new Map((cachedCountries?.rows || []).map((r) => [String(r.id), r.country_name]))
+    // Resolution reads the cached countries list, and warms it when cold rather
+    // than giving up: an unresolved id would otherwise mean an UNFILTERED state
+    // request, which returns every region on earth while the UI says it is
+    // narrowed. The lookup is the same (kind, query) pair the countries route
+    // caches, so a warm cache costs nothing.
+    let countryRows = readCache('countries', cacheKey({ search: '', limit: MAX_VOCAB_LIMIT, offset: 0 }))?.rows || null
+    if (countryIds.length && !countryRows) {
+      const fresh = await vocabulary('countries', { search: '', limit: MAX_VOCAB_LIMIT, offset: 0 })
+      countryRows = fresh.rows
+    }
+    const byId = new Map((countryRows || []).map((r) => [String(r.id), r.country_name]))
     const names = []
     const unresolved = []
     for (const id of countryIds) {
       const name = byId.get(String(id))
       if (name) names.push(name)
       else unresolved.push(id)
+    }
+
+    // Asked to narrow, unable to narrow. Serving the unfiltered world here would
+    // present a list of every state as though it belonged to the chosen
+    // countries, so nothing is returned and the caller is told which ids failed.
+    if (countryIds.length && !names.length) {
+      return vocabResponse('states',
+        { rows: [], fetchedAt: nowIso(), cached: false, configured: upstream.configured() },
+        { limit, offset },
+        {
+          unresolvedCountryIds: unresolved,
+          splitRequests: 0,
+          narrowed: false,
+          staleStateIds: [],
+          staleUnknown: true,
+        })
     }
 
     // Split into chunks whose assembled comma-separated value fits the
@@ -669,10 +832,22 @@ export function register(api) {
       for (const row of out.rows) if (!rows.some((r) => r.id === row.id)) rows.push(row)
     }
     const configuredNow = upstream.configured()
+    // A selection is only "no longer available" if a real list came back to
+    // compare it against. With no provider and no cache there is no list, so
+    // nothing is declared stale — an unknown is reported as unknown rather than
+    // as a confident "that state is gone".
+    const known = configuredNow || cached
+    const live = new Set(rows.map((r) => String(r.id)))
     return vocabResponse('states',
       { rows, fetchedAt: nowIso(), cached, configured: configuredNow },
       { limit, offset },
-      { unresolvedCountryIds: unresolved, splitRequests: chunks.length })
+      {
+        unresolvedCountryIds: unresolved,
+        splitRequests: chunks.length,
+        narrowed: names.length > 0,
+        staleStateIds: known ? selectedStateIds.filter((id) => !live.has(String(id))) : [],
+        staleUnknown: !known,
+      })
   }))
 
   // GET /api/prospects/filters/departments
@@ -683,11 +858,12 @@ export function register(api) {
   }))
 
   // GET /api/prospects/filters/levels — the seniority ladder is short, so the
-  // route asks for the whole thing rather than making the client page a filter.
+  // route walks the provider's pages until one comes back short and returns the
+  // whole ladder, rather than making the client page a filter list.
   api.get('/prospects/filters/levels', handler(async (req) => {
     const { limit, offset, search } = vocabParams(req.query)
-    const out = await vocabulary('levels', { search, limit, offset })
-    return vocabResponse('levels', out, { limit, offset })
+    const out = await vocabularyExhaustive('levels', { search, limit, offset })
+    return vocabResponse('levels', out, { limit, offset }, { pagesFetched: out.pages })
   }))
 
   // GET /api/prospects/filters/head-counts — bands are strings such as "11-50".
@@ -706,10 +882,16 @@ export function register(api) {
     const wanted = str(req.query, 'staleIds', { max: MAX_SEARCH_TEXT })
       .split(',').map((s) => s.trim()).filter(Boolean)
     const out = await vocabulary('revenue', {})
+    // "This band no longer exists" is a claim about the provider's active
+    // options. Without a list to check against — no provider and nothing cached
+    // — that claim cannot be made, so no band is flagged and the caller is told
+    // the answer is unknown instead of being handed a confident empty-list
+    // verdict that would strike every band a user had selected.
+    const known = out.configured || out.cached
     const live = new Set(out.rows.map((r) => String(r.id)))
-    const stale = wanted.filter((id) => !live.has(String(id)))
+    const stale = known ? wanted.filter((id) => !live.has(String(id))) : []
     const items = out.rows.map(VOCAB.revenue.shape)
-    const body = { items, stale, cached: out.cached, fetchedAt: out.fetchedAt }
+    const body = { items, stale, staleUnknown: !known, cached: out.cached, fetchedAt: out.fetchedAt }
     return out.configured ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -719,8 +901,8 @@ export function register(api) {
   api.get('/prospects/filters/industries', handler(async (req) => {
     const { limit, offset, search } = vocabParams(req.query)
     const withSubIndustry = bool(req.query, 'withSubIndustry', true) ? 'true' : 'false'
-    const out = await vocabulary('industries', { search, withSubIndustry, limit, offset })
-    return vocabResponse('industries', out, { limit, offset }, { withSubIndustry })
+    const out = await vocabularyExhaustive('industries', { search, withSubIndustry, limit, offset })
+    return vocabResponse('industries', out, { limit, offset }, { withSubIndustry, pagesFetched: out.pages })
   }))
 
   // GET /api/prospects/filters/sub-industries — this lookup DOES return an id
@@ -732,14 +914,21 @@ export function register(api) {
     const industryId = req.query.industryId ? idParam(req.query, 'industryId') : null
     const selected = new Set(str(req.query, 'industryIds', { max: MAX_SEARCH_TEXT })
       .split(',').map((s) => s.trim()).filter(Boolean))
-    const out = await vocabulary('sub-industries', { search, industry_id: industryId ?? '', limit, offset })
+    const out = await vocabularyExhaustive('sub-industries', { search, industry_id: industryId ?? '', limit, offset })
     const items = out.rows.map(VOCAB['sub-industries'].shape).map((item) => ({
       ...item,
       parentMissing: selected.size > 0 && item.industryId !== null && !selected.has(String(item.industryId)),
     }))
     const body = {
       items,
-      pagination: out.pagination || { limit, offset, page: Math.floor(offset / limit) + 1, count: items.length },
+      pagination: out.pagination || {
+        limit,
+        offset,
+        page: Math.floor(offset / limit) + 1,
+        // A count is the provider's answer; with no list there is no answer.
+        count: sawAList(out) ? items.length : null,
+      },
+      pagesFetched: out.pages,
       cached: out.cached,
       fetchedAt: out.fetchedAt,
     }
@@ -757,7 +946,7 @@ export function register(api) {
       .all(req.wsId).map((r) => r.c).filter(Boolean))
     const items = out.rows.map(VOCAB.companies.shape)
       .map((i) => ({ ...i, alreadyInLeads: owned.has(String(i.name || '').trim().toLowerCase()) }))
-    const body = { items, hasMore: items.length === limit, cached: out.cached, fetchedAt: out.fetchedAt }
+    const body = { items, hasMore: hasMoreFrom(out, items, limit), cached: out.cached, fetchedAt: out.fetchedAt }
     return out.configured ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -766,7 +955,7 @@ export function register(api) {
     const { limit, offset, search } = vocabParams(req.query)
     const out = await vocabulary('domains', { search, limit, offset })
     const items = out.rows.map(VOCAB.domains.shape)
-    const body = { items, hasMore: items.length === limit, cached: out.cached, fetchedAt: out.fetchedAt }
+    const body = { items, hasMore: hasMoreFrom(out, items, limit), cached: out.cached, fetchedAt: out.fetchedAt }
     return out.configured ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -789,17 +978,31 @@ export function register(api) {
 
     const matched = []
     const unknown = []
+    const unchecked = []
     const remainder = normalised.filter((d) => !existing.includes(d))
     for (const d of remainder) {
       const out = await vocabulary('domains', { search: d, limit: MAX_VOCAB_LIMIT, offset: 0 })
       const hit = out.rows.some((r) => normaliseDomain(r.domain_name) === d)
       if (hit) matched.push(d)
       else unknown.push(d)
+      // A miss against a list that was never fetched is not a miss.
+      if (!hit && !sawAList(out)) unchecked.push(d)
     }
 
     meter('prospects.domains.reconcile', 0, true,
       `size=${normalised.length} matched=${matched.length} unknown=${unknown.length} existing=${existing.length}`)
-    const body = { matched, unknown, existing, normalised }
+    // "The provider has never heard of this company" is a finding, and the whole
+    // point of the reconcile list is that a user acts on it. With nothing to ask,
+    // the remainder is UNCHECKED rather than unknown-to-the-provider, and the
+    // flag says which of the two this is.
+    const body = {
+      matched,
+      unknown,
+      existing,
+      normalised,
+      unchecked,
+      checkedAgainstProvider: unchecked.length === 0,
+    }
     return upstream.configured() ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -808,7 +1011,7 @@ export function register(api) {
     const { limit, offset, search } = vocabParams(req.query)
     const out = await vocabulary('job-titles', { search, limit, offset })
     const items = out.rows.map(VOCAB['job-titles'].shape)
-    const body = { items, hasMore: items.length === limit, cached: out.cached, fetchedAt: out.fetchedAt }
+    const body = { items, hasMore: hasMoreFrom(out, items, limit), cached: out.cached, fetchedAt: out.fetchedAt }
     return out.configured ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -819,17 +1022,31 @@ export function register(api) {
     const titles = stringList(req.body, 'titles', { max: MAX_RECONCILE, required: true })
     const matched = []
     const unmatched = []
+    const unchecked = []
     for (const title of titles) {
       const out = await vocabulary('job-titles', { search: title, limit: MAX_VOCAB_LIMIT, offset: 0 })
       const hit = out.rows.find((r) => String(r.job_title || '').trim().toLowerCase() === title.toLowerCase())
       if (hit) matched.push(hit.job_title)
       else unmatched.push(title)
+      // "The provider does not index this title" cannot be concluded from a list
+      // that was never fetched.
+      if (!hit && !sawAList(out)) unchecked.push(title)
     }
-    audit(req, {
-      type: 'prospect_titles_reconciled',
-      detail: `${req.user.email} reconciled ${titles.length} ICP title(s): ${matched.length} matched, ${unmatched.length} unmatched`,
-    })
-    const body = { matched, unmatched }
+    // The events row exists so a user can audit why their search targeted the
+    // titles it did. Writing "0 matched, 3 unmatched" for a reconciliation that
+    // never reached the provider would put a finding in the activity trail that
+    // nobody performed, so the unchecked case says exactly that instead.
+    audit(req, unchecked.length === titles.length && titles.length > 0
+      ? {
+        type: 'prospect_titles_reconciled',
+        detail: `${req.user.email} could not reconcile ${titles.length} ICP title(s) — no prospect provider is connected, so none was checked`,
+      }
+      : {
+        type: 'prospect_titles_reconciled',
+        detail: `${req.user.email} reconciled ${titles.length} ICP title(s): ${matched.length} matched, ${unmatched.length} unmatched`
+          + (unchecked.length ? `, ${unchecked.length} not checked` : ''),
+      })
+    const body = { matched, unmatched, unchecked, checkedAgainstProvider: unchecked.length === 0 }
     return upstream.configured() ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -838,7 +1055,7 @@ export function register(api) {
     const { limit, offset, search } = vocabParams(req.query)
     const out = await vocabulary('keywords', { search, limit, offset })
     const items = out.rows.map(VOCAB.keywords.shape)
-    const body = { items, hasMore: items.length === limit, cached: out.cached, fetchedAt: out.fetchedAt }
+    const body = { items, hasMore: hasMoreFrom(out, items, limit), cached: out.cached, fetchedAt: out.fetchedAt }
     return out.configured ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -849,18 +1066,28 @@ export function register(api) {
     const signals = stringList(req.body, 'signals', { max: MAX_RECONCILE, required: true })
     const matched = []
     const unmatched = []
+    const unchecked = []
     for (const signal of signals) {
       const needle = signal.trim().toLowerCase()
       const out = await vocabulary('keywords', { search: needle, limit: MAX_VOCAB_LIMIT, offset: 0 })
       const hit = out.rows.find((r) => String(r.keyword || '').trim().toLowerCase() === needle)
       if (hit) matched.push(hit.keyword)
       else unmatched.push(signal)
+      if (!hit && !sawAList(out)) unchecked.push(signal)
     }
-    audit(req, {
-      type: 'prospect_keywords_reconciled',
-      detail: `${req.user.email} reconciled ${signals.length} ICP signal(s): ${matched.length} matched, ${unmatched.length} unmatched`,
-    })
-    const body = { matched, unmatched }
+    // Same rule as the title reconciliation: an unperformed reconciliation is
+    // never recorded as one that found nothing.
+    audit(req, unchecked.length === signals.length && signals.length > 0
+      ? {
+        type: 'prospect_keywords_reconciled',
+        detail: `${req.user.email} could not reconcile ${signals.length} ICP signal(s) — no prospect provider is connected, so none was checked`,
+      }
+      : {
+        type: 'prospect_keywords_reconciled',
+        detail: `${req.user.email} reconciled ${signals.length} ICP signal(s): ${matched.length} matched, ${unmatched.length} unmatched`
+          + (unchecked.length ? `, ${unchecked.length} not checked` : ''),
+      })
+    const body = { matched, unmatched, unchecked, checkedAgainstProvider: unchecked.length === 0 }
     return upstream.configured() ? { configured: true, ...body } : { ...notConfigured(), ...body }
   }))
 
@@ -918,7 +1145,11 @@ export function register(api) {
 
     if (!upstream.configured()) {
       meter('prospects.search', Date.now() - started, true, `unconfigured filters=${filterNames(filters).join('|')}`)
-      return { ...notConfigured(), ...shared, items: [], totalCount: 0, cursor: null }
+      // `totalCount: 0` would be a finding — "nobody matches these filters" — and
+      // the empty state that follows from it invites the user to relax a filter
+      // that was never applied to anything. Nothing was searched, so the count is
+      // null: unknown, not zero.
+      return { ...notConfigured(), ...shared, items: [], totalCount: null, cursor: null }
     }
 
     const res = await upstream.call(`${BASE}/search-contacts`, { method: 'POST', body })
@@ -1005,13 +1236,21 @@ export function register(api) {
       const like = `%${search.toLowerCase()}%`
       args.push(like, like, like)
     }
-    if (verificationStatus) {
-      clauses.push('pc.email_verification_status = ?')
-      args.push(verificationStatus)
+    // Upstream these are two fields; Harry stores ONE status per contact, and
+    // what lands in it is whichever of the two the provider sent — `valid` for
+    // one contact, `catch_all_hard_bounced` for the next. So `catch_all` here
+    // means "the stored status is catch_all, in any of its documented forms",
+    // and the two filters compose instead of contradicting each other and
+    // returning an empty list that reads as "no contacts match".
+    if (verificationStatus === 'catch_all') {
+      clauses.push("substr(lower(pc.email_verification_status), 1, 9) = 'catch_all'")
+    } else if (verificationStatus) {
+      clauses.push('lower(pc.email_verification_status) = ?')
+      args.push(verificationStatus.toLowerCase())
     }
     if (catchAllStatus) {
-      clauses.push('pc.email_verification_status = ?')
-      args.push(catchAllStatus)
+      clauses.push('lower(pc.email_verification_status) = ?')
+      args.push(catchAllStatus.toLowerCase())
     }
 
     const where = clauses.join(' AND ')
@@ -1072,16 +1311,25 @@ export function register(api) {
     ).all(req.wsId, limit, offset)
 
     let providerIds = null
+    let providerComplete = false
     if (upstream.configured()) {
       const res = await upstream.call(`${BASE}/search-filters/saved-searches${qs({ limit, offset })}`, { method: 'GET' })
       const saved = res?.data?.savedSearches || []
       providerIds = new Set(saved.map((s) => String(s.id)))
+      // "Deleted at the provider" can only be concluded from a COMPLETE list.
+      // This call is paged, so a search sitting on page two is missing from the
+      // page, not missing from the account — and the count that decides which is
+      // at `data.totalCount`, never inside a `pagination` object here.
+      const totalUpstream = Number(res?.data?.totalCount ?? saved.length)
+      providerComplete = Number.isFinite(totalUpstream) && saved.length >= totalUpstream
     }
 
     const items = rows.map((r) => shapeSearch(r, {
-      // A local row the provider has never heard of is orphaned; it is shown
-      // and flagged rather than hidden, because a user saved it deliberately.
-      orphaned: providerIds ? !(r.provider_filter_id && providerIds.has(String(r.provider_filter_id))) : false,
+      // A row that was never linked is not orphaned — it was never at the
+      // provider to begin with, and `linked: false` already says so. Orphaned
+      // means: it WAS linked, and the provider's full list no longer has it.
+      orphaned: Boolean(providerIds && providerComplete && r.provider_filter_id
+        && !providerIds.has(String(r.provider_filter_id))),
     }))
     const body = { items, totalCount: total, pagination: { limit, offset, hasMore: offset + items.length < total } }
     return upstream.configured() ? { configured: true, ...body } : { ...notConfigured(), ...body }
@@ -1095,6 +1343,14 @@ export function register(api) {
     const filters = req.body?.filters && typeof req.body.filters === 'object' ? req.body.filters : {}
     const limit = int(req.body, 'limit', { min: 1, max: MAX_SAVE_LIMIT, fallback: 100 })
     const body = translateSearch(filters, { limit, searchString: name })
+
+    // The provider documents no uniqueness rule for `search_string`, so a second
+    // save under the same name succeeds and leaves two identical-looking rows.
+    // The save is not refused — that would be Harry inventing a rule the API does
+    // not have — but the collision is reported so the UI can warn.
+    const duplicateName = Boolean(db.prepare(
+      'SELECT 1 FROM prospect_searches WHERE workspace_id = ? AND is_saved = 1 AND lower(trim(name)) = ?'
+    ).get(req.wsId, name.trim().toLowerCase()))
 
     const searchId = tx(() => {
       const info = db.prepare(
@@ -1123,7 +1379,7 @@ export function register(api) {
       detail: `${req.user.email} saved prospect search "${name}" (${filterNames(filters).join(', ') || 'no filters'})`,
     })
     const row = db.prepare('SELECT * FROM prospect_searches WHERE id = ?').get(searchId)
-    const out = { ...shapeSearch(row), linked, message: 'Search saved successfully' }
+    const out = { ...shapeSearch(row), linked, duplicateName, message: 'Search saved successfully' }
     return upstream.configured() ? { configured: true, ...out } : { ...notConfigured(), ...out }
   }))
 
@@ -1152,7 +1408,7 @@ export function register(api) {
     // The provider's caps are the guarantee, not the client's. A count over
     // `maxSingleFetchLimit`, or over what is left of today's allowance, is
     // refused here with the cap stated rather than paid for and rejected.
-    const snapshot = cacheGet(analyticsCache, `${req.wsId}:`, ANALYTICS_TTL_MS)
+    const snapshot = capSnapshot(req.wsId)
     if (hasCount && snapshot?.maxSingleFetchLimit && count > snapshot.maxSingleFetchLimit) {
       throw invalid('count', `count may be at most ${snapshot.maxSingleFetchLimit} in a single fetch`)
     }
@@ -1215,7 +1471,7 @@ export function register(api) {
         db.prepare("UPDATE prospect_fetches SET status = 'insufficient_credits', error = ?, updated_at = datetime('now') WHERE id = ?")
           .run(outcome.message, fetchId)
       })
-      analyticsCache.delete(`${req.wsId}:`)
+      invalidateAnalytics(req.wsId)
       meter('prospects.fetch', Date.now() - started, false, `success=false requested=${requested}`)
       audit(req, {
         type: 'prospect_fetch_refused',
@@ -1272,7 +1528,7 @@ export function register(api) {
       return { created, updated, skipped }
     })
 
-    analyticsCache.delete(`${req.wsId}:`)   // a fetch changes the credit balance
+    invalidateAnalytics(req.wsId)   // a fetch changes every figure, per-search ones included
     meter('prospects.fetch', Date.now() - started, true,
       `requested=${requested} fetched=${outcome.contacts.length} created=${result.created}`)
     audit(req, {
@@ -1343,12 +1599,33 @@ export function register(api) {
 
     const run = (async () => {
       const previousReview = parseJson(row.last_review, {})
-      let review = { recordsUpdated: 0, fetchDetails: {} }
+      // `records_updated: 0` is a documented finding — "nothing has changed since
+      // the last review". It is NOT what "we never asked" looks like, and the two
+      // must not render as the same sentence, so an unasked review reports null
+      // and says which of the two preconditions was missing.
+      const canReview = upstream.configured() && Boolean(row.provider_filter_id)
+      let review = {
+        recordsUpdated: null,
+        fetchDetails: null,
+        providerReviewed: false,
+        notReviewedBecause: upstream.configured() ? 'search_not_linked_to_provider' : 'provider_not_configured',
+      }
 
-      if (upstream.configured() && row.provider_filter_id) {
+      if (canReview) {
         const res = await upstream.call(`${BASE}/review-contacts/${row.provider_filter_id}`, { method: 'PATCH' })
         const data = res?.data || {}
-        review = { recordsUpdated: Number(data.records_updated || 0), fetchDetails: data.fetch_details || {} }
+        review = {
+          recordsUpdated: Number(data.records_updated || 0),
+          fetchDetails: data.fetch_details || {},
+          providerReviewed: true,
+          notReviewedBecause: null,
+          // The response's own status lists drive the contacts view's quality
+          // filters, rather than a hardcoded set.
+          catchAllStatusList: Array.isArray(data.fetch_details?.catch_all_status_list)
+            ? data.fetch_details.catch_all_status_list : [],
+          verificationStatusList: Array.isArray(data.fetch_details?.verification_status_list)
+            ? data.fetch_details.verification_status_list : [],
+        }
       }
 
       // Reconciliation onto existing leads updates the STATUS only. The docs do
@@ -1377,12 +1654,20 @@ export function register(api) {
 
       audit(req, {
         type: 'prospect_search_reviewed',
-        detail: `${req.user.email} reviewed "${row.name}" — ${review.recordsUpdated} record(s) updated, ${flagged} lead(s) flagged`,
+        detail: review.providerReviewed
+          ? `${req.user.email} reviewed "${row.name}" — ${review.recordsUpdated} record(s) updated, ${flagged} lead(s) flagged`
+          : `${req.user.email} re-checked "${row.name}" against stored contacts only (${review.notReviewedBecause}) — ${flagged} lead(s) flagged`,
       })
       const body = {
         searchId: row.id,
         recordsUpdated: review.recordsUpdated,
         fetchDetails: review.fetchDetails,
+        providerReviewed: review.providerReviewed,
+        notReviewedBecause: review.notReviewedBecause,
+        // Documented as driving the contacts view's quality filters; absent
+        // rather than guessed when the provider was not asked.
+        verificationStatusList: review.verificationStatusList ?? null,
+        catchAllStatusList: review.catchAllStatusList ?? null,
         // The previous figures survive so the UI can show a delta rather than
         // an absolute that means nothing on its own.
         previousReview,
@@ -1411,14 +1696,14 @@ export function register(api) {
     let providerRows = new Map()
     if (upstream.configured()) {
       const res = await upstream.call(`${BASE}/search-filters/fetched-searches${qs({ limit, offset })}`, { method: 'GET' })
-      providerRows = new Map((res?.data?.fetchedLeads || []).map((r) => [String(r.id), r]))
+      providerRows = fetchedByName(res?.data?.fetchedLeads)
     }
 
     const items = rows.map((r) => {
       const leads = db.prepare(
         'SELECT COUNT(*) AS n FROM prospect_contacts WHERE fetch_id = ? AND imported_lead_id IS NOT NULL'
       ).get(r.id).n
-      const provider = r.provider_filter_id ? providerRows.get(String(r.provider_filter_id)) : null
+      const provider = providerRows.get(String(r.name || '').trim().toLowerCase()) || null
       return shapeFetch(r, {
         leadsCreated: leads,
         fetchDetails: provider?.fetch_details || null,
@@ -1440,11 +1725,24 @@ export function register(api) {
     if (req.wsRole === 'viewer') throw forbidden('You do not have permission to rename this list')
     const previous = row.name
 
-    if (upstream.configured() && row.provider_filter_id) {
-      await upstream.call(`${BASE}/search-filters/fetched-searches/${row.id}`, {
-        method: 'PUT',
-        body: renameBody(name),
-      })
+    // The provider's fetched-list id is a DIFFERENT id from the search's
+    // `filter_id`, and `fetch-contacts` never returns it, so Harry does not hold
+    // one. It is resolved from the listing by `search_string` — the same
+    // resolution step a save needs, for the same reason — and when no row
+    // matches, nothing is sent. Putting Harry's own row id in that URL would
+    // address a stranger's list or a list that does not exist.
+    let providerLinked = false
+    if (upstream.configured()) {
+      const res = await upstream.call(`${BASE}/search-filters/fetched-searches${qs({ limit: 100, offset: 0 })}`,
+        { method: 'GET' })
+      const match = fetchedByName(res?.data?.fetchedLeads).get(String(previous).trim().toLowerCase())
+      if (match && match.id !== undefined && match.id !== null) {
+        await upstream.call(`${BASE}/search-filters/fetched-searches/${match.id}`, {
+          method: 'PUT',
+          body: renameBody(name),
+        })
+        providerLinked = true
+      }
     }
     tx(() => {
       db.prepare("UPDATE prospect_fetches SET name = ?, updated_at = datetime('now') WHERE id = ?").run(name, id)
@@ -1453,7 +1751,15 @@ export function register(api) {
       type: 'prospect_fetch_renamed',
       detail: `${req.user.email} renamed fetched list "${previous}" to "${name}"`,
     })
-    const out = { id, name, previousName: previous, message: 'Fetched lead updated successfully' }
+    const out = {
+      id,
+      name,
+      previousName: previous,
+      // Harry's copy is renamed either way; whether the provider's copy followed
+      // is stated rather than assumed.
+      providerLinked,
+      message: 'Fetched lead updated successfully',
+    }
     return upstream.configured() ? { configured: true, ...out } : { ...notConfigured(), ...out }
   }))
 
@@ -1465,10 +1771,21 @@ export function register(api) {
   // it would be a guess. Nothing here is written into Harry's reporting tables.
   api.get('/prospects/analytics', handler(async (req) => {
     const filterId = req.query.filterId ? idParam(req.query, 'filterId', { allowZero: true }) : null
-    if (filterId !== null) ownedSearch(filterId, req.wsId)
+    // `filterId` is Harry's own row. The provider's id for that search is a
+    // different value in a different id space, and it is that one — never
+    // Harry's — that may go upstream as `filter_id`.
+    const searchRow = filterId !== null ? ownedSearch(filterId, req.wsId) : null
+    const providerFilterId = searchRow?.provider_filter_id || ''
     const key = `${req.wsId}:${filterId ?? ''}`
     const cached = cacheGet(analyticsCache, key, ANALYTICS_TTL_MS)
-    if (cached) return { configured: true, ...cached, cached: true }
+    // `configured` describes the CONNECTION, not the payload: a cached figure
+    // outliving the credentials that fetched it must not report a live
+    // integration. Same rule the filter-vocabulary cache follows.
+    if (cached) {
+      return upstream.configured()
+        ? { configured: true, ...cached, cached: true }
+        : { ...notConfigured(), ...cached, cached: true }
+    }
 
     const credits = db.prepare('SELECT * FROM prospect_credits WHERE workspace_id = ?').get(req.wsId)
     if (!upstream.configured()) {
@@ -1488,7 +1805,12 @@ export function register(api) {
       }
     }
 
-    const res = await upstream.call(`${BASE}/search-analytics${qs(filterId !== null ? { filter_id: filterId } : {})}`,
+    // Asked for one search's figures, but that search has no provider id yet:
+    // sending Harry's row id would ask the provider about a stranger's filter
+    // and the answer would be attributed to this search by name. Nothing is
+    // sent, and `filterData` is null with the reason given.
+    const askedPerFilter = filterId !== null && Boolean(providerFilterId)
+    const res = await upstream.call(`${BASE}/search-analytics${qs(askedPerFilter ? { filter_id: providerFilterId } : {})}`,
       { method: 'GET' })
     const data = res?.data || {}
     const value = {
@@ -1498,10 +1820,20 @@ export function register(api) {
       foundToday: Number(data.leadsFoundToday || 0),
       maxDailyFetchLimit: Number(data.maxDailyFetchLimit || 0) || null,
       maxSingleFetchLimit: Number(data.maxSingleFetchLimit || 0) || null,
-      // Meaningless unless a filterId was supplied; the client is told which.
-      filterData: filterId !== null ? (data.filterData || null) : null,
+      // Meaningless unless the provider was actually asked about that filter;
+      // the client is told which of the two it is holding.
+      filterData: askedPerFilter ? (data.filterData || null) : null,
+      filterDataAvailable: askedPerFilter,
+      filterDataUnavailableBecause: filterId === null
+        ? null
+        : (askedPerFilter ? null : 'search_not_linked_to_provider'),
       filterId,
       fetchedAt: nowIso(),
+    }
+    // The provider's own numbers can disagree with each other. Both are shown
+    // as received and the disagreement is recorded rather than corrected.
+    for (const [name, block] of [['leadsFound', value.leadsFound], ['emailsFetched', value.emailsFetched]]) {
+      if (inconsistentTrend(block)) meter('prospects.analytics.inconsistent', 0, false, `${name} trend disagrees with the month figures`)
     }
     if (value.credits) {
       tx(() => {
@@ -1526,7 +1858,13 @@ export function register(api) {
   // Reports already tolerates a missing AI key.
   api.get('/prospects/reply-analytics', handler(async (req) => {
     const cached = cacheGet(replyCache, String(req.wsId), REPLY_TTL_MS)
-    if (cached) return { configured: true, ...cached, cached: true }
+    // An hour-old figure is still the provider's figure — but the connection it
+    // came through may be gone, and `configured` describes the connection.
+    if (cached) {
+      return upstream.configured()
+        ? { configured: true, ...cached, cached: true }
+        : { ...notConfigured(), ...cached, cached: true }
+    }
     if (!upstream.configured()) {
       return {
         ...notConfigured(),
@@ -1535,6 +1873,7 @@ export function register(api) {
         fetchedAt: nowIso(), cached: false,
       }
     }
+    const started = Date.now()
     try {
       const res = await upstream.call(`${BASE}/reply-analytics`, { method: 'GET' })
       const data = res?.data || {}
@@ -1546,8 +1885,18 @@ export function register(api) {
         trend: data.trend ?? null,
         fetchedAt: nowIso(),
       }
+      // A `trend` that disagrees with the two month figures is shown as
+      // received — Harry does not silently correct a provider — but Monitoring
+      // is told the provider's numbers are internally inconsistent.
+      const mismatch = inconsistentTrend({
+        trend: value.trend,
+        current: value.currentMonth?.replied,
+        previousMonth: value.previousMonth?.replied,
+      })
+      meter('prospects.reply_analytics', Date.now() - started, true,
+        mismatch ? 'trend disagrees with the month figures' : `trend=${value.trend ?? 'none'}`)
       cacheSet(replyCache, String(req.wsId), value)
-      return { configured: true, ...value, cached: false }
+      return { configured: true, ...value, cached: false, trendConsistent: !mismatch }
     } catch (err) {
       meter('prospects.reply_analytics', 0, false, String(err?.status || err?.message || 'failed'))
       return {
@@ -1622,13 +1971,31 @@ export function register(api) {
           body: { contacts: batch.map(({ firstName, lastName, companyDomain }) => ({ firstName, lastName, companyDomain })) },
         })
         const rows = Array.isArray(res?.data) ? res.data : []
-        rows.forEach((row, i) => {
-          const lead = batch[i]
-          if (!lead) return
+        // Each row echoes the identity it was asked about, so it is matched on
+        // that rather than on its position. Trusting the order would write one
+        // person's address onto another the moment the provider reorders,
+        // deduplicates or drops a row — the worst possible failure for a table
+        // whose whole job is "which address belongs to whom".
+        const byIdentity = new Map(batch.map((l) => [identityKey(l), l]))
+        const claimed = new Set()
+        for (const row of rows) {
+          const key = identityKey(row)
+          const lead = byIdentity.get(key)
+          if (!lead || claimed.has(lead.leadId)) {
+            results.push({ leadId: null, written: false, reason: 'unmatched_row', identity: key })
+            continue
+          }
+          claimed.add(lead.leadId)
           const applied = applyFoundEmail(req.wsId, lead.leadId, row)
           if (applied.written) found++
           results.push({ leadId: lead.leadId, ...applied })
-        })
+        }
+        // A lead the provider answered nothing about is reported as such rather
+        // than silently absent from the summary.
+        for (const lead of batch) {
+          if (claimed.has(lead.leadId)) continue
+          results.push({ leadId: lead.leadId, written: false, status: 'No response', reason: 'no_row_returned' })
+        }
       }
     } catch (err) {
       // 402 halts the job and is never retried: more attempts cannot conjure
@@ -1681,6 +2048,17 @@ export function register(api) {
 // implying to the next reader that filters can be edited here. They cannot.
 export function renameBody(name) {
   return { search_string: name }
+}
+
+// The three fields every find-emails row is documented to echo back, lowercased
+// so a provider that title-cases a name still matches the lead it was asked
+// about. This is the join key between a request batch and its response.
+export function identityKey(row) {
+  return [
+    String(row?.firstName || '').trim().toLowerCase(),
+    String(row?.lastName || '').trim().toLowerCase(),
+    normaliseDomain(row?.companyDomain || ''),
+  ].join('|')
 }
 
 // `status: "Not Found"` arrives with an empty `email_id`. Writing that onto a

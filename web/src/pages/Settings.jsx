@@ -29,7 +29,9 @@ import BlockListSection from '../settings/BlockListSection.jsx'
 import SendControlsSection from '../settings/SendControlsSection.jsx'
 import WebhooksSection from '../settings/WebhooksSection.jsx'
 import ClientsSection from '../settings/ClientsSection.jsx'
+import TeamActivity from '../settings/TeamActivity.jsx'
 import IntegrationsSection from '../settings/IntegrationsSection.jsx'
+import BillingSection from '../settings/BillingSection.jsx'
 
 // The order is the order someone meets them: who you are, what goes out, who is
 // off limits, who gets told, who else is here, what is plugged in, and finally
@@ -40,7 +42,8 @@ const AREAS = [
   { id: 'never-contact', label: 'Never contact', blurb: 'Addresses and domains nothing will ever be sent to.' },
   { id: 'alerts', label: 'Alerts', blurb: 'Where Harry tells you something happened — your channel, and your systems.' },
   { id: 'team', label: 'Team & clients', blurb: 'Who shares this workspace, and which brands it is scoped into.' },
-  { id: 'connections', label: 'Connections', blurb: 'Your Google Sheet, and the optional providers Harry can reach.' },
+  { id: 'connections', label: 'Integrations', blurb: 'Your Google Sheet, and optional providers Harry can reach. Email and SMS live under Connections in the main nav.' },
+  { id: 'billing', label: 'Billing', blurb: 'Your plan — subscribe or manage on Stripe’s hosted pages.' },
   { id: 'account', label: 'Account', blurb: 'How you sign in.' },
 ]
 
@@ -121,6 +124,12 @@ export default function Settings({ user, onSaved }) {
       {areaId === 'team' && (
         <>
           <TeamSection />
+          {/* Directly under the member list, and deliberately not on Reports.
+              Beside campaign performance these figures read as a scoreboard
+              ranking colleagues; under the list of who is in the workspace they
+              read as context for a conversation about workload. It renders
+              nothing at all in a solo workspace. */}
+          <TeamActivity />
           {/* Beside Team on purpose: the two are one click apart and mean
               opposite things, so the distinction is drawn where both are
               visible. */}
@@ -130,10 +139,20 @@ export default function Settings({ user, onSaved }) {
 
       {areaId === 'connections' && (
         <>
+          <section className="card space-y-2 p-5">
+            <h2 className="font-semibold text-ink-900">Email &amp; messaging</h2>
+            <p className="text-sm text-slate-600">
+              Gmail, Outlook, SMS, WhatsApp and Telegram are managed under{' '}
+              <Link className="underline hover:text-slate-700" to="/app/connections">Connections</Link>{' '}
+              in the main navigation — Email for mailboxes, Messages for SMS and chat apps.
+            </p>
+          </section>
           <SheetSection user={user} onSaved={onSaved} />
           <IntegrationsSection />
         </>
       )}
+
+      {areaId === 'billing' && <BillingSection user={user} />}
 
       {areaId === 'account' && (
         <section className="card p-5 space-y-2">
@@ -142,6 +161,8 @@ export default function Settings({ user, onSaved }) {
           <p className="text-xs text-slate-500">
             Sign-in is handled by Auth0 when configured (AUTH0_DOMAIN / AUTH0_CLIENT_ID / AUTH0_CLIENT_SECRET in .env);
             otherwise local dev login is active. Gmail sending uses Google OAuth per mailbox. Setup steps for both are in the README.
+            Plan and payment live under{' '}
+            <Link className="underline hover:text-slate-700" to="/app/settings/billing">Billing</Link>.
           </p>
         </section>
       )}
@@ -446,7 +467,7 @@ function SendingSection({ user, onSaved }) {
               </li>
             ))}
             <li className="text-xs text-slate-400">
-              Change a mailbox's daily limit on the <a className="underline hover:text-slate-600" href="/app/mailboxes">Mailboxes</a> page.
+              Change a mailbox's daily limit under <a className="underline hover:text-slate-600" href="/app/connections?area=email">Connections → Email</a>.
             </li>
           </ul>
         )}

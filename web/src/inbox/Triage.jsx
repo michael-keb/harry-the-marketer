@@ -383,6 +383,12 @@ export function SubsequenceDialog({ thread, onClose, onDone }) {
               <li><span className="text-slate-500">Leaves</span> {thread.campaign?.name}</li>
               <li><span className="text-slate-500">Joins</span> {chosen.name}</li>
               <li><span className="text-slate-500">First email composed</span> {startsAt ? absolute(startsAt) : 'on the next engine tick'}</li>
+              <li>
+                <span className="text-slate-500">If they reply to {thread.campaign?.name}</span>{' '}
+                {stopOnSourceReply
+                  ? 'the subsequence stops for this lead and the reason is recorded'
+                  : 'the subsequence carries on regardless'}
+              </li>
             </ul>
             <p className="text-slate-600">
               The first email of the new playbook still parks in <span className="text-ink-900">Needs your OK</span>. Moving a

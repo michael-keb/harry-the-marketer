@@ -271,6 +271,40 @@ CREATE TABLE IF NOT EXISTS campaign_mailboxes (
   UNIQUE (campaign_id, mailbox_id)
 );
 
+-- ----------------------------------------------- messaging channel accounts --
+-- SMS / WhatsApp / Telegram senders. Distinct from email mailboxes — OAuth
+-- mail stays on mailboxes; CPaaS credentials and DIDs live here.
+CREATE TABLE IF NOT EXISTS channel_accounts (
+  id INTEGER PRIMARY KEY,
+  workspace_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel TEXT NOT NULL CHECK (channel IN ('sms','whatsapp','telegram')),
+  provider TEXT NOT NULL DEFAULT 'twilio',
+  display_name TEXT NOT NULL DEFAULT '',
+  phone_number TEXT NOT NULL DEFAULT '',       -- E.164 From number
+  messaging_service_sid TEXT NOT NULL DEFAULT '',
+  account_sid TEXT NOT NULL DEFAULT '',
+  auth_token TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'connected',
+  daily_limit INTEGER NOT NULL DEFAULT 50,
+  sent_today INTEGER NOT NULL DEFAULT 0,
+  sent_today_date TEXT DEFAULT '',
+  last_error TEXT DEFAULT '',
+  last_sync_at TEXT DEFAULT '',
+  is_suspended INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_accounts_ws
+  ON channel_accounts(workspace_id, channel, status);
+
+CREATE TABLE IF NOT EXISTS campaign_channel_accounts (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  channel_account_id INTEGER NOT NULL REFERENCES channel_accounts(id) ON DELETE CASCADE,
+  added_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (campaign_id, channel_account_id)
+);
+
 -- ------------------------------------------------------- warmup history ----
 CREATE TABLE IF NOT EXISTS warmup_stats (
   id INTEGER PRIMARY KEY,
@@ -536,7 +570,23 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     "ALTER TABLE messages ADD COLUMN scheduled_at TEXT DEFAULT ''",
     "ALTER TABLE messages ADD COLUMN send_status TEXT DEFAULT ''",
     'ALTER TABLE messages ADD COLUMN sequence_number INTEGER NOT NULL DEFAULT 0',
+    // Who else received this. Comma-separated, matching `to_email`'s shape.
+    // The thread view has to be able to show that a reply went to three people,
+    // not one — a copied recipient is part of what was said.
+    "ALTER TABLE messages ADD COLUMN cc_emails TEXT DEFAULT ''",
+    "ALTER TABLE messages ADD COLUMN bcc_emails TEXT DEFAULT ''",
+    // Why a reply is worth reading first. The reasons are a JSON array of
+    // plain-language strings and are the point of the pair — the spec forbids
+    // showing a bare number, so a score without its reasons is unusable by
+    // design rather than merely unhelpful.
+    'ALTER TABLE messages ADD COLUMN importance_score INTEGER NOT NULL DEFAULT 0',
+    "ALTER TABLE messages ADD COLUMN importance_reasons TEXT DEFAULT ''",
+    // Multi-channel: email (default), sms, whatsapp, telegram. Channel account
+    // is null for email (mailbox_id owns those); SMS/WA/TG use channel_account_id.
+    "ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL DEFAULT 'email'",
+    'ALTER TABLE messages ADD COLUMN channel_account_id INTEGER',
     'CREATE INDEX IF NOT EXISTS idx_messages_states ON messages(user_id, archived_at, snoozed_until, is_important)',
+    'CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(user_id, channel, id)',
 
     // --- campaign_leads: triage state that belongs to the lead-in-campaign.
     "ALTER TABLE campaign_leads ADD COLUMN assigned_email TEXT DEFAULT ''",
@@ -556,6 +606,21 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     "ALTER TABLE campaign_leads ADD COLUMN unsubscribed_by TEXT DEFAULT ''",
     "ALTER TABLE campaign_leads ADD COLUMN unsubscribed_source TEXT DEFAULT ''",
     'ALTER TABLE campaign_leads ADD COLUMN moved_from_campaign_id INTEGER',
+    // "Stop if they reply to the current campaign", per lead.
+    //
+    // `campaigns.stop_on_source_reply` already existed and was the wrong shape:
+    // one lead's move set it for every other lead in that subsequence. A move is
+    // a decision about one person, so the flag belongs on their pairing.
+    //
+    // The watermark is the last message id on the source thread at the instant
+    // of the move, and it is what makes "a reply on the old thread" mean a reply
+    // that arrives *after* the move. Without it the reply that prompted the move
+    // — the one the triager was reading when they pressed the button — would
+    // stop the subsequence it had just created. A message id rather than a
+    // timestamp because `datetime('now')` is only accurate to the second, and a
+    // move and a reply inside the same second must still be ordered correctly.
+    'ALTER TABLE campaign_leads ADD COLUMN stop_on_source_reply INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE campaign_leads ADD COLUMN moved_after_message_id INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE campaign_leads ADD COLUMN mailbox_id INTEGER',
     "ALTER TABLE campaign_leads ADD COLUMN last_reply_at TEXT DEFAULT ''",
     "ALTER TABLE campaign_leads ADD COLUMN completed_at TEXT DEFAULT ''",
@@ -564,6 +629,10 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     "ALTER TABLE leads ADD COLUMN unsubscribed_at TEXT DEFAULT ''",
     "ALTER TABLE leads ADD COLUMN unsubscribed_source TEXT DEFAULT ''",
     "ALTER TABLE leads ADD COLUMN phone TEXT DEFAULT ''",
+    // SMS consent — no send without opt-in (Docs/messaging-channels-plan.md).
+    "ALTER TABLE leads ADD COLUMN sms_opt_in_at TEXT DEFAULT ''",
+    "ALTER TABLE leads ADD COLUMN sms_opt_in_source TEXT DEFAULT ''",
+    "ALTER TABLE leads ADD COLUMN sms_opt_out_at TEXT DEFAULT ''",
     "ALTER TABLE leads ADD COLUMN website TEXT DEFAULT ''",
     "ALTER TABLE leads ADD COLUMN linkedin TEXT DEFAULT ''",
     "ALTER TABLE leads ADD COLUMN location TEXT DEFAULT ''",
@@ -602,6 +671,18 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     'ALTER TABLE mailboxes ADD COLUMN client_id INTEGER',
     "ALTER TABLE mailboxes ADD COLUMN tracking_domain TEXT DEFAULT ''",
     'ALTER TABLE mailboxes ADD COLUMN message_per_day INTEGER NOT NULL DEFAULT 0',
+    // Soft delete (Docs/email-accounts/delete.md AC 4). `messages.mailbox_id`
+    // is ON DELETE SET NULL, so a hard delete kept the send and threw away the
+    // address it came from — history that Inbox and Reports cannot label. The
+    // row stays, marked; every read path filters on this the way the campaigns
+    // list already filters `campaigns.deleted_at`.
+    // NULL, not '', and deliberately unlike `campaigns.deleted_at`: the filter
+    // `deleted_at IS NULL` has to appear in ~40 single-quoted SQL strings
+    // across the server, and `COALESCE(deleted_at, '') = ''` cannot be written
+    // in one without escaping every quote. A predicate that is awkward to type
+    // is a predicate somebody leaves out.
+    'ALTER TABLE mailboxes ADD COLUMN deleted_at TEXT',
+    'ALTER TABLE mailboxes ADD COLUMN deleted_reason TEXT',
 
     // A task's urgency. Added after the first build of this schema, so it needs
     // the ALTER as well as the CREATE above for databases that already exist.
@@ -612,4 +693,66 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
   ]) {
     try { db.exec(stmt) } catch { /* column or index already exists */ }
   }
+
+  // Active mailboxes must have deleted_at IS NULL — older rows used '' before
+  // the soft-delete column landed, which hid every mailbox from the fleet list.
+  db.exec("UPDATE mailboxes SET deleted_at = NULL WHERE deleted_at = ''")
+
+  migrateOutlookProvider(db)
 }
+
+function defaultClause(dflt) {
+  if (dflt == null) return ''
+  const s = String(dflt)
+  // PRAGMA returns `datetime('now')` bare — SQLite requires `DEFAULT (expr)` for calls.
+  if (s.includes('(') && !s.startsWith('(')) return ` DEFAULT (${s})`
+  return ` DEFAULT ${s}`
+}
+
+function migrateOutlookProvider(db) {
+  const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='mailboxes'").get()?.sql || ''
+  if (ddl.includes("'outlook'")) return
+  const cols = db.prepare('PRAGMA table_info(mailboxes)').all()
+  if (!cols.length) return
+  const colNames = cols.map((c) => c.name).join(', ')
+  const colDefs = cols.map((c) => {
+    if (c.name === 'provider') return "provider TEXT NOT NULL CHECK (provider IN ('gmail','outlook','sandbox'))"
+    let def = `${c.name} ${c.type || 'TEXT'}`
+    if (c.pk) def += ' PRIMARY KEY'
+    else if (c.notnull) def += ' NOT NULL'
+    def += defaultClause(c.dflt_value != null && !c.pk ? c.dflt_value : null)
+    return def
+  })
+  db.exec('DROP TABLE IF EXISTS mailboxes_outlook_mig')
+  db.pragma('foreign_keys = OFF')
+  try {
+    db.exec(`CREATE TABLE mailboxes_outlook_mig (${colDefs.join(', ')}, UNIQUE (user_id, provider, email))`)
+    db.exec(`INSERT INTO mailboxes_outlook_mig (${colNames}) SELECT ${colNames} FROM mailboxes`)
+    db.exec('DROP TABLE mailboxes')
+    db.exec('ALTER TABLE mailboxes_outlook_mig RENAME TO mailboxes')
+  } finally {
+    db.pragma('foreign_keys = ON')
+  }
+}
+
+// Bringing a removed mailbox back.
+//
+// The soft delete keeps the row, and `UNIQUE (user_id, provider, email)` keeps
+// it in the way: reconnecting the same address cannot insert a second one. So
+// the reconnect paths revive this one instead — clearing the mark, the
+// suspension and the warm-up reason together, because a row that is un-deleted
+// but still suspended would be a mailbox that exists and cannot send, which is
+// no better than the state it came from.
+//
+// Docs/email-accounts/delete.md TC-11 asks that warm-up start from the
+// beginning rather than resume the removed mailbox's ramp, so the ramp counter
+// and the day's send count are reset with it. The `?` is the display name.
+export const REVIVE_MAILBOX_SQL = `
+  UPDATE mailboxes
+     SET deleted_at = NULL, deleted_reason = NULL,
+         is_suspended = 0, suspended_at = '', suspended_reason = '',
+         status = 'connected', last_error = '', next_send_at = 0,
+         warmup_daily_count = 20, warmup_auto_adjust = 1,
+         sent_today = 0, sent_today_date = '',
+         display_name = ?
+   WHERE id = ?`

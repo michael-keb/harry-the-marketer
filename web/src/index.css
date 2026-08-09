@@ -21,6 +21,28 @@
        text, where 4.5:1 does not apply.
 --------------------------------------------------------------------------- */
 
+/* Every horizontal scroller is a containing block.
+
+   `sr-only` is `position: absolute`, and an absolutely-positioned element is
+   only clipped by an ancestor's `overflow` when that ancestor is itself
+   positioned. A hidden label inside a wide, horizontally-scrolled table or tab
+   strip therefore took its coordinates from the page rather than from its
+   scroller: it sat hundreds of pixels past the right edge and dragged a
+   sideways scrollbar across the entire document. The Inbox folder strip and the
+   Leads table both did this at tablet width — the page scrolled ~500px sideways
+   with nothing visible out there.
+
+   This lives in `base` on purpose. Utilities beat base, so anything that has
+   asked for `absolute`, `fixed` or `sticky` keeps it; only the scrollers that
+   were left `static` are changed. Fixing the 24 call sites by hand would have
+   worked once and regressed the next time someone added a scrollable table. */
+@layer base {
+  .overflow-x-auto,
+  .overflow-x-scroll {
+    position: relative;
+  }
+}
+
 /* Self-hosted so the CSP stays `font-src 'self' data:` and no page load
    reaches a third party. Variable font, 300–700 in one file per subset. */
 @font-face {
@@ -304,3 +326,72 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--color-accent-5
 .mermaid-canvas .node polygon,
 .mermaid-canvas .node circle,
 .mermaid-canvas .node path { stroke-width: 1.5px; }
+
+/* -- send-plan blocks (GitHub grid × Minecraft voxels) ---------------------- */
+
+.send-plan-grid {
+  display: flex;
+  gap: 3px;
+}
+
+.send-plan-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.send-plan-block {
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  border: 1px solid rgba(0, 0, 0, 0.22);
+  box-shadow:
+    inset 2px 2px 0 rgba(255, 255, 255, 0.45),
+    inset -2px -2px 0 rgba(0, 0, 0, 0.28);
+  image-rendering: pixelated;
+}
+
+.send-plan-block--void {
+  background: #64748b;
+  border-color: #475569;
+  box-shadow:
+    inset 2px 2px 0 rgba(255, 255, 255, 0.12),
+    inset -2px -2px 0 rgba(0, 0, 0, 0.45);
+}
+
+.send-plan-block--open {
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+}
+
+.send-plan-block--send-1 { background: #86efac; border-color: #4ade80; }
+.send-plan-block--send-2 { background: #4ade80; border-color: #22c55e; }
+.send-plan-block--send-3 { background: #22c55e; border-color: #16a34a; }
+.send-plan-block--send-4 { background: #15803d; border-color: #14532d; }
+
+.send-plan-block--sent {
+  background: #94a3b8;
+  border-color: #64748b;
+}
+
+.send-plan-block--queued {
+  background: #7dd3fc;
+  border-color: #0ea5e9;
+}
+
+.send-plan-block--pending {
+  background: #fcd34d;
+  border-color: #f59e0b;
+  animation: send-plan-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes send-plan-pulse {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.12); }
+}
+
+.send-plan-block--lg {
+  width: 14px;
+  height: 14px;
+}
+

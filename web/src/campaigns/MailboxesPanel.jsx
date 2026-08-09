@@ -102,7 +102,7 @@ export default function MailboxesPanel({ campaign, onChanged }) {
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
-                  <Link className="text-xs text-slate-600 hover:text-accent-700" to="/app/mailboxes">Manage account</Link>
+                  <Link className="text-xs text-slate-600 hover:text-accent-700" to="/app/connections?area=email">Manage account</Link>
                   <button
                     className="cursor-pointer text-xs text-slate-600 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40"
                     disabled={blocked}
@@ -192,7 +192,7 @@ function AddMailboxesModal({ campaignId, attachedIds, onClose, onDone }) {
       ) : candidates.length === 0 ? (
         <p className="text-sm text-slate-600">
           Every mailbox in this workspace is already attached.{' '}
-          <Link className="text-accent-700 hover:underline" to="/app/mailboxes">Connect another</Link>.
+          <Link className="text-accent-700 hover:underline" to="/app/connections?area=email">Connect another</Link>.
         </p>
       ) : (
         <>
@@ -224,7 +224,7 @@ function AddMailboxesModal({ campaignId, attachedIds, onClose, onDone }) {
                       </span>
                     </span>
                     {!usable && (
-                      <Link className="ml-auto shrink-0 text-xs text-accent-700 hover:underline" to="/app/mailboxes">Reconnect</Link>
+                      <Link className="ml-auto shrink-0 text-xs text-accent-700 hover:underline" to="/app/connections?area=email">Reconnect</Link>
                     )}
                   </label>
                 </li>

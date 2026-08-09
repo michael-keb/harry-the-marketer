@@ -26,7 +26,7 @@
 // preferred path was taken the divergence is noted at the route itself.
 
 import { db } from '../db.js'
-import { blockMatch } from '../suppression.js'
+import { blockMatch, unsubscribeLead } from '../suppression.js'
 // Rates are read from server/metrics.js, never redefined here. `REAL_SEND` is
 // the one predicate that decides what counts as outreach, so a filtered rollup
 // on this side of the app and the same figure in Reports cannot drift.
@@ -42,9 +42,24 @@ function untracked(r, on, reason) {
 import { parsePlaybook, nodeIntents } from '../playbook.js'
 import { leadStages } from '../stages.js'
 import { dailyCap, remainingToday, isWarmingUp } from '../pacing.js'
+// One reputation formula for the whole app. The mailbox page and this campaign
+// panel scoring the same account differently is the exact failure metrics.js
+// was written to stop, so the number is imported rather than re-derived.
+import { reputationScore } from './mailboxes.js'
 import { sendEmail } from '../mailer.js'
 import { gmailSend } from '../google.js'
 import { composeStepSample, exampleLead, CORE_INTENTS } from '../ai.js'
+// The intent route branches through the engine's own code rather than a copy of
+// it, so a hand-set intent and a classified one take the same path.
+import { campaignCtx, routeReply } from '../engine.js'
+// The holding reason is read from the *same* resolver the tick asks, never
+// recomputed here. A campaign page that explains a hold with its own arithmetic
+// is a second implementation of pacing, and the two drift the first time a
+// send-control lands in one of them and not the other.
+import { resolveSend } from '../gates.js'
+import {
+  saveRules, storedRules, legacyScheduleToStoredRules, copyCampaignSendRules,
+} from '../send-rules.js'
 import {
   HttpError, handler, invalid, notFound,
   str, int, bool, oneOf, idList, isoDate, email as emailField,
@@ -87,7 +102,10 @@ function graphOf(campaign) {
 // node ids rather than positions. Breadth-first from Start is the order a human
 // reading the diagram would give, and it is the same walk analytics.js uses for
 // the per-step statistics route — the two must agree on what "step 2" is.
-function sendSequence(graph) {
+// Exported because server/parity/leads.js needs the same answer for the
+// workspace-wide export's "last step sent" column, and two walks that disagree
+// about what step 2 is would be worse than no column at all.
+export function sendSequence(graph) {
   const order = []
   if (graph.startId) {
     const seen = new Set([graph.startId])
@@ -135,7 +153,7 @@ function requireConfirmation(body, what) {
 // Test sends are recorded but must never reach a count. Every aggregate in this
 // module carries this predicate so the exclusion cannot be forgotten in one
 // place and remembered in another.
-const NOT_TEST = "COALESCE(send_status,'') != 'test'"
+export const NOT_TEST = "COALESCE(send_status,'') != 'test'"
 
 function todayStr() { return new Date().toISOString().slice(0, 10) }
 
@@ -297,6 +315,29 @@ function launchBlockers(campaign) {
   return blockers
 }
 
+// Why this campaign is not sending right now, and when it next can.
+//
+// Docs/campaigns/get-by-id.md: "the response includes the holding reason and
+// the estimated next send time, matching what the pacing logic computes". The
+// only way to guarantee "matching" is to ask the same function — `resolveSend`
+// is what the tick calls before every email, so a reason shown here is a reason
+// the engine would actually give.
+function holdingFor(campaign, owner) {
+  if (campaign.status !== 'running') {
+    return { sending: false, gate: 'not_running', reason: `This campaign is ${campaign.status}`, until: null, nextSendAt: null }
+  }
+  const mailbox = campaign.mailbox_id
+    ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
+    : null
+  if (!mailbox) {
+    return { sending: false, gate: 'no_mailbox', reason: 'No sending mailbox is attached', until: null, nextSendAt: null }
+  }
+  const slot = resolveSend({ owner, campaign, mailbox })
+  if (slot.ok) return { sending: true, gate: '', reason: '', until: null, nextSendAt: null }
+  const until = slot.until ? new Date(slot.until).toISOString() : null
+  return { sending: false, gate: slot.gate, reason: slot.reason, until, nextSendAt: until }
+}
+
 // ---- csv --------------------------------------------------------------------
 
 function csvCell(value) {
@@ -386,8 +427,45 @@ export function register(api) {
     const total = db.prepare(`SELECT COUNT(*) n FROM campaigns WHERE ${clause}`).get(...args).n
     const rows = db.prepare(`SELECT * FROM campaigns WHERE ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`)
       .all(...args, limit, offset)
+    // §2: "I can see its sending window without opening it" and "the maximum
+    // leads per day and the minimum gap between emails are visible, because
+    // those are what explain a campaign that looks slow". The owner is read
+    // once for the whole page, not per row.
+    const owner = ownerOf(req.wsId)
+    // The mailboxes the listed campaigns actually send from, in one query.
+    const primaryIds = [...new Set(rows.map((r) => r.mailbox_id).filter(Boolean))]
+    const primaries = new Map(
+      primaryIds.length
+        ? db.prepare(`SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND id IN (${primaryIds.map(() => '?').join(',')})`)
+          .all(req.wsId, ...primaryIds).map((m) => [m.id, m])
+        : []
+    )
     meter('campaigns.list', Date.now() - t0)
-    return { campaigns: rows.map(campaignRow), total, limit, offset }
+    return {
+      campaigns: rows.map((c) => {
+        const schedule = scheduleOf(c, owner)
+        const mailbox = c.mailbox_id ? primaries.get(c.mailbox_id) : null
+        return {
+          ...campaignRow(c),
+          schedule,
+          // The source API's own name for the same thing, so a client written
+          // against get-all.md reads the window the pacing layer enforces.
+          scheduler_cron_value: {
+            tz: schedule.timezone,
+            days: schedule.days,
+            startHour: schedule.start_hour,
+            endHour: schedule.end_hour,
+          },
+          // Today's ceiling for the mailbox this campaign sends from, ramp
+          // included — the number that actually caps it, not the raw limit.
+          // `null` where nothing is attached, because "no mailbox" and "a limit
+          // of zero" are different states.
+          max_leads_per_day: mailbox ? dailyCap(mailbox) : null,
+          min_time_btwn_emails: schedule.min_gap_minutes,
+        }
+      }),
+      total, limit, offset,
+    }
   })
   api.get('/campaign-list', listCampaigns)
 
@@ -403,23 +481,41 @@ export function register(api) {
     const limit = int(req.query, 'limit', { min: 1, max: 1000, fallback: 100 })
     const offset = int(req.query, 'offset', { min: 0, fallback: 0 })
 
-    const where = ['user_id = ?']
+    // Qualified with the alias from the start: the rows query joins two more
+    // tables, and an unqualified `created_at` there would be ambiguous.
+    const where = ['e.user_id = ?']
     const args = [req.wsId]
-    if (from) { where.push('created_at >= ?'); args.push(sqlTime(from)) }
-    if (to) { where.push('created_at <= ?'); args.push(sqlTime(to)) }
-    if (type) { where.push('type = ?'); args.push(type) }
-    if (campaignId) { where.push('campaign_id = ?'); args.push(campaignId) }
-    const clause = where.join(' AND ')
+    if (from) { where.push('e.created_at >= ?'); args.push(sqlTime(from)) }
+    if (to) { where.push('e.created_at <= ?'); args.push(sqlTime(to)) }
+    if (type) { where.push('e.type = ?'); args.push(type) }
+    if (campaignId) { where.push('e.campaign_id = ?'); args.push(campaignId) }
+    const scoped = where.join(' AND ')
 
-    const total = db.prepare(`SELECT COUNT(*) n FROM events WHERE ${clause}`).get(...args).n
+    const total = db.prepare(`SELECT COUNT(*) n FROM events e WHERE ${scoped}`).get(...args).n
+    // LEFT JOINs, not inner ones: "Given a lead was deleted, when its past
+    // activity is returned, then the entry still shows the email it applied to
+    // rather than failing the whole request." An inner join would drop the row
+    // — a quieter failure than an error, and a worse one, because the feed
+    // would look complete.
     const rows = db.prepare(
-      `SELECT id, campaign_id, lead_id, type, detail, created_at FROM events
-       WHERE ${clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+      `SELECT e.id, e.campaign_id, e.lead_id, e.type, e.detail, e.created_at,
+              l.email AS lead_email, c.name AS campaign_name
+         FROM events e
+         LEFT JOIN leads l ON l.id = e.lead_id AND l.user_id = e.user_id
+         LEFT JOIN campaigns c ON c.id = e.campaign_id AND c.user_id = e.user_id
+        WHERE ${scoped} ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?`
     ).all(...args, limit, offset)
     return {
       activities: rows.map((r) => ({
         id: r.id, campaignId: r.campaign_id, leadId: r.lead_id,
         type: r.type, detail: r.detail, createdAt: r.created_at,
+        // The documented spellings alongside Harry's camelCase, so a client
+        // written against all-leads-activities.md reads the same feed the UI does.
+        lead_email: r.lead_email || '',
+        campaign_id: r.campaign_id,
+        campaign_name: r.campaign_name || '',
+        activity_type: r.type,
+        event_time: r.created_at,
       })),
       total, limit, offset,
     }
@@ -430,6 +526,14 @@ export function register(api) {
   // this mirrors the source API's own literal path. A campaign is never created
   // implicitly anywhere else in the codebase (Docs/README.md).
   api.post('/campaigns/create', metered((req) => {
+    // TC-4 and TC-6 are different requests, and used to be the same one here.
+    // An absent `name` means "I have not named it yet" and gets the default.
+    // A `name` that is present but empty or whitespace is a form that was
+    // submitted blank, and silently naming it "Untitled campaign" hides the
+    // mistake behind a campaign the user then has to find and rename.
+    if (req.body?.name !== undefined && req.body.name !== null && !String(req.body.name).trim()) {
+      throw invalid('name', 'name cannot be blank — leave it out entirely to get the default "Untitled campaign"')
+    }
     const name = str(req.body, 'name', { max: 200, fallback: '' }) || 'Untitled campaign'
     const goalId = int(req.body, 'goalId', { min: 1, fallback: 0 })
     const clientId = int(req.body, 'clientId', { min: 1, fallback: 0 })
@@ -465,7 +569,7 @@ export function register(api) {
     const graph = graphOf(c)
     const mailboxes = db.prepare(
       `SELECT m.id, m.email, m.display_name, m.provider, m.status FROM campaign_mailboxes cm
-       JOIN mailboxes m ON m.id = cm.mailbox_id WHERE cm.campaign_id = ? ORDER BY cm.id`
+       JOIN mailboxes m ON m.id = cm.mailbox_id AND m.deleted_at IS NULL WHERE cm.campaign_id = ? ORDER BY cm.id`
     ).all(c.id)
     const parent = c.parent_campaign_id
       ? db.prepare('SELECT id, name, status FROM campaigns WHERE id = ? AND user_id = ?').get(c.parent_campaign_id, req.wsId)
@@ -481,6 +585,10 @@ export function register(api) {
       parent: parent || null,
       children,
       blockers: launchBlockers(c),
+      // Why nothing is going out, in the engine's own words. §2: "the response
+      // includes the holding reason and the estimated next send time, matching
+      // what the pacing logic computes".
+      holding: holdingFor(c, owner),
     }
   }))
 
@@ -631,6 +739,10 @@ export function register(api) {
     const schedule = { timezone, days, start_hour: startHour, end_hour: endHour, min_gap_minutes: minGap }
     db.prepare("UPDATE campaigns SET schedule = ?, updated_at = datetime('now') WHERE id = ?")
       .run(JSON.stringify(schedule), c.id)
+    // Campaign schedule also narrows send_rules — keep both stores in step so
+    // Settings → Sending and Campaign → Sending window cannot disagree.
+    const priorRules = storedRules(req.wsId, 'campaign', c.id)
+    saveRules(req.wsId, 'campaign', c.id, { ...priorRules, ...legacyScheduleToStoredRules(schedule) }, req.user?.email || '')
     audit(req, {
       campaignId: c.id, type: 'campaign_schedule',
       detail: `${existing.start_hour}-${existing.end_hour} -> ${startHour}-${endHour} (${days.join(',')})`,
@@ -670,7 +782,15 @@ export function register(api) {
   api.get('/campaigns/:id/steps', metered((req) => {
     const c = campaignOf(req)
     const graph = graphOf(c)
-    if (!graph.valid) return { steps: [], errors: graph.errors, warnings: graph.warnings, valid: false }
+    // "A campaign with no playbook yet" and "a campaign whose diagram fails
+    // validation" are two different criteria with two different answers, and
+    // this route used to give both the same one — an errors array. A campaign
+    // nobody has drawn yet has not failed anything, and telling its owner their
+    // playbook is invalid sends them looking for a mistake they have not made.
+    if (!String(c.mermaid || '').trim()) {
+      return { steps: [], data: [], errors: [], warnings: [], valid: true, empty: true, startId: null }
+    }
+    if (!graph.valid) return { steps: [], data: [], errors: graph.errors, warnings: graph.warnings, valid: false, empty: false }
 
     const withSamples = bool(req.query, 'sample', false)
     const samples = withSamples
@@ -696,9 +816,28 @@ export function register(api) {
     }
     for (const id of Object.keys(graph.nodes)) if (!seen.has(id)) order.push(id)
 
+    // §2: "its wait comes from the `no reply Xd` or `Wait: Xd` edge that leads
+    // into it". The wait belongs to the path that reaches a step, not to the
+    // step itself, so it is read from the incoming edge — or from a Wait node
+    // sitting on that edge — rather than from the send node, which has none.
+    const { seqOf } = sendSequence(graph)
+    const waitInto = (id) => {
+      for (const e of graph.edges) {
+        if (e.to !== id) continue
+        if (Number.isFinite(e.cond?.ms)) return { ms: e.cond.ms, from: e.from, via: e.label || e.cond.kind }
+        const source = graph.nodes[e.from]
+        if (source?.type === 'wait' && Number.isFinite(source.ms)) {
+          return { ms: source.ms, from: e.from, via: source.label }
+        }
+      }
+      return null
+    }
+
     const steps = order.map((id, i) => {
       const node = graph.nodes[id]
       const out = graph.edges.filter((e) => e.from === id)
+      const incoming = node.type === 'send' ? waitInto(id) : null
+      const sample = samples[id] || null
       return {
         nodeId: id,
         position: i,
@@ -710,10 +849,37 @@ export function register(api) {
         branches: out.map((e) => ({ to: e.to, label: e.label, condition: e.cond })),
         replyIntents: nodeIntents(graph, id),
         sent: sentPerNode[id] || 0,
-        sample: samples[id] || null,
+        sample,
+        // The documented shape, for Send steps only — a Wait or an outcome node
+        // is not a step in the source API's sense and gets `null` rather than a
+        // position it would then be sorted by.
+        id,
+        seq_number: seqOf.get(id) ?? null,
+        seq_delay_details: incoming
+          ? { delayInDays: Math.round((incoming.ms / 86400e3) * 100) / 100, from: incoming.from, via: incoming.via }
+          : null,
+        // Never "the email that will be sent". Harry composes at send time, so
+        // anything shown here is an example written for a stand-in lead, and
+        // saying so is the criterion — not a nicety.
+        subject: sample?.subject ?? null,
+        email_body: sample?.body ?? null,
+        is_sample: Boolean(sample),
+        sample_note: sample
+          ? 'An example composed for a representative lead — the email that goes out is written at send time for the real recipient.'
+          : '',
       }
     })
-    return { steps, errors: [], warnings: graph.warnings, valid: true, startId: graph.startId }
+    return {
+      steps,
+      // The documented envelope over the same array: Send steps only, ordered
+      // by their position along the path from Start.
+      success: true,
+      data: steps.filter((s) => s.seq_number !== null).sort((a, b) => a.seq_number - b.seq_number),
+      errors: [], warnings: graph.warnings, valid: true, empty: false, startId: graph.startId,
+      // §2: variants are absent rather than faked. Harry has no A/B testing,
+      // and an empty `sequence_variants` array would imply it does.
+      campaignId: c.id,
+    }
   }))
 
   // ------------------------------------------------------- update-sequences --
@@ -886,10 +1052,15 @@ export function register(api) {
 
     const created = tx(() => {
       const newId = copyOne(c, name, c.parent_campaign_id || null)
+      copyCampaignSendRules(req.wsId, c.id, newId, req.user?.email || '')
       const childIds = []
       if (includeChildren) {
         const children = db.prepare('SELECT * FROM campaigns WHERE parent_campaign_id = ? AND user_id = ?').all(c.id, req.wsId)
-        for (const child of children) childIds.push(copyOne(child, `${child.name} (copy)`, newId))
+        for (const child of children) {
+          const childId = copyOne(child, `${child.name} (copy)`, newId)
+          copyCampaignSendRules(req.wsId, child.id, childId, req.user?.email || '')
+          childIds.push(childId)
+        }
       }
       return { newId, childIds }
     })
@@ -1026,34 +1197,69 @@ export function register(api) {
   api.get('/campaigns/:id/mailboxes', metered((req) => {
     const c = campaignOf(req)
     const rows = db.prepare(
-      `SELECT m.* FROM campaign_mailboxes cm JOIN mailboxes m ON m.id = cm.mailbox_id
+      `SELECT m.* FROM campaign_mailboxes cm JOIN mailboxes m ON m.id = cm.mailbox_id AND m.deleted_at IS NULL
        WHERE cm.campaign_id = ? ORDER BY cm.id`
     ).all(c.id)
     const today = todayStr()
+    const entries = rows.map((m) => {
+      const usedToday = m.sent_today_date === today ? m.sent_today : 0
+      const usingCount = db.prepare('SELECT COUNT(*) n FROM campaign_mailboxes WHERE mailbox_id = ?').get(m.id).n
+      // §2's last criterion: "when a mailbox has recent send failures, then its
+      // row shows the failure count and the last error in plain English".
+      // `'failed'` is metrics.js's own vocabulary for a send that did not leave,
+      // so this count and the one Reports excludes are the same set.
+      const failures = db.prepare(
+        `SELECT COUNT(*) n FROM messages
+          WHERE mailbox_id = ? AND direction = 'out' AND COALESCE(send_status,'') = 'failed'
+            AND created_at >= datetime('now', '-7 days')`
+      ).get(m.id).n
+      // The reputation number, read from server/parity/mailboxes.js rather than
+      // reinvented — a second formula here would let the campaign page and the
+      // mailbox page score the same account differently.
+      const warm = db.prepare(
+        `SELECT COALESCE(SUM(sent), 0) sent, COALESCE(SUM(received), 0) received,
+                COALESCE(SUM(spam), 0) spam, COALESCE(SUM(inbox), 0) inbox
+           FROM warmup_stats WHERE mailbox_id = ?`
+      ).get(m.id)
+      return {
+        id: m.id,
+        email: m.email,
+        fromName: m.display_name || '',
+        provider: m.provider,
+        // Read from the stored token state, never by calling Google per request.
+        connection: m.status,
+        suspended: Boolean(m.is_suspended),
+        warmingUp: isWarmingUp(m),
+        warmupEnabled: Boolean(m.warmup_enabled),
+        dailyLimit: m.daily_limit,
+        rampedCap: dailyCap(m),
+        usedToday,
+        remainingToday: remainingToday(m),
+        campaignsUsing: usingCount,
+        lastError: m.last_error || '',
+        recentFailures: failures,
+        isPrimary: m.id === c.mailbox_id,
+        // The documented spellings. `type` is a word a person can read, not a
+        // protocol name — §2's second criterion is explicit about that.
+        from_email: m.email,
+        from_name: m.display_name || '',
+        type: m.provider === 'gmail' ? 'Gmail' : m.provider === 'outlook' ? 'Outlook' : 'Sandbox',
+        warmup_enabled: Boolean(m.warmup_enabled),
+        warmup_reputation: reputationScore(warm, m.warmup_target_reply_rate || 30),
+        // "needing reconnection — the equivalent of is_smtp_success and
+        // is_imap_success". One connection, so one flag, not two invented ones.
+        needs_reconnect: m.status !== 'connected',
+      }
+    })
     return {
-      mailboxes: rows.map((m) => {
-        const usedToday = m.sent_today_date === today ? m.sent_today : 0
-        const usingCount = db.prepare('SELECT COUNT(*) n FROM campaign_mailboxes WHERE mailbox_id = ?').get(m.id).n
-        return {
-          id: m.id,
-          email: m.email,
-          fromName: m.display_name || '',
-          provider: m.provider,
-          // Read from the stored token state, never by calling Google per request.
-          connection: m.status,
-          suspended: Boolean(m.is_suspended),
-          warmingUp: isWarmingUp(m),
-          warmupEnabled: Boolean(m.warmup_enabled),
-          dailyLimit: m.daily_limit,
-          rampedCap: dailyCap(m),
-          usedToday,
-          remainingToday: remainingToday(m),
-          campaignsUsing: usingCount,
-          lastError: m.last_error || '',
-          isPrimary: m.id === c.mailbox_id,
-        }
-      }),
+      ok: true,
+      mailboxes: entries,
+      // The source API's envelope, over the same array — never a second copy.
+      data: entries,
       primaryMailboxId: c.mailbox_id || null,
+      // Stated rather than left to be inferred from an empty array: §2 requires
+      // the page to say the campaign cannot launch until a mailbox is attached.
+      canLaunch: entries.length > 0 || Boolean(c.mailbox_id),
     }
   }))
 
@@ -1241,7 +1447,38 @@ export function register(api) {
     const filters = leadFilters(req)
     const stages = leadStages(req.wsId)
 
-    const header = ['lead_id', 'email', 'first_name', 'last_name', 'company', 'title', 'stage', 'state', 'node', 'intent', 'outcome', 'paused_at', 'completed_at', 'last_activity']
+    // §2's first criterion names the columns the file must carry: "email, first
+    // name, last name, company name, phone number, status, category and created
+    // date". `status` is Harry's derived stage and `category` is the last
+    // classified reply intent — both are named with the documented header so a
+    // CRM import mapped against export-leads.md finds them, with Harry's own
+    // richer columns after them.
+    //
+    // The last five are Docs/leads/export.md §2's engagement criterion — "the
+    // last sequence step sent, open count, click count and reply count per lead,
+    // matching what Reports shows for the same campaign" — plus the company URL
+    // its contact-details criterion names. The counts come off the same
+    // aggregate the campaign lead list and its engagement filters read, so a
+    // row filtered as "opened" cannot export a zero open count.
+    //
+    // Appended rather than interleaved on purpose: a CSV header is a contract,
+    // and appending leaves every existing column at the position a consumer
+    // already maps it to. The header still changed, and that is a breaking
+    // change for anyone matching on column count.
+    const header = [
+      'lead_id', 'email', 'first_name', 'last_name', 'company_name', 'phone_number',
+      'status', 'category', 'created_at',
+      'title', 'state', 'node', 'outcome', 'paused_at', 'completed_at', 'last_activity',
+      'company_url', 'last_step_sent', 'open_count', 'click_count', 'reply_count',
+    ]
+    // Node id -> 1, 2, 3 … along the path from Start, from the one walk the
+    // steps route and the per-step statistics route also use.
+    const { seqOf } = sendSequence(graphOf(c))
+    // A step number only means something while the node is still a Send step in
+    // the current diagram. When the playbook has been redrawn under a lead the
+    // honest answer is blank, not a number pointing at a step that no longer
+    // exists — so the node id is carried instead, which is at least true.
+    const stepSent = (node) => (node ? (seqOf.get(node) ?? node) : '')
     res.setHeader('Content-Type', 'text/csv; charset=utf-8')
     res.setHeader('Content-Disposition', `attachment; filename="campaign-${c.id}-leads.csv"`)
     // UTF-8 BOM so spreadsheets read non-ASCII names correctly.
@@ -1256,8 +1493,10 @@ export function register(api) {
     for (const raw of campaignLeadCursor(c, filters, stages)) {
       const r = campaignLeadRow(raw, stages)
       block.push([
-        r.leadId, r.email, r.firstName, r.lastName, r.company, r.title,
-        r.stage, r.state, r.node, r.intent, r.outcome, r.pausedAt, r.completedAt, r.lastActivity,
+        r.leadId, r.email, r.firstName, r.lastName, r.company, r.phone,
+        r.stage, r.intent, r.createdAt,
+        r.title, r.state, r.node, r.outcome, r.pausedAt, r.completedAt, r.lastActivity,
+        r.companyUrl, stepSent(r.lastSentNode), r.opens, r.clicks, r.replies,
       ].map(csvCell).join(','))
       count += 1
       if (block.length >= CHUNK) { res.write(`${block.join('\r\n')}\r\n`); block = [] }
@@ -1304,7 +1543,32 @@ export function register(api) {
       `SELECT cl.campaign_id, c.name, cl.node_id, cl.state FROM campaign_leads cl
        JOIN campaigns c ON c.id = cl.campaign_id WHERE cl.lead_id = ? AND c.user_id = ?`
     ).all(lead.id, req.wsId)
+    // `email_stats` is derived from the messages themselves, never stored — a
+    // cached "has replied" flag is one more thing that can disagree with the
+    // thread. Test sends and forwards are excluded, so pressing "send me a test"
+    // cannot make a lead look contacted.
+    const engagement = db.prepare(
+      `SELECT SUM(CASE WHEN m.direction = 'out' AND ${REAL_SEND} AND COALESCE(m.opened_at,'') != '' THEN 1 ELSE 0 END) opened,
+              SUM(CASE WHEN m.direction = 'out' AND ${REAL_SEND} AND COALESCE(m.clicked_at,'') != '' THEN 1 ELSE 0 END) clicked,
+              SUM(CASE WHEN m.direction = 'in' THEN 1 ELSE 0 END) replied
+         FROM messages m WHERE m.campaign_id = ? AND m.lead_id = ?`
+    ).get(c.id, lead.id)
     return {
+      // The documented shape. `category_name` is the classified reply intent,
+      // and it travels with who set it: a classifier's guess and a person's
+      // correction are not the same fact, and a reviewer about to approve an
+      // email needs to know which one they are looking at.
+      category_id: cl.category_id ?? null,
+      category_name: cl.intent || '',
+      category_set_by: cl.intent_set_by || '',
+      category_human_corrected: Boolean(cl.intent_set_by && cl.intent_set_by !== 'system'),
+      email_stats: {
+        // Absent tracking is not a negative result, so a campaign that never
+        // measured opens reports `null` here rather than `false`.
+        is_opened: c.track_opens ? Boolean(engagement.opened) : null,
+        is_clicked: c.track_clicks ? Boolean(engagement.clicked) : null,
+        is_replied: Boolean(engagement.replied),
+      },
       lead: {
         id: lead.id, email: lead.email, firstName: lead.first_name, lastName: lead.last_name,
         company: lead.company, title: lead.title, phone: lead.phone || '', website: lead.website || '',
@@ -1339,10 +1603,33 @@ export function register(api) {
     const args = [c.id, lead.id]
     let clause = ''
     if (since) { clause = 'AND created_at > ?'; args.push(sqlTime(since)) }
-    const rows = db.prepare(
-      `SELECT * FROM messages WHERE campaign_id = ? AND lead_id = ? ${clause}
-       ORDER BY created_at ASC, id ASC LIMIT ?`
-    ).all(...args, limit)
+
+    const total = db.prepare(
+      `SELECT COUNT(*) n FROM messages WHERE campaign_id = ? AND lead_id = ? ${clause}`
+    ).get(...args).n
+
+    // TC-12: "the response pages with the most recent first by default".
+    //
+    // This used to be `ORDER BY created_at ASC LIMIT 50` outright, which on a
+    // 200-message thread hands back the first fifty — the oldest half of a
+    // conversation — and drops everything that has been said since. The reader
+    // of this route is someone about to approve a follow-up, and the composer
+    // that has to make it read as a continuation; both need the end of the
+    // thread, not its beginning.
+    //
+    // So the newest `limit` rows are selected, and then flipped back into
+    // chronological order, because a thread reads downwards. An incremental
+    // fetch (`since`) is different work — it asks for what is new, in order —
+    // and stays ascending from the cursor.
+    const rows = since
+      ? db.prepare(
+        `SELECT * FROM messages WHERE campaign_id = ? AND lead_id = ? ${clause}
+         ORDER BY created_at ASC, id ASC LIMIT ?`
+      ).all(...args, limit)
+      : db.prepare(
+        `SELECT * FROM messages WHERE campaign_id = ? AND lead_id = ?
+         ORDER BY created_at DESC, id DESC LIMIT ?`
+      ).all(...args, limit).reverse()
 
     return {
       messages: rows.map((m) => {
@@ -1366,6 +1653,10 @@ export function register(api) {
       }),
       tracking: { opens: Boolean(c.track_opens), clicks: Boolean(c.track_clicks) },
       count: rows.length,
+      // So a caller can tell "this is the whole thread" from "this is its tail".
+      total,
+      truncated: !since && total > rows.length,
+      limit,
     }
   }))
 
@@ -1424,6 +1715,27 @@ export function register(api) {
     }
     if (body.email !== undefined) {
       const address = emailField(body, 'email', { required: true })
+      // Changing an address is not editing a typo in a name — it points the
+      // campaign at a different human being. §2: "Harry treats it as a new
+      // recipient: existing threads keep their old address and the change is
+      // flagged for confirmation rather than applied silently."
+      //
+      // Sending the same address back is not a change and needs no OK, so a
+      // client that echoes the whole lead object on every save is not made to
+      // confirm something it did not ask for.
+      if (address !== String(lead.email).toLowerCase() && !bool(body, 'confirm_email_change', false)) {
+        const threads = db.prepare("SELECT COUNT(*) n FROM messages WHERE lead_id = ? AND direction = 'out'").get(lead.id).n
+        throw new HttpError(422, {
+          error: 'confirm_required',
+          field: 'email',
+          message: `This changes who the campaign writes to — from ${lead.email} to ${address}. Resend with confirm_email_change: true.`,
+          from: lead.email,
+          to: address,
+          // Stated so the dialog can say what stays behind rather than guessing.
+          existingMessages: threads,
+          existingThreadsKeepOldAddress: true,
+        })
+      }
       const clash = db.prepare('SELECT id FROM leads WHERE user_id = ? AND LOWER(email) = ? AND id != ?').get(req.wsId, address, lead.id)
       if (clash) {
         // A conflict with a merge affordance, not a bare 409.
@@ -1468,10 +1780,46 @@ export function register(api) {
     const { lead, cl } = linkOf(c, req.params.leadId)
     const reason = str(req.body, 'reason', { max: 300 })
     if (cl.paused_at) return { ok: true, alreadyPaused: true, pausedAt: cl.paused_at }
-    db.prepare("UPDATE campaign_leads SET paused_at = ?, paused_by = ?, resume_at = '', updated_at = datetime('now') WHERE id = ?")
-      .run(nowIso(), req.user.email, cl.id)
-    audit(req, { campaignId: c.id, leadId: lead.id, type: 'lead_paused', detail: `${req.user.email}${reason ? `: ${reason}` : ''}` })
-    return { ok: true, pausedAt: nowIso(), waitUntil: cl.wait_until || '' }
+
+    // Pausing stops the email that is already in flight, not just the next one.
+    //
+    // This wrote `paused_at` and stopped there. The engine honours that column,
+    // so no *new* email was composed — but a draft already sitting in Needs
+    // your OK could still be approved and sent, and a reply already queued for
+    // its slot still went out on schedule. Somebody who pauses a lead has said
+    // "stop emailing this person"; watching one leave anyway a minute later is
+    // the product disagreeing with them.
+    //
+    // Withdrawn rather than deleted: resuming re-composes from the playbook, so
+    // a stale draft written before the pause is not what should go out after it.
+    const stopped = tx(() => {
+      const at = nowIso()
+      db.prepare("UPDATE campaign_leads SET paused_at = ?, paused_by = ?, resume_at = '', updated_at = datetime('now') WHERE id = ?")
+        .run(at, req.user.email, cl.id)
+      const drafts = db.prepare(
+        `UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now')
+          WHERE user_id = ? AND campaign_id = ? AND lead_id = ? AND status IN ('pending','approved')`
+      ).run(`${req.user.email} (paused)`, req.wsId, c.id, lead.id).changes
+      const queued = db.prepare(
+        `UPDATE messages SET send_status = 'cancelled'
+          WHERE user_id = ? AND campaign_id = ? AND lead_id = ? AND direction = 'out' AND send_status = 'queued'`
+      ).run(req.wsId, c.id, lead.id).changes
+      return { at, drafts, queued }
+    })
+
+    audit(req, {
+      campaignId: c.id, leadId: lead.id, type: 'lead_paused',
+      detail: `${req.user.email}${reason ? `: ${reason}` : ''}` +
+        `${stopped.drafts ? ` — ${stopped.drafts} draft withdrawn` : ''}` +
+        `${stopped.queued ? ` — ${stopped.queued} queued send cancelled` : ''}`,
+    })
+    return {
+      ok: true,
+      pausedAt: stopped.at,
+      waitUntil: cl.wait_until || '',
+      draftsWithdrawn: stopped.drafts,
+      sendsCancelled: stopped.queued,
+    }
   }))
 
   // ----------------------------------------------------------- resume-lead ---
@@ -1480,6 +1828,17 @@ export function register(api) {
     const { lead, cl } = linkOf(c, req.params.leadId)
     if (lead.status === 'unsubscribed') {
       throw new HttpError(409, { error: 'lead_unsubscribed', message: 'This lead has unsubscribed and cannot be resumed' })
+    }
+    // A lead who has reached the end of the playbook has nowhere to resume to.
+    // Clearing `paused_at` on a finished pairing produced a lead that looked
+    // live on every screen and would never be picked up again, because the tick
+    // does not select finished rows — a state that lies in both directions at
+    // once. Re-enrolling them is a different act, with a different button.
+    if (cl.state === 'finished' || cl.state === 'stopped' || cl.outcome) {
+      throw new HttpError(409, {
+        error: 'lead_finished',
+        message: `This lead has already finished this campaign${cl.outcome ? ` (${cl.outcome})` : ''} — add them to a campaign again rather than resuming`,
+      })
     }
     const delayDays = int(req.body, 'delay_days', { min: 0, max: 365, fallback: 0 })
     if (!cl.paused_at && !cl.resume_at) return { ok: true, alreadyActive: true, will_resume_at: null }
@@ -1534,31 +1893,22 @@ export function register(api) {
     if (lead.status === 'unsubscribed') {
       return { ok: true, alreadyUnsubscribed: true, unsubscribedAt: lead.unsubscribed_at || '' }
     }
-    const at = nowIso()
-    const affected = tx(() => {
-      db.prepare("UPDATE leads SET status = 'unsubscribed', unsubscribed_at = ?, unsubscribed_source = 'manual', updated_at = datetime('now') WHERE id = ? AND user_id = ?")
-        .run(at, lead.id, req.wsId)
-      const links = db.prepare(
-        `SELECT cl.id FROM campaign_leads cl JOIN campaigns c ON c.id = cl.campaign_id
-         WHERE cl.lead_id = ? AND c.user_id = ?`
-      ).all(lead.id, req.wsId)
-      for (const link of links) {
-        db.prepare(
-          `UPDATE campaign_leads SET state = 'stopped', outcome = 'unsubscribed', unsubscribed_at = ?,
-             unsubscribed_by = ?, unsubscribed_source = 'manual', wait_until = '', updated_at = datetime('now') WHERE id = ?`
-        ).run(at, req.user.email, link.id)
-      }
-      // Every queued draft, in every campaign — not just this one.
-      const drafts = db.prepare("UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now') WHERE lead_id = ? AND status IN ('pending','approved')")
-        .run(req.user.email, lead.id).changes
-      return { campaigns: links.length, drafts }
-    })
+    // Shared with the footer link a recipient clicks. Two implementations of
+    // "honour an unsubscribe" is one more than the number that can be kept
+    // correct, and the copy that drifted was the one facing the outside world.
+    const result = tx(() => unsubscribeLead(req.wsId, lead.id, { source: 'manual', actor: req.user.email }))
     audit(req, { campaignId: c.id, leadId: lead.id, type: 'lead_unsubscribed', detail: `manual by ${req.user.email}` })
-    return { ok: true, unsubscribedAt: at, ...affected }
+    return {
+      ok: true,
+      unsubscribedAt: result.at,
+      campaigns: result.stopped,
+      drafts: result.declined,
+      cancelledSends: result.cancelled,
+    }
   }))
 
   // ---------------------------------------------------- update-lead-category --
-  api.post('/campaigns/:id/leads/:leadId/intent', metered((req) => {
+  api.post('/campaigns/:id/leads/:leadId/intent', metered(async (req) => {
     const c = campaignOf(req)
     const { lead, cl } = linkOf(c, req.params.leadId)
     const intent = str(req.body, 'intent', { required: true, max: 80 }).toLowerCase()
@@ -1573,29 +1923,137 @@ export function register(api) {
     }
     // Unsubscribe short-circuits, with or without a matching edge.
     if (intent === 'unsubscribe') {
-      const at = nowIso()
-      tx(() => {
-        db.prepare("UPDATE leads SET status = 'unsubscribed', unsubscribed_at = ?, unsubscribed_source = 'manual' WHERE id = ?").run(at, lead.id)
-        db.prepare("UPDATE campaign_leads SET intent = 'unsubscribe', intent_set_by = ?, intent_set_at = ?, state = 'stopped', outcome = 'unsubscribed', updated_at = datetime('now') WHERE id = ?")
-          .run(req.user.email, at, cl.id)
+      // Through the shared helper, like every other way out of the product.
+      //
+      // This branch used to hand-write `leads.status`, a timestamp, and this
+      // one campaign's link row — and nothing else. No durable block-list entry,
+      // no other campaign stopped, no pending draft withdrawn, no queued send
+      // cancelled. That left the whole resurrection path open through this
+      // route: the person opts out, someone later tidies the lead away, `leads`
+      // cascades and takes every trace with it, and the same address in next
+      // month's import comes back as a brand-new active lead the engine emails.
+      //
+      // Marking a reply as an unsubscribe is a person telling us what the lead
+      // said. It has to land exactly as hard as the lead clicking the footer
+      // link themselves.
+      const result = tx(() => {
+        const applied = unsubscribeLead(req.wsId, lead.id, { source: 'reply', actor: req.user.email })
+        db.prepare(
+          `UPDATE campaign_leads SET intent = 'unsubscribe', intent_set_by = ?, intent_set_at = ?,
+             updated_at = datetime('now') WHERE id = ?`
+        ).run(req.user.email, applied.at, cl.id)
+        return applied
       })
       audit(req, { campaignId: c.id, leadId: lead.id, type: 'lead_intent', detail: `${cl.intent || 'none'} -> unsubscribe (${req.user.email})` })
-      return { ok: true, intent, unsubscribed: true }
+      return {
+        ok: true,
+        intent,
+        unsubscribed: true,
+        campaigns: result.stopped,
+        drafts: result.declined,
+        cancelledSends: result.cancelled,
+      }
     }
 
-    const edge = graph.edges.find((e) => e.from === cl.node_id && e.cond.kind === 'reply' && (e.cond.intent === intent || e.cond.intent === null))
+    // A lead marked done is done in this campaign, and setting an intent is not
+    // an exemption. Everything below this line reroutes the lead through the
+    // playbook — `routeReply` moves `node_id` and hands the row back to the
+    // engine as 'active' or 'waiting' — which is exactly how a completed lead
+    // used to be resurrected: complete them, categorise the reply, and the next
+    // tick sent a second email to somebody a person had closed the loop on.
+    //
+    // The engine's own selection now refuses to pick a completed row up
+    // (server/engine.js), so no email would leave either way. This refusal is
+    // the other half: without it the request looks like it worked, and the row
+    // is left claiming a state the tick will never act on. Saying so is better
+    // than a 200 that means nothing.
+    //
+    // Deliberately below the unsubscribe branch: an opt-out is more restrictive
+    // than a completion, never less, and must land whatever else is true of the
+    // pairing. Re-enrolling is still available — remove the lead from the
+    // campaign and add them again, which is a decision with its own button.
+    if (cl.completed_at) {
+      throw new HttpError(409, {
+        error: 'lead_completed',
+        message: `This lead was marked complete in this campaign on ${cl.completed_at} — add them to the campaign again rather than re-categorising them back into it`,
+      })
+    }
+
     const at = nowIso()
-    tx(() => {
+    const previous = cl.intent || 'none'
+
+    // Reroute from where the reply was answered, not from where the mistake led.
+    //
+    // The classifier reads a reply while the lead sits at some node, picks an
+    // edge, and moves them. Correcting it means "you took the wrong edge from
+    // *there*" — so the edge has to be looked up from the node that was being
+    // answered. Using the lead's current node instead compounds the error: a
+    // lead misrouted A→B would take an edge out of B, ending up somewhere
+    // neither the classifier nor the person intended, and the wrong branch they
+    // were sent down would stay taken.
+    //
+    // The node being answered is the one that produced the last email before
+    // the reply arrived, which outbound messages already record.
+    const inbound = db.prepare(
+      "SELECT * FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'in' ORDER BY id DESC LIMIT 1"
+    ).get(c.id, lead.id)
+    const answered = inbound && db.prepare(
+      `SELECT node_id FROM messages
+       WHERE campaign_id = ? AND lead_id = ? AND direction = 'out' AND id < ? AND node_id != ''
+       ORDER BY id DESC LIMIT 1`
+    ).get(c.id, lead.id, inbound.id)
+    const from = answered?.node_id || cl.node_id
+
+    const edge = graph.edges.find((e) => e.from === from && e.cond.kind === 'reply' && (e.cond.intent === intent || e.cond.intent === null))
+
+    // Pause first, and independently of the routing below. Pausing is the half
+    // of this request that must hold even if the reroute cannot run, because
+    // "stop the wrong follow-up" is the more urgent of the two asks.
+    if (alsoPause && !cl.paused_at) {
+      db.prepare('UPDATE campaign_leads SET paused_at = ?, paused_by = ?, updated_at = datetime(\'now\') WHERE id = ?')
+        .run(at, req.user.email, cl.id)
+      cl.paused_at = at
+    }
+
+    // Actually reroute, rather than reporting a route nobody took.
+    //
+    // This used to write the new intent onto the lead and return `routedTo`
+    // naming the edge — but it never moved `node_id`, and it left the inbound
+    // message unclassified. So the next tick found an unread reply, ran the
+    // classifier, reached the conclusion the user had just corrected, and wrote
+    // it back. The correction lasted twenty seconds.
+    //
+    // `routeReply` is the engine's own branching code, which is the point:
+    // a correction has to follow exactly the path an automatic classification
+    // does, or "set the intent" and "what the intent does" drift apart.
+    const ctx = campaignCtx(c.id)
+
+    if (ctx && ctx.graph.valid) {
+      // Put the lead back on the node that was being answered before branching,
+      // so `routeReply` reads the same edges the classifier chose between.
+      cl.node_id = from
+      await routeReply(ctx, cl, intent, inbound || null, { setBy: req.user.email })
+    } else {
+      // No usable playbook to route through — record the decision anyway rather
+      // than losing it, and say the lead needs a person.
       db.prepare(
-        `UPDATE campaign_leads SET intent = ?, intent_set_by = ?, intent_set_at = ?, state = ?,
+        `UPDATE campaign_leads SET intent = ?, intent_set_by = ?, intent_set_at = ?, state = 'needs_attention',
            updated_at = datetime('now') WHERE id = ?`
-      ).run(intent, req.user.email, at, edge ? 'waiting' : 'needs_attention', cl.id)
-      if (alsoPause && !cl.paused_at) {
-        db.prepare('UPDATE campaign_leads SET paused_at = ?, paused_by = ? WHERE id = ?').run(at, req.user.email, cl.id)
-      }
-    })
-    audit(req, { campaignId: c.id, leadId: lead.id, type: 'lead_intent', detail: `${cl.intent || 'none'} -> ${intent} (${req.user.email})${alsoPause ? ', paused' : ''}` })
-    return { ok: true, intent, humanSet: true, paused: alsoPause, routedTo: edge ? edge.to : null, needsAttention: !edge }
+      ).run(intent, req.user.email, at, cl.id)
+      if (inbound) db.prepare('UPDATE messages SET intent = ? WHERE id = ?').run(intent, inbound.id)
+    }
+
+    const after = db.prepare('SELECT node_id, state FROM campaign_leads WHERE id = ?').get(cl.id)
+    audit(req, { campaignId: c.id, leadId: lead.id, type: 'lead_intent', detail: `${previous} -> ${intent} (${req.user.email})${alsoPause ? ', paused' : ''}` })
+    return {
+      ok: true,
+      intent,
+      humanSet: true,
+      paused: Boolean(alsoPause || cl.paused_at),
+      routedTo: edge ? edge.to : null,
+      nodeId: after?.node_id ?? cl.node_id,
+      needsAttention: after?.state === 'needs_attention',
+    }
   }))
 
   // ----------------------------------------------- update-lead-email-account --
@@ -1632,7 +2090,7 @@ export function register(api) {
   api.get('/campaigns/:id/playbook-analytics', metered((req) => {
     const c = campaignOf(req)
     const window = analyticsWindow(req)
-    const totals = campaignTotals(c.id, window)
+    const totals = campaignTotals(c.id, totalsWindow(window))
     const computedAt = nowIso()
     return {
       campaignId: c.id,
@@ -1665,7 +2123,7 @@ export function register(api) {
   api.get('/campaigns/:id/top-level-analytics', metered((req) => {
     const c = campaignOf(req)
     const window = analyticsWindow(req)
-    const t = campaignTotals(c.id, window)
+    const t = campaignTotals(c.id, totalsWindow(window))
     const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : 0)
     return {
       campaign_id: c.id,
@@ -1890,9 +2348,9 @@ export function register(api) {
     const mailbox = mailboxId
       ? owned('mailboxes', mailboxId, req.wsId, 'mailbox')
       : db.prepare(
-        `SELECT m.* FROM campaign_mailboxes cm JOIN mailboxes m ON m.id = cm.mailbox_id
+        `SELECT m.* FROM campaign_mailboxes cm JOIN mailboxes m ON m.id = cm.mailbox_id AND m.deleted_at IS NULL
          WHERE cm.campaign_id = ? ORDER BY cm.id LIMIT 1`
-      ).get(c.id) || (c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(c.mailbox_id) : null)
+      ).get(c.id) || (c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(c.mailbox_id) : null)
     if (!mailbox) throw invalid('mailbox_id', 'Attach a mailbox to this campaign, or name one to send from')
     if (mailbox.status !== 'connected') throw invalid('mailbox_id', `Mailbox ${mailbox.email} is ${mailbox.status} — reconnect it first`)
     if (remainingToday(mailbox) <= 0) throw invalid('mailbox_id', `Daily limit reached for ${mailbox.email}`)
@@ -1947,20 +2405,39 @@ export function register(api) {
       throw invalid('attachments', 'attachments must be an array')
     }
     const mailbox = original.mailbox_id
-      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(original.mailbox_id, req.wsId)
+      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(original.mailbox_id, req.wsId)
       : null
     if (!mailbox) throw invalid('messageId', 'That thread has no connected mailbox to reply from')
     if (mailbox.status !== 'connected') throw invalid('messageId', `Mailbox ${mailbox.email} is ${mailbox.status} — reconnect it first`)
 
     const subject = original.subject?.startsWith('Re:') ? original.subject : `Re: ${original.subject || ''}`.trim()
+
+    // The signature is the sending mailbox's, appended once. "Once" is the
+    // whole requirement: a reply drafted from a previous one already carries
+    // it, and appending again is the failure users actually notice.
+    const signature = String(mailbox.signature || '').trim()
+    const wantsSignature = bool(req.body, 'add_signature', false)
+    const outgoing = wantsSignature && signature && !body.includes(signature)
+      ? `${body.trimEnd()}\n\n${signature}`
+      : body
+
     if (scheduledTime) {
       // Scheduled: parked, not sent. Pacing decides when it actually goes.
+      //
+      // `queued`, not `scheduled`. This row used to be written with
+      // `send_status = 'scheduled'`, and nothing anywhere looked for that
+      // value: `upkeep.dispatchScheduled` selects `send_status = 'queued'`, and
+      // so does the Inbox's Scheduled folder. So a reply scheduled through this
+      // route was invisible in the folder that exists to show it and was never
+      // picked up by the job that exists to send it — it simply sat in the
+      // table for ever, while the response said it was scheduled. The Inbox's
+      // own scheduling route always wrote `queued`; this was the odd one out.
       db.prepare(
         `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body,
-           from_email, to_email, thread_id, node_id, is_read, manual_reply, scheduled_at, send_status)
-         VALUES (?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, 'manual', 1, 1, ?, 'scheduled')`
-      ).run(req.wsId, c.id, lead.id, mailbox.id, subject, body, mailbox.email, lead.email,
-        original.thread_id || '', scheduledTime)
+           from_email, to_email, cc_emails, bcc_emails, thread_id, node_id, is_read, manual_reply, scheduled_at, send_status)
+         VALUES (?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, 'manual', 1, 1, ?, 'queued')`
+      ).run(req.wsId, c.id, lead.id, mailbox.id, subject, outgoing, mailbox.email, lead.email,
+        cc.join(', '), bcc.join(', '), original.thread_id || '', scheduledTime)
       audit(req, { campaignId: c.id, leadId: lead.id, type: 'manual_reply_scheduled', detail: `${req.user.email} for ${scheduledTime}` })
       return { ok: true, scheduled: true, scheduledAt: scheduledTime, cc, bcc }
     }
@@ -1969,11 +2446,14 @@ export function register(api) {
     // List-Unsubscribe header, tracking and click wrapping are identical.
     const sent = await sendEmail({
       mailbox, user: { id: req.wsId }, campaign: c, lead,
-      nodeId: 'manual', subject, body,
+      nodeId: 'manual', subject, body: outgoing, cc, bcc,
     })
     db.prepare("UPDATE messages SET manual_reply = 1 WHERE provider_message_id = ?").run(sent.providerMessageId)
-    audit(req, { campaignId: c.id, leadId: lead.id, type: 'manual_reply', detail: `${req.user.email}${cc.length ? `, cc ${cc.length}` : ''}` })
-    return { ok: true, sent: true, threadId: sent.threadId, cc, bcc }
+    audit(req, {
+      campaignId: c.id, leadId: lead.id, type: 'manual_reply',
+      detail: `${req.user.email}${cc.length ? `, cc ${cc.join(', ')}` : ''}${bcc.length ? `, bcc ${bcc.length}` : ''}`,
+    })
+    return { ok: true, sent: true, threadId: sent.threadId, cc, bcc, signature: Boolean(outgoing !== body) }
   }))
 
   // ----------------------------------------------------------- forward-email --
@@ -2006,7 +2486,7 @@ export function register(api) {
     }
     const note = str(req.body, 'note', { max: 5000 })
     const mailbox = original.mailbox_id
-      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(original.mailbox_id, req.wsId)
+      ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(original.mailbox_id, req.wsId)
       : null
     if (!mailbox) throw invalid('messageId', 'That thread has no mailbox to forward from')
     if (mailbox.status !== 'connected') throw invalid('messageId', `Reconnect ${mailbox.email} before forwarding`)
@@ -2043,7 +2523,7 @@ export function register(api) {
     })
     return {
       success: true, forwardedTo: recipients, forwardedAt: at,
-      quotaUsed: 1, remainingToday: remainingToday(db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(mailbox.id)),
+      quotaUsed: 1, remainingToday: remainingToday(db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(mailbox.id)),
       playbookUnchanged: true,
     }
   }))
@@ -2055,8 +2535,27 @@ export function register(api) {
 // the file and the screen can never disagree about what was asked for.
 function leadFilters(req) {
   const stage = str(req.query, 'stage', { max: 40 })
+  // get-leads.md §2, engagement criterion: "opened, clicked, replied, bounced,
+  // unsubscribed, marked as spam, or opened-but-not-replied — the source API's
+  // `emailStatus` values including `not_replied`".
+  //
+  // `not_replied` and `bounced` were missing, which mattered because
+  // "who opened and never answered" is the one filter TC-8 gives its own row
+  // to and the one a user reaches for daily. `not_replied` is deliberately
+  // "opened and did not reply" rather than "did not reply", matching TC-8's
+  // "excludes leads never opened and leads who replied" — the plain
+  // never-answered set is what the `none` filter already means.
+  //
+  // DELIBERATE DIVERGENCE: the source API's spam-complaint value has no
+  // counterpart here. Harry records no per-recipient complaint signal (nothing
+  // writes one — see server/parity/schema.js), so offering the filter would
+  // return an always-empty set that reads as "nobody complained" rather than
+  // "this is not measured". It is left off until there is a fact behind it.
   const engagement = str(req.query, 'engagement', { max: 40 })
-  const ENGAGEMENTS = ['opened', 'clicked', 'replied', 'none', 'paused', 'completed', 'unsubscribed']
+  const ENGAGEMENTS = [
+    'opened', 'clicked', 'replied', 'not_replied', 'bounced',
+    'none', 'paused', 'completed', 'unsubscribed',
+  ]
   if (engagement && !ENGAGEMENTS.includes(engagement)) {
     throw invalid('engagement', `engagement must be one of: ${ENGAGEMENTS.join(', ')}`)
   }
@@ -2094,9 +2593,25 @@ function campaignLeadSql(campaign, filters, stages, { withTotal = true } = {}) {
              SUM(CASE WHEN COALESCE(opened_at,'') != '' THEN 1 ELSE 0 END) AS opens,
              SUM(CASE WHEN COALESCE(clicked_at,'') != '' THEN 1 ELSE 0 END) AS clicks,
              SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS replies,
+             SUM(CASE WHEN COALESCE(send_status,'') = 'bounced' THEN 1 ELSE 0 END) AS bounces,
              MAX(CASE WHEN direction = 'out' THEN created_at ELSE '' END) AS last_sent
         FROM messages WHERE campaign_id = ? AND ${NOT_TEST} GROUP BY lead_id
     ) a ON a.lead_id = cl.lead_id`
+
+  // The playbook node the most recent outbound email came from — the raw half of
+  // export.md §2's "last sequence step sent". It cannot ride on the aggregate
+  // above: SQLite only lets a bare column follow a min()/max() when that is the
+  // *only* aggregate in the select, and there are six. So it is its own grouped
+  // join, still one pass over the campaign's messages rather than one query per
+  // lead. Turning the node id into a step number needs the diagram, which SQL
+  // does not have, so that happens where the graph is in hand.
+  joinArgs.push(campaign.id, campaign.id)
+  const lastStep = `LEFT JOIN (
+      SELECT lead_id, node_id FROM messages
+       WHERE campaign_id = ? AND direction = 'out' AND ${NOT_TEST}
+         AND id IN (SELECT MAX(id) FROM messages
+                     WHERE campaign_id = ? AND direction = 'out' AND ${NOT_TEST} GROUP BY lead_id)
+    ) ls ON ls.lead_id = cl.lead_id`
 
   const where = ['cl.campaign_id = ?']
   const args = [campaign.id]
@@ -2112,6 +2627,13 @@ function campaignLeadSql(campaign, filters, stages, { withTotal = true } = {}) {
   if (filters.engagement === 'opened') where.push('COALESCE(a.opens, 0) > 0')
   if (filters.engagement === 'clicked') where.push('COALESCE(a.clicks, 0) > 0')
   if (filters.engagement === 'replied') where.push('COALESCE(a.replies, 0) > 0')
+  // TC-8: "Returns leads with an open and no reply; excludes leads never opened
+  // and leads who replied."
+  if (filters.engagement === 'not_replied') where.push('COALESCE(a.opens, 0) > 0 AND COALESCE(a.replies, 0) = 0')
+  // A bounce is a fact about a send and a fact about the person: a lead marked
+  // bounced after a hard failure elsewhere belongs in this filter too, or the
+  // count disagrees with the stage strip.
+  if (filters.engagement === 'bounced') where.push("(COALESCE(a.bounces, 0) > 0 OR l.status = 'bounced')")
   if (filters.engagement === 'none') {
     where.push('COALESCE(a.opens, 0) = 0 AND COALESCE(a.clicks, 0) = 0 AND COALESCE(a.replies, 0) = 0')
   }
@@ -2142,13 +2664,17 @@ function campaignLeadSql(campaign, filters, stages, { withTotal = true } = {}) {
   const sql = `SELECT cl.lead_id, cl.state, cl.node_id, cl.intent, cl.outcome, cl.paused_at,
             cl.resume_at, cl.completed_at, cl.unsubscribed_at, cl.mailbox_id, cl.updated_at,
             l.email, l.first_name, l.last_name, l.company, l.title, l.status AS leadStatus,
+            l.phone, l.website, l.created_at AS lead_created_at,
             COALESCE(a.opens, 0) AS opens, COALESCE(a.clicks, 0) AS clicks,
             COALESCE(a.replies, 0) AS replies,
+            COALESCE(a.bounces, 0) AS bounces,
             COALESCE(a.last_sent, '') AS last_sent,
+            COALESCE(ls.node_id, '') AS last_sent_node,
             COALESCE(a.last_activity, '') AS last_activity${total}
      FROM campaign_leads cl
      JOIN leads l ON l.id = cl.lead_id
      ${activity}
+     ${lastStep}
      WHERE ${where.join(' AND ')}
      ORDER BY COALESCE(NULLIF(a.last_activity, ''), cl.updated_at) DESC, cl.lead_id ASC`
   return { sql, args: [...joinArgs, ...args] }
@@ -2164,6 +2690,12 @@ function campaignLeadRow(r, stages) {
     lastName: r.last_name,
     company: r.company,
     title: r.title,
+    phone: r.phone || '',
+    // `leads.website` is the column `company_url` writes to — add-leads and
+    // update-lead accept either spelling for the same field (see `either()`
+    // above). One column, two documented names; never two columns.
+    companyUrl: r.website || '',
+    createdAt: r.lead_created_at || '',
     stage: stages[r.lead_id] || 'not contacted',
     state: r.state,
     node: r.node_id || '',
@@ -2177,7 +2709,14 @@ function campaignLeadRow(r, stages) {
     opens: r.opens || 0,
     clicks: r.clicks || 0,
     replies: r.replies || 0,
+    // An engagement flag the "bounced" filter can be checked against by eye:
+    // a filtered row whose count is zero would mean the two disagree.
+    bounces: r.bounces || 0,
+    bounced: (r.bounces || 0) > 0 || r.leadStatus === 'bounced',
     lastSent: r.last_sent || '',
+    // The playbook node the last email came from. The step *number* is derived
+    // from the diagram by the caller that has it.
+    lastSentNode: r.last_sent_node || '',
     lastActivity: r.last_activity || '',
   }
 }
@@ -2212,5 +2751,28 @@ function analyticsWindow(req, { fromField = 'from', toField = 'to' } = {}) {
   if (from > to) throw invalid(toField, `${toField} must be on or after ${fromField}`)
   const days = (Date.parse(to) - Date.parse(from)) / 86400e3
   if (days > 366) throw invalid('to', 'The window may span at most 366 days')
-  return { from: sqlTime(from), to: sqlTime(to), fromIso: from, toIso: to }
+  return {
+    from: sqlTime(from),
+    to: sqlTime(to),
+    // The same instant, one second later, for the callers that compare with a
+    // strict `<`.
+    //
+    // get-analytics-by-date.md §5: "boundaries are inclusive at both ends".
+    // `campaignTotals` in server/metrics.js windows with `>= from AND < to`, so
+    // handing it the requested `to` quietly dropped everything that happened on
+    // the closing boundary — a request for a whole day lost its last second,
+    // and the step-statistics route (which compares with `<=`) and the
+    // analytics routes disagreed about the same window on the same data.
+    // Timestamps are stored to the second, so one second later is the next
+    // representable instant.
+    toExclusive: sqlTime(new Date(Date.parse(to) + 1000).toISOString()),
+    fromIso: from,
+    toIso: to,
+  }
+}
+
+// The window as `campaignTotals` wants it: inclusive lower bound, exclusive
+// upper bound one tick past the inclusive one the caller asked for.
+function totalsWindow(window) {
+  return window ? { from: window.from, to: window.toExclusive } : null
 }

@@ -116,4 +116,17 @@ test('quoted labels and comments parse', () => {
   `)
   assert.deepEqual(g.errors, [])
   assert.equal(g.nodes.A.instruction, 'pitch the Q3 offer')
+  assert.equal(g.nodes.A.channel, 'email')
+})
+
+test('Send sms: sets channel sms; bare Send: stays email', () => {
+  const g = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send: Intro]
+    A -- no reply 2d --> B[Send sms: Short nudge]
+    B --> W([Won])
+  `)
+  assert.deepEqual(g.errors, [])
+  assert.equal(g.nodes.A.channel, 'email')
+  assert.equal(g.nodes.B.channel, 'sms')
+  assert.equal(g.nodes.B.instruction, 'Short nudge')
 })

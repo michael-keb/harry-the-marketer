@@ -25,11 +25,146 @@ function waitText(ms) {
   return `${Math.round(ms / 60000)} minutes`
 }
 
-function conditionText(branch) {
+const STEP_KIND = {
+  send: { label: 'Send', rail: 'bg-sky-500', pill: 'bg-sky-50 text-sky-700 ring-sky-200' },
+  wait: { label: 'Wait', rail: 'bg-amber-400', pill: 'bg-amber-50 text-amber-800 ring-amber-200' },
+  terminal: { label: 'Finish', rail: 'bg-slate-400', pill: 'bg-slate-100 text-slate-600 ring-slate-200' },
+  decision: { label: 'Branch', rail: 'bg-indigo-500', pill: 'bg-indigo-50 text-indigo-700 ring-indigo-200' },
+  start: { label: 'Start', rail: 'bg-accent-500', pill: 'bg-accent-50 text-accent-700 ring-accent-200' },
+}
+
+function terminalKind(step) {
+  if (step.type !== 'terminal') return null
+  if (step.outcome === 'won') return { label: 'Won', rail: 'bg-emerald-500', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' }
+  if (step.outcome === 'lost') return { label: 'Lost', rail: 'bg-red-400', pill: 'bg-red-50 text-red-700 ring-red-200' }
+  if (step.outcome === 'unsubscribed') return { label: 'Unsubscribed', rail: 'bg-slate-400', pill: 'bg-slate-100 text-slate-600 ring-slate-200' }
+  return STEP_KIND.terminal
+}
+
+function stepKind(step) {
+  return terminalKind(step) || STEP_KIND[step.type] || STEP_KIND.decision
+}
+
+function stepTitle(step) {
+  if (step.instruction) return step.instruction
+  const label = String(step.label || '').replace(/^(send|wait)\s*[:=]?\s*/i, '').trim()
+  return label || step.label || step.nodeId
+}
+
+function branchSummary(branch) {
   const cond = branch.condition || {}
-  if (cond.kind === 'reply') return cond.intent ? `if they reply “${cond.intent}”` : 'if they reply at all'
-  if (cond.kind === 'noreply') return branch.label ? `if they do not reply — ${branch.label}` : 'if they do not reply'
-  return branch.label ? `${branch.label}` : 'then'
+  if (cond.kind === 'reply') return cond.intent ? `Reply: “${cond.intent}”` : 'Any reply'
+  if (cond.kind === 'no_reply') {
+    const wait = cond.ms ? waitText(cond.ms) : ''
+    return wait ? `No reply · ${wait}` : 'No reply'
+  }
+  if (cond.kind === 'after') return cond.ms ? `After ${waitText(cond.ms)}` : 'Then'
+  if (cond.kind === 'always') return 'Then'
+  return branch.label || 'Then'
+}
+
+function StepCard({ step, selected, onSelect, onTestSend }) {
+  const kind = stepKind(step)
+  const selectedCls = selected ? 'border-accent-500 ring-2 ring-accent-500/20 shadow-sm' : 'border-slate-200 hover:border-slate-300'
+
+  return (
+    <article
+      className={`relative overflow-hidden rounded-xl border bg-white transition-colors ${selectedCls}`}
+      aria-label={`Step ${step.position + 1}: ${step.label}`}
+    >
+      <div className={`absolute inset-y-0 left-0 w-1 ${kind.rail}`} aria-hidden />
+
+      <div className="pl-4 pr-4 py-3.5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <button
+            type="button"
+            className="min-w-0 flex-1 cursor-pointer text-left"
+            aria-pressed={selected}
+            onClick={() => onSelect?.(selected ? '' : step.nodeId)}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold tabular-nums text-slate-600">
+                {step.position + 1}
+              </span>
+              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px] font-medium ring-1 ring-inset ${kind.pill}`}>
+                {kind.label}
+              </span>
+              <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] font-medium text-accent-700">
+                {step.nodeId}
+              </span>
+            </div>
+
+            <h3 className="mt-2 text-base leading-snug text-ink-900 text-wrap-pretty">
+              {stepTitle(step)}
+            </h3>
+
+            {step.type === 'wait' && step.waitMs && (
+              <p className="mt-1.5 text-sm text-amber-800">
+                Pauses for <span className="font-medium">{waitText(step.waitMs)}</span>, then continues
+              </p>
+            )}
+
+            {step.type === 'terminal' && (
+              <p className="mt-1.5 text-sm text-slate-500">This path ends here — no further emails.</p>
+            )}
+          </button>
+
+          <div className="flex shrink-0 flex-col items-end gap-2 text-right">
+            <span className="text-xs tabular-nums text-slate-500">
+              <span className="font-medium text-slate-700">{nfmt(step.sent)}</span> sent
+            </span>
+            {step.type === 'send' && onTestSend && (
+              <button
+                type="button"
+                className="btn-ghost cursor-pointer px-3 py-1.5 text-xs"
+                aria-label={`Send me a test of ${step.label}`}
+                onClick={() => onTestSend(step.nodeId)}
+              >
+                Send me a test
+              </button>
+            )}
+          </div>
+        </div>
+
+        {step.branches?.length > 0 && (
+          <ul className="mt-3 space-y-1.5" aria-label="What happens next">
+            {step.branches.map((b, i) => (
+              <li key={i} className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="rounded-md bg-slate-50 px-2 py-1 text-slate-600 ring-1 ring-slate-200 ring-inset">
+                  {branchSummary(b)}
+                </span>
+                <span className="text-slate-400" aria-hidden>→</span>
+                <span className="rounded-md bg-accent-50 px-2 py-1 font-mono text-xs font-medium text-accent-700 ring-1 ring-accent-200 ring-inset">
+                  {b.to}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {step.sample && (
+          <details className="group mt-3 rounded-lg border border-slate-200 bg-slate-50/60">
+            <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium text-slate-600 marker:content-none [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center justify-between gap-2">
+                Sample email copy
+                <span className="text-xs font-normal text-slate-400 group-open:hidden">Show</span>
+                <span className="hidden text-xs font-normal text-slate-400 group-open:inline">Hide</span>
+              </span>
+            </summary>
+            <section className="border-t border-slate-200 px-3 py-2.5" aria-label={`Sample copy for step ${step.nodeId}`}>
+              <p className="text-xs text-slate-500">
+                An example for a stand-in lead — the real email is written at send time.
+              </p>
+              <p className="mt-2 text-sm font-medium text-slate-700">{step.sample.subject}</p>
+              <pre className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-slate-600">
+                {step.sample.body}
+              </pre>
+            </section>
+          </details>
+        )}
+      </div>
+    </article>
+  )
 }
 
 // ------------------------------------------------------------ step list ----
@@ -49,7 +184,11 @@ export function StepsList({ campaignId, onTestSend, selectedNode, onSelectNode }
           {messageOf(error)} <button className="cursor-pointer underline" onClick={reload}>Try again</button>
         </p>
       ) : loading && !data ? (
-        <div className="space-y-2" aria-hidden>{[0, 1, 2].map((i) => <div key={i} className="h-16 rounded-lg bg-slate-100 animate-pulse" />)}</div>
+        <div className="space-y-3" aria-hidden>
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-28 animate-pulse rounded-xl border border-slate-200 bg-slate-50" />
+          ))}
+        </div>
       ) : data && !data.valid ? (
         <div className="rounded-lg border border-red-200 bg-red-50 p-3">
           <p className="text-sm text-red-700">The diagram does not parse, so there are no steps to show yet.</p>
@@ -60,55 +199,21 @@ export function StepsList({ campaignId, onTestSend, selectedNode, onSelectNode }
       ) : !data?.steps?.length ? (
         <p className="text-sm text-slate-500">No steps yet — draw a Send node in the diagram, or use Generate with AI.</p>
       ) : (
-        <ol className="space-y-2">
-          {data.steps.map((s) => (
-            <li key={s.nodeId}>
-              <article
-                className={`rounded-lg border bg-white p-3 ${selectedNode === s.nodeId ? 'border-accent-500' : 'border-slate-200'}`}
-                aria-label={`Step ${s.position + 1}: ${s.label}`}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    className="cursor-pointer text-left"
-                    aria-pressed={selectedNode === s.nodeId}
-                    onClick={() => onSelectNode?.(selectedNode === s.nodeId ? '' : s.nodeId)}
-                  >
-                    <span className="text-xs text-slate-500">Step {s.position + 1}</span>{' '}
-                    <span className="font-mono text-xs text-accent-700">{s.nodeId}</span>{' '}
-                    <span className="text-sm text-ink-900">{s.label}</span>
-                  </button>
-                  <div className="flex items-center gap-3 text-[11px] text-slate-500">
-                    <span>{s.type}</span>
-                    {s.waitMs ? <span>waits {waitText(s.waitMs)}</span> : null}
-                    <span>{nfmt(s.sent)} sent</span>
-                    {s.type === 'send' && onTestSend && (
-                      <button className="cursor-pointer text-slate-600 underline hover:text-accent-700"
-                        aria-label={`Send me a test of ${s.label}`} onClick={() => onTestSend(s.nodeId)}>
-                        Send me a test
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {s.instruction && <p className="mt-1 text-xs text-slate-600">{s.instruction}</p>}
-
-                {s.branches?.length > 0 && (
-                  <ul className="mt-2 space-y-0.5 text-[11px] text-slate-500">
-                    {s.branches.map((b, i) => (
-                      <li key={i}>{conditionText(b)} → <span className="font-mono text-accent-600">{b.to}</span></li>
-                    ))}
-                  </ul>
-                )}
-
-                {s.sample && (
-                  <section className="mt-2 rounded border border-slate-200 bg-white p-2" aria-label={`Approved copy for step ${s.nodeId}`}>
-                    <div className="text-[11px] text-slate-500">Approved copy — a sample, personalised per lead before it sends</div>
-                    <div className="mt-1 text-xs text-slate-700">{s.sample.subject}</div>
-                    <pre className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed text-slate-500">{s.sample.body}</pre>
-                  </section>
-                )}
-              </article>
+        <ol className="relative space-y-0">
+          {data.steps.map((s, i) => (
+            <li key={s.nodeId} className="relative pb-3 last:pb-0">
+              {i < data.steps.length - 1 && (
+                <span
+                  className="absolute left-[1.6875rem] top-10 bottom-0 w-px bg-slate-200"
+                  aria-hidden
+                />
+              )}
+              <StepCard
+                step={s}
+                selected={selectedNode === s.nodeId}
+                onSelect={onSelectNode}
+                onTestSend={onTestSend}
+              />
             </li>
           ))}
         </ol>

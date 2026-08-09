@@ -39,6 +39,23 @@ async function makeManualTest(c = client, mb = mailbox, extra = {}) {
   return res.body
 }
 
+// A recurring test, which is the only kind that has a schedule to stop. Stopping
+// a one-off manual test is refused now — it wrote `status = 'stopped'` onto
+// something that was never on a timer, leaving the product describing a
+// recurrence that did not exist.
+async function makeAutomatedTest(c = client, mb = mailbox, extra = {}) {
+  seq += 1
+  const res = await c.post('/api/deliverability/tests/schedule', {
+    name: `Automated test ${seq}`,
+    mailboxIds: [mb.id],
+    scheduleStartTime: new Date(Date.now() + 3600_000).toISOString(),
+    everyDays: 7,
+    ...extra,
+  })
+  assert.equal(res.status, 200, JSON.stringify(res.body))
+  return res.body
+}
+
 function countRows(table, testId) {
   return db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE test_id = ?`).get(testId).n
 }
@@ -587,7 +604,7 @@ test('Authentication-Results parses defensively and never throws', () => {
 // --- stop ------------------------------------------------------------------
 
 test('stopping a schedule deletes nothing and is idempotent', async () => {
-  const t = await makeManualTest()
+  const t = await makeAutomatedTest()
   db.prepare("INSERT INTO deliverability_reports (test_id, run_no, kind, ref, payload) VALUES (?, 1, 'ips', '', '[]')").run(t.id)
 
   const runsBefore = countRows('deliverability_test_runs', t.id)
@@ -677,7 +694,10 @@ test('the list filters by status, type and folder without leaving the workspace'
   try {
     const folder = (await c.post('/api/deliverability/folders', { name: 'Filed' })).body
     const filed = await makeManualTest(c, box, { folderId: folder.id })
-    const loose = await makeManualTest(c, box)
+    // Automated, because reaching `stopped` means stopping a schedule and only
+    // a recurring test has one. That also gives the type filter below two
+    // different kinds to tell apart, which is the point of testing it.
+    const loose = await makeAutomatedTest(c, box)
     await c.put(`/api/deliverability/tests/${loose.id}/stop`)
 
     const byFolder = await c.get(`/api/deliverability/tests?folderId=${folder.id}`)
@@ -691,7 +711,9 @@ test('the list filters by status, type and folder without leaving the workspace'
     assert.deepEqual(stopped.body.items.map((t) => t.id), [loose.id])
 
     const manual = await c.get('/api/deliverability/tests?type=manual')
-    assert.equal(manual.body.total, 2)
+    assert.deepEqual(manual.body.items.map((t) => t.id), [filed.id])
+    const automated = await c.get('/api/deliverability/tests?type=automated')
+    assert.deepEqual(automated.body.items.map((t) => t.id), [loose.id], 'the type filter tells the two apart')
 
     const bogus = await c.get('/api/deliverability/tests?status=exploded')
     assert.equal(bogus.status, 422)
@@ -701,4 +723,33 @@ test('the list filters by status, type and folder without leaving the workspace'
   } finally {
     await c.close()
   }
+})
+
+// --- stopping is a schedule operation ---------------------------------------
+
+test('a one-off manual test cannot be stopped, because it has no schedule', async () => {
+  // The route accepted this and wrote `status = 'stopped'` onto a test that was
+  // never running on a timer, leaving the product describing a recurrence that
+  // did not exist. The spec asks for the action to be unavailable rather than
+  // to fail after the fact — refused here, and hidden in the UI.
+  const t = await makeManualTest()
+  const before = db.prepare('SELECT status FROM deliverability_tests WHERE id = ?').get(t.id).status
+
+  const res = await client.put(`/api/deliverability/tests/${t.id}/stop`)
+  assert.equal(res.status, 409)
+  assert.equal(res.body.error, 'not_automated')
+  assert.match(res.body.message, /no schedule/i, 'and says why, not just no')
+
+  assert.equal(
+    db.prepare('SELECT status FROM deliverability_tests WHERE id = ?').get(t.id).status,
+    before,
+    'the status is untouched'
+  )
+})
+
+test('an automated test is still stoppable, so the guard is not a blanket refusal', async () => {
+  const t = await makeAutomatedTest()
+  const res = await client.put(`/api/deliverability/tests/${t.id}/stop`)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.status, 'stopped')
 })

@@ -74,6 +74,29 @@ const PAYMENT_FIELDS = new Set([
   'bank_account', 'bankaccount', 'billing_card', 'billingcard',
 ])
 
+// An exact list is the wrong shape for this job on its own: it has to be
+// complete to be safe, and it was not — `credit_card` and `paypal_email` both
+// walked straight past it, because the list had `card` and no notion of PayPal
+// at all. Nothing leaked (no route reads these fields), but the stated
+// invariant is "Harry never handles a payment instrument", and a guard that
+// only refuses the spellings someone thought of does not establish it.
+//
+// So: patterns as well, anchored on the normalised underscore form. `card`
+// matches `credit_card` and `card_number` but not `wildcard` or `discard`,
+// because those have no separator — which is the false positive worth avoiding,
+// since refusing a legitimate field is a broken order rather than a safe one.
+const PAYMENT_PATTERNS = [
+  /(^|_)(credit|debit|charge|gift|prepaid)_?cards?(_|$)/,
+  /(^|_)cards?(_|$)/,
+  /paypal/,
+  /(^|_)(bank|billing)_?(account|details|info)(_|$)/,
+  /(^|_)(iban|bic|swift|pan)(_|$)/,
+  /(^|_)(cvv|cvc|csc)\d?(_|$)/,
+  /(^|_)(routing|sort)_?(number|code)(_|$)/,
+  /(^|_)(payment|payout)_/,
+  /_token$/,
+]
+
 const PAYMENT_REFUSAL =
   'Harry never accepts, stores or forwards a payment instrument. The supplier\'s own ' +
   'checkout holds the card and Harry keeps only the order reference — remove this field ' +
@@ -82,7 +105,10 @@ const PAYMENT_REFUSAL =
 // Depth-limited so a deliberately nested body cannot turn validation into a
 // stack overflow. Runs before anything is written, so a refused request leaves
 // no row behind.
-function rejectPaymentInstruments(value, path = '', depth = 0) {
+// Exported so the guard can be probed field by field. The invariant it defends
+// — Harry never handles a payment instrument — deserves a test that names the
+// spellings, not one that posts a single body and calls it covered.
+export function rejectPaymentInstruments(value, path = '', depth = 0) {
   if (depth > 6 || value === null || typeof value !== 'object') return
   if (Array.isArray(value)) {
     value.forEach((item, i) => rejectPaymentInstruments(item, `${path}[${i}]`, depth + 1))
@@ -90,7 +116,11 @@ function rejectPaymentInstruments(value, path = '', depth = 0) {
   }
   for (const [key, child] of Object.entries(value)) {
     const normal = key.toLowerCase().replace(/[\s-]/g, '_')
-    if (PAYMENT_FIELDS.has(normal) || PAYMENT_FIELDS.has(normal.replace(/_/g, ''))) {
+    if (
+      PAYMENT_FIELDS.has(normal) ||
+      PAYMENT_FIELDS.has(normal.replace(/_/g, '')) ||
+      PAYMENT_PATTERNS.some((re) => re.test(normal))
+    ) {
       throw invalid(path ? `${path}.${key}` : key, PAYMENT_REFUSAL)
     }
     rejectPaymentInstruments(child, path ? `${path}.${key}` : key, depth + 1)
@@ -252,13 +282,35 @@ function mailboxCount(wsId, domain) {
   const d = esc(String(domain).toLowerCase())
   return db.prepare(
     `SELECT COUNT(*) AS n FROM mailboxes
-      WHERE user_id = ?
+      WHERE user_id = ? AND deleted_at IS NULL
         AND (lower(email) LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\')`
   ).get(wsId, `%@${d}`, `%.${d}`).n
 }
 
 function ownerOf(wsId) {
   return db.prepare('SELECT id, email, name FROM users WHERE id = ?').get(wsId) || { email: '', name: '' }
+}
+
+// ---- "as of" ----------------------------------------------------------------
+
+// domain-list.md AC 7: when the supplier is unreachable the stored list is
+// shown "with an 'as of' time rather than an empty panel". That time has to be
+// when Harry last heard from the supplier. It used to be the `created_at` of
+// the most recently inserted domain row, which answers a different question
+// entirely — a workspace that bought a domain in March and lost its supplier in
+// August was told its ownership data was "as of March", and a workspace whose
+// rows all came from an order rather than a sync was given a date on which no
+// sync had ever happened. Neither is a refresh time, and a stale-data notice
+// that lies about its own age is worse than none.
+const SYNC_KEY = (wsId) => `sender_domains_synced_at:${wsId}`
+
+function markDomainSync(wsId) {
+  db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(SYNC_KEY(wsId), new Date().toISOString())
+}
+
+function lastDomainSync(wsId) {
+  return db.prepare('SELECT value FROM kv WHERE key = ?').get(SYNC_KEY(wsId))?.value || null
 }
 
 // ---- the supplier seam ------------------------------------------------------
@@ -323,9 +375,26 @@ function splitCredentials(accounts) {
   return { safe, credentials }
 }
 
+// When the domains an order bought stop being the buyer's.
+//
+// `sender_orders` has no expiry column of its own and this module may not add
+// one, so the date is read back from the `sender_domains` rows the order
+// created — which is where reconciliation already writes the supplier's
+// `expires_at`. The earliest is the one that matters: an order is only good for
+// as long as its first domain lasts. Absent until a supplier has actually said,
+// rather than invented from the order date.
+function orderExpiry(row) {
+  const found = db.prepare(
+    `SELECT MIN(NULLIF(expires_at, '')) AS at FROM sender_domains
+      WHERE workspace_id = ? AND order_ref = ?`
+  ).get(row.workspace_id, row.order_ref)
+  return found?.at || null
+}
+
 // Built field by field rather than by deleting from the row, so a column added
 // to sender_orders later cannot leak into a response by default.
 function presentOrder(row) {
+  const expiresAt = orderExpiry(row)
   return {
     order_ref: row.order_ref,
     vendor_id: row.vendor_id,
@@ -338,6 +407,11 @@ function presentOrder(row) {
     created_by: row.created_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    // order-details.md AC 1 names `expires_at`, and AC 5 asks the order to read
+    // as expired once the date has passed. `null` means the supplier has not
+    // told us yet — which is not the same as "does not expire".
+    expires_at: expiresAt,
+    expired: Boolean(expiresAt && Date.parse(expiresAt) < Date.now()),
   }
 }
 
@@ -383,7 +457,7 @@ function presentDomain(wsId, row) {
 function senderIdentity(wsId) {
   const owner = ownerOf(wsId)
   const mailbox = db.prepare(
-    "SELECT display_name, email FROM mailboxes WHERE user_id = ? AND IFNULL(display_name, '') != '' ORDER BY id LIMIT 1"
+    "SELECT display_name, email FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND IFNULL(display_name, '') != '' ORDER BY id LIMIT 1"
   ).get(wsId)
   const name = String(owner.name || mailbox?.display_name || '').trim()
   const parts = name.split(/\s+/).filter(Boolean)
@@ -543,7 +617,7 @@ function parseDomains(body, wsId) {
       const parent = row.parent_account_id ?? row.parentAccountId
       if (parent !== undefined && parent !== null && parent !== '') {
         const id = int({ v: parent }, 'v', { required: true, min: 1 })
-        const owned = db.prepare('SELECT id FROM mailboxes WHERE id = ? AND user_id = ?').get(id, wsId)
+        const owned = db.prepare('SELECT id FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(id, wsId)
         entryOut.parent_account_id = owned ? id : null
         if (!owned) entryOut.parent_account_note = 'unresolved'
       }
@@ -652,6 +726,7 @@ export function register(api) {
     const res = await supplier.attempt('/api/v1/smart-senders/get-domain-list', { timeoutMs: 8000 })
     const stale = !res.ok
     if (res.ok) {
+      markDomainSync(req.wsId)
       const rows = Array.isArray(res.payload?.data) ? res.payload.data : []
       tx(() => {
         for (const row of rows) {
@@ -682,7 +757,10 @@ export function register(api) {
     const rows = db.prepare(`SELECT * FROM sender_domains WHERE ${where} ORDER BY id DESC LIMIT ?`)
       .all(...args, max + 1)
     const out = paged(rows, max)
-    const asOf = out.items.length ? out.items[0].created_at : null
+    // Null until a supplier has actually answered once — a workspace with no
+    // marketplace configured has no "as of" to report, and inventing one would
+    // make Harry's own rows look like confirmed ownership data.
+    const asOf = lastDomainSync(req.wsId)
 
     meter('senders.domains', Date.now() - started, true, `${out.items.length} domain(s)`)
     return {
@@ -693,6 +771,11 @@ export function register(api) {
       configured: configured('senders'),
       stale,
       as_of: asOf,
+      // What `as_of` is the age of, so a client cannot read it as "when this
+      // domain was bought".
+      as_of_meaning: asOf
+        ? 'when Harry last successfully read the domain list from the supplier'
+        : 'Harry has never had a successful answer from a supplier for this workspace',
       ...(configured('senders') ? {} : unconfigured('senders', ENV_VARS)),
     }
   }))

@@ -476,8 +476,9 @@ export function register(api) {
     audit(req, { type: 'client_updated', detail: `${req.user.email} updated client "${row.name}": ${changes.join('; ')}` })
 
     // An allowance below what the client has already used is accepted, not
-    // refused — but it is stated, once, so a campaign pausing later is never a
-    // silent mid-flight failure (update.md AC 4).
+    // refused — but it is stated, once, on the trail and in the response
+    // (update.md AC 4, partially: the pause itself is not built — see
+    // `overAllowance` below).
     const over = credits.assigned && overAllowance(req.wsId, existing.id, credits)
     if (over) audit(req, { type: 'client_over_allowance', detail: `Client "${row.name}" is over its allowance: ${over.used} of ${over.allowed} emails used` })
 
@@ -676,16 +677,50 @@ function moveScope(req, client, target) {
   return { ok: true, client_id: client.id, attached: target !== null, moved, counts: scopeCounts(req.wsId, client.id) }
 }
 
-// Emails already sent by the client's mailboxes, against the stored allowance.
-// Lowering an allowance below usage is accepted and reported, never refused.
-function overAllowance(wsId, clientId, credits) {
-  if (!credits.assigned || !credits.email_credits) return null
+// What one client has spent against what it was given.
+//
+// Exported because the send gate asks it too (server/gates.js, `resolveSend`):
+// the number a toast quotes when an allowance is lowered and the number that
+// stops an email leaving have to be the same number, counted the same way, or
+// the Settings panel and the campaign header would disagree about whether a
+// brand is over its limit.
+//
+// Usage is emails already sent on the client's behalf — from a campaign that
+// belongs to the client or from one of its mailboxes — because that is what an
+// email allowance is spent on. `assigned: false` means the client draws on the
+// agency pool and has no ceiling of its own, so there is nothing to be over.
+export function clientAllowance(wsId, clientId, credits = null) {
+  const client = db.prepare("SELECT id, name FROM clients WHERE id = ? AND workspace_id = ? AND IFNULL(deleted_at,'') = ''")
+    .get(clientId, wsId)
+  if (!client) return null
+  const limits = credits || readCredits(clientId)
+  if (!limits.assigned || !limits.email_credits) return null
   const used = db.prepare(
     `SELECT COUNT(*) AS n FROM messages m
       WHERE m.user_id = ? AND m.direction = 'out'
         AND (m.campaign_id IN (SELECT id FROM campaigns WHERE user_id = ? AND client_id = ?)
              OR m.mailbox_id IN (SELECT id FROM mailboxes WHERE user_id = ? AND client_id = ?))`
   ).get(wsId, wsId, clientId, wsId, clientId).n
-  if (used <= credits.email_credits) return null
-  return { used, allowed: credits.email_credits, reason: 'Client is over its email allowance; sending is paused for this client.' }
+  return { name: client.name, used, allowed: limits.email_credits, over: used > limits.email_credits }
+}
+
+// Lowering an allowance below usage is accepted and reported, never refused
+// (update.md AC 4). What follows the acceptance is a real pause: the send gate
+// refuses every email from that client's campaigns until the allowance is
+// raised or the client goes back on the agency pool, so this can now say so.
+//
+// It used to say the opposite, honestly — nothing on the send path read a
+// client allowance, so the breach was recorded and surfaced and that was all.
+// The gate is `client_allowance` in server/gates.js; the campaign header and
+// the approval queue read the same resolver, so the reason shows up wherever a
+// user asks why a campaign is holding.
+function overAllowance(wsId, clientId, credits) {
+  const state = clientAllowance(wsId, clientId, credits)
+  if (!state || !state.over) return null
+  return {
+    used: state.used,
+    allowed: state.allowed,
+    enforced: true,
+    reason: `This client has sent ${state.used} of its ${state.allowed} allowance. Its campaigns will not send again until you raise the allowance or return the client to the agency pool.`,
+  }
 }

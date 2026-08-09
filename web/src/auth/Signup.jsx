@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import { Spinner } from '../ui.jsx'
 import { PLANS } from '../../../shared/site-content.js'
 import AuthLayout from './AuthLayout.jsx'
+import GoogleIcon from './GoogleIcon.jsx'
 import { useAuthConfig, safeNext } from './useAuthConfig.js'
 
 const ASIDE = {
@@ -92,7 +93,8 @@ export default function Signup({ onLoggedIn }) {
         {config?.auth0 && (
           <>
             <a href={auth0Href} className="btn-primary w-full justify-center text-base py-2.5">
-              Sign up with Auth0
+              <GoogleIcon />
+              Sign up with Google
             </a>
             <p className="text-[11px] text-slate-500 text-center">
               By continuing you agree to the{' '}

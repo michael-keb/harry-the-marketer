@@ -21,7 +21,7 @@ const MIN_INTERVAL_MS = 120_000
 
 export function sheetMailbox(wsId) {
   return db.prepare(
-    "SELECT * FROM mailboxes WHERE user_id = ? AND provider = 'gmail' AND status = 'connected' ORDER BY id LIMIT 1"
+    "SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND provider = 'gmail' AND status = 'connected' ORDER BY id LIMIT 1"
   ).get(wsId)
 }
 

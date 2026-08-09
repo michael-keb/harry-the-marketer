@@ -203,19 +203,24 @@ function Funnel({ legacy }) {
               )
             })}
           </div>
-          <table className="sr-only">
-            <caption>Pipeline stages, all time, with conversion from the previous stage</caption>
-            <thead><tr><th>Stage</th><th>Leads</th><th>Conversion from previous stage</th></tr></thead>
-            <tbody>
-              {stages.map(([label, value], i) => (
-                <tr key={label}>
-                  <td>{label}</td>
-                  <td>{value}</td>
-                  <td>{i === 0 ? 'n/a' : pctText(stages[i - 1][1] > 0 ? (value / stages[i - 1][1]) * 100 : 0, stages[i - 1][1])}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {/* `sr-only` on the wrapper, not the table — a table will not shrink
+              below its min-content width, so on the table itself it stayed
+              full-size and pushed the page sideways. See Reports.jsx. */}
+          <div className="sr-only">
+            <table>
+              <caption>Pipeline stages, all time, with conversion from the previous stage</caption>
+              <thead><tr><th>Stage</th><th>Leads</th><th>Conversion from previous stage</th></tr></thead>
+              <tbody>
+                {stages.map(([label, value], i) => (
+                  <tr key={label}>
+                    <td>{label}</td>
+                    <td>{value}</td>
+                    <td>{i === 0 ? 'n/a' : pctText(stages[i - 1][1] > 0 ? (value / stages[i - 1][1]) * 100 : 0, stages[i - 1][1])}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </>
       )}
     </Panel>

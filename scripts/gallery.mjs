@@ -115,6 +115,48 @@ const FLOWS = [
     ],
   },
   {
+    name: 'inbox-email-trail',
+    title: 'Inbox — the whole email trail beside the list',
+    path: '/app/inbox',
+    categories: ['inbox'],
+    note: 'Three panes: folders, a scannable list, and a reading pane holding every message in the conversation oldest-first. Older messages collapse behind an expander; the newest stays open.',
+    steps: [
+      {
+        label: 'folders-and-list',
+        // Land on Active rather than the approvals queue: the trail is what
+        // this sequence is evidence for, and approvals have their own capture.
+        run: async (page) => {
+          await page.evaluate(() => {
+            const b = [...document.querySelectorAll('nav[aria-label="Mail folders"] button')]
+              .find((x) => /^Active/.test(x.innerText))
+            b?.click()
+          })
+          await page.waitForTimeout(1200)
+        },
+      },
+      {
+        label: 'conversation-open',
+        run: async (page) => {
+          await page.evaluate(() => document.querySelector('[data-row-button]')?.click())
+          await page.waitForTimeout(1200)
+        },
+      },
+      {
+        label: 'trail-expanded',
+        // The expander is the point: a long conversation folds its older
+        // messages away, and this frame is the proof they are still there.
+        run: async (page) => {
+          await page.evaluate(() => {
+            const b = [...document.querySelectorAll('ol[aria-label^="Email trail"] button')]
+              .find((x) => /earlier message/.test(x.innerText))
+            b?.click()
+          })
+          await page.waitForTimeout(1000)
+        },
+      },
+    ],
+  },
+  {
     name: 'client-lens',
     title: 'Client lens — scoping the product to one client',
     path: '/app/leads',

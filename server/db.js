@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS mailboxes (
   id INTEGER PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  provider TEXT NOT NULL CHECK (provider IN ('gmail','sandbox')),
+  provider TEXT NOT NULL CHECK (provider IN ('gmail','outlook','sandbox')),
   email TEXT NOT NULL,
   display_name TEXT DEFAULT '',
   status TEXT NOT NULL DEFAULT 'connected' CHECK (status IN ('connected','error','disconnected')),
@@ -375,6 +375,11 @@ for (const stmt of [
   // One queued email held back to a chosen time: "send at" and "snooze".
   // 0 means it takes its turn in the normal queue.
   'ALTER TABLE drafts ADD COLUMN send_after INTEGER NOT NULL DEFAULT 0',
+  // Billing: plan from Stripe Payment Link checkout webhook.
+  "ALTER TABLE users ADD COLUMN plan_id TEXT DEFAULT ''",
+  "ALTER TABLE users ADD COLUMN billing_status TEXT DEFAULT 'trial'",
+  "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT DEFAULT ''",
+  "ALTER TABLE users ADD COLUMN billing_updated_at TEXT DEFAULT ''",
 ]) {
   try { db.exec(stmt) } catch { /* column already exists */ }
 }

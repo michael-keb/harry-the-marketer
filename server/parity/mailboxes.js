@@ -43,13 +43,15 @@
 //   GET    /api/mailboxes/:id/warmup-stats  dense daily series
 
 import { db } from '../db.js'
-import { googleConfigured } from '../env.js'
+import { googleConfigured, googleOAuthVerified, microsoftConfigured } from '../env.js'
+import { isOAuthProvider } from '../providers.js'
 import { canSendNow, dailyCap, isWarmingUp, sendWindow } from '../pacing.js'
 import {
   HttpError, invalid, notFound, handler,
   str, int, bool, oneOf, email as emailField,
   owned, tx, audit, meter,
 } from './http.js'
+import { REVIVE_MAILBOX_SQL } from './schema.js'
 
 // The documented ceiling on the fleet list. A request above it is refused
 // rather than served, per Docs/README "unbounded requests are rejected".
@@ -117,7 +119,7 @@ function mailboxId(req) {
 
 function loadMailbox(req) {
   const id = mailboxId(req)
-  const row = db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE id = ? AND user_id = ?`)
+  const row = db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL`)
     .get(id, req.wsId)
   if (!row) throw notFound('email account')
   return row
@@ -160,7 +162,7 @@ function shiftDay(day, delta) {
 // lets a row say "cannot read replies" instead of a bare "error".
 function health(m) {
   const connected = m.status === 'connected'
-  const canRead = connected && !(m.provider === 'gmail' && !m.has_refresh_token)
+  const canRead = connected && !(isOAuthProvider(m.provider) && !m.has_refresh_token)
   return {
     isSmtpSuccess: connected,
     isImapSuccess: canRead,
@@ -175,7 +177,7 @@ function health(m) {
 // beats a healthy-looking flag. Exported because "excluded from every send" has
 // to be a thing other code can ask, not a rule written twice.
 export function sendableMailboxes(wsId, now = Date.now()) {
-  const rows = db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE user_id = ? ORDER BY id`).all(wsId)
+  const rows = db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id`).all(wsId)
   return rows.filter((m) => isSendable(m, now))
 }
 
@@ -212,7 +214,7 @@ function sendingStatus(ownerRow, m, now = Date.now()) {
     sentToday: sentToday(m, now),
     remainingToday: Math.max(0, effectiveCap(m, now) - sentToday(m, now)),
     warmingUp: isWarmingUp(m, now),
-    paced: sendWindow(ownerRow).on && m.provider === 'gmail',
+    paced: sendWindow(ownerRow).on && isOAuthProvider(m.provider),
   }
 }
 
@@ -227,20 +229,22 @@ function sentToday(m, now = Date.now()) {
   return m.sent_today_date === today ? m.sent_today : 0
 }
 
-// The ceiling that actually binds. pacing.js's ramp always applies; a warm-up
-// daily count is an *extra*, tighter ceiling a user may set on top of it. That
-// ordering is the whole point: a fragile domain can be slowed down, and no
-// setting on this route can turn a mailbox connected an hour ago into a blast.
+// The ceiling that actually binds — which is `dailyCap` and nothing else.
+//
+// This used to compute its own answer: `min(dailyCap, warmup_daily_count)`. It
+// was the right number and the wrong place, because the engine, the gate stack
+// and the mailer all read `pacing.dailyCap`, which knew nothing about warm-up.
+// So this route reported a cap of 5 while the mailbox went on sending 50 — a
+// setting that changed a screen and not a send. The warm-up count is now folded
+// into `dailyCap` itself, and this stays only so callers here read the same
+// function name they always did.
 export function effectiveCap(m, now = Date.now()) {
-  const pacing = dailyCap(m, now)
-  if (m.provider !== 'gmail') return pacing
-  if (!m.warmup_enabled) return pacing
-  return Math.max(1, Math.min(pacing, m.warmup_daily_count))
+  return dailyCap(m, now)
 }
 
 // Warm-up does not apply to a sandbox mailbox — it exists to be tested in
 // seconds, and zeros pretending to be measurements would be worse than saying so.
-const warmupApplies = (m) => m.provider === 'gmail'
+const warmupApplies = (m) => isOAuthProvider(m.provider)
 
 function warmupStatus(m, now = Date.now()) {
   if (!warmupApplies(m)) return null
@@ -465,6 +469,16 @@ function connectionCheck(m) {
         checks.push({ leg: 'oauth', ok: false, checked: true, detail: 'Access token has expired and cannot be refreshed' })
       }
     }
+  } else if (m.provider === 'outlook') {
+    if (!microsoftConfigured()) {
+      checks.push({
+        leg: 'oauth', ok: false, checked: false,
+        detail: 'Microsoft OAuth is not configured — set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET',
+      })
+    } else {
+      checks.push({ leg: 'oauth', ok: Boolean(m.has_refresh_token), checked: true,
+        detail: m.has_refresh_token ? 'Refresh token present' : 'No refresh token — reconnect required' })
+    }
   } else {
     checks.push({ leg: 'sandbox', ok: true, checked: true, detail: 'Sandbox mailboxes deliver locally' })
   }
@@ -485,7 +499,7 @@ function campaignsHeldBy(wsId, m, now = Date.now()) {
   for (const c of campaigns) {
     const others = db.prepare(
       `SELECT ${SAFE_COLUMNS} FROM mailboxes
-        WHERE user_id = ? AND id != ?
+        WHERE user_id = ? AND deleted_at IS NULL AND id != ?
           AND (id IN (SELECT mailbox_id FROM campaign_mailboxes WHERE campaign_id = ?)
                OR id = (SELECT mailbox_id FROM campaigns WHERE id = ?))`
     ).all(wsId, m.id, c.id, c.id)
@@ -520,7 +534,7 @@ export function register(api) {
     const limit = int(req.query, 'limit', { min: 1, max: MAX_LIMIT, fallback: MAX_LIMIT })
     const offset = int(req.query, 'offset', { min: 0, fallback: 0 })
 
-    const provider = oneOf(req.query, 'provider', ['gmail', 'sandbox'], { fallback: '' })
+    const provider = oneOf(req.query, 'provider', ['gmail', 'outlook', 'sandbox'], { fallback: '' })
     const esp = oneOf(req.query, 'esp', ['GMAIL', 'SANDBOX'], { fallback: '' })
     const warmup = oneOf(req.query, 'warmup', ['ACTIVE', 'INACTIVE', 'PAUSED'], { fallback: '' })
     const q = str(req.query, 'q', { max: 320 }) || str(req.query, 'username', { max: 320 })
@@ -538,8 +552,8 @@ export function register(api) {
 
     const ownerRow = owner(req.wsId)
     let rows = clientId
-      ? db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE user_id = ? AND client_id = ? ORDER BY id`).all(req.wsId, clientId)
-      : db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE user_id = ? ORDER BY id`).all(req.wsId)
+      ? db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND client_id = ? ORDER BY id`).all(req.wsId, clientId)
+      : db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id`).all(req.wsId)
     const counts = campaignCounts(req.wsId)
     const tags = tagsByMailbox(req.wsId)
     // Joined only when asked, so the default response stays small.
@@ -580,6 +594,8 @@ export function register(api) {
       limit,
       hasMore: offset + pageItems.length < total,
       googleConfigured: googleConfigured(),
+      googleOAuthVerified: googleOAuthVerified(),
+      microsoftConfigured: microsoftConfigured(),
       // "Which filter emptied this" is what stops a filtered-empty list looking
       // like a workspace that has never connected anything.
       filters: applied,
@@ -620,11 +636,19 @@ export function register(api) {
     if (type === 'SANDBOX') {
       const name = str(body, 'fromName', { max: 120, fallback: '' }) || str(body, 'from_name', { max: 120, fallback: 'Sandbox Sender' })
       const address = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '.')}@sandbox.local`
-      const existing = db.prepare("SELECT id FROM mailboxes WHERE user_id = ? AND provider = 'sandbox' AND email = ?")
+      const existing = db.prepare("SELECT id, deleted_at FROM mailboxes WHERE user_id = ? AND provider = 'sandbox' AND email = ?")
         .get(req.wsId, address)
+      // Removed, not taken: the row survives the soft delete and holds the
+      // UNIQUE key, so reconnecting the address revives it with a fresh ramp.
+      if (existing?.deleted_at) {
+        tx(() => db.prepare(REVIVE_MAILBOX_SQL).run(name, existing.id))
+        audit(req, { type: 'mailbox_connected', detail: `sandbox:${address} (reconnected after removal)` })
+        const revived = db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE id = ?`).get(existing.id)
+        return { ok: true, data: serialise(owner(req.wsId), revived) }
+      }
       if (existing) throw new HttpError(409, { error: 'conflict', message: 'A sandbox mailbox with that name already exists', id: existing.id })
       const info = tx(() => db.prepare(
-        "INSERT INTO mailboxes (user_id, provider, email, display_name) VALUES (?, 'sandbox', ?, ?)"
+        "INSERT INTO mailboxes (user_id, provider, email, display_name, deleted_at) VALUES (?, 'sandbox', ?, ?, NULL)"
       ).run(req.wsId, address, name))
       audit(req, { type: 'mailbox_connected', detail: `sandbox:${address}` })
       const row = db.prepare(`SELECT ${SAFE_COLUMNS} FROM mailboxes WHERE id = ?`).get(info.lastInsertRowid)
@@ -653,27 +677,70 @@ export function register(api) {
       // Reconnecting an address that already exists updates that row rather than
       // creating a duplicate, which is what the `id` on the source body is for.
       const existing = address
-        ? db.prepare("SELECT id FROM mailboxes WHERE user_id = ? AND provider = 'gmail' AND email = ?").get(req.wsId, address)
+        ? db.prepare("SELECT * FROM mailboxes WHERE user_id = ? AND provider = 'gmail' AND email = ? AND deleted_at IS NULL").get(req.wsId, address)
         : null
+      if (existing?.status === 'connected' && existing.refresh_token) {
+        return {
+          ok: true,
+          configured: true,
+          next: 'already_connected',
+          mailboxId: existing.id,
+          message: `${address} is already connected`,
+        }
+      }
       return {
         ok: true,
         configured: true,
         next: 'consent',
-        consentUrl: '/api/google/connect',
+        consentUrl: address
+          ? `/api/google/connect?email=${encodeURIComponent(address)}`
+          : '/api/google/connect',
         mailboxId: existing?.id || null,
         message: existing
-          ? 'That address is already connected — consenting again replaces its tokens and keeps its warm-up progress'
+          ? 'That address needs reconnecting — Continue to Google to replace its tokens'
           : 'Complete Google consent to finish connecting this mailbox',
       }
     }
 
     if (type === 'OUTLOOK') {
-      res.status(501)
+      rejectCredentials(body)
+      const address = emailField(body, 'fromEmail', { fallback: '' }) || emailField(body, 'from_email', { fallback: '' })
+      if (!microsoftConfigured()) {
+        const missing = []
+        if (!process.env.MICROSOFT_CLIENT_ID) missing.push('MICROSOFT_CLIENT_ID')
+        if (!process.env.MICROSOFT_CLIENT_SECRET) missing.push('MICROSOFT_CLIENT_SECRET')
+        res.status(503)
+        return {
+          ok: false,
+          configured: false,
+          errorCode: 'MICROSOFT_NOT_CONFIGURED',
+          missing,
+          message: `Connecting Outlook needs Microsoft OAuth configured on this server — missing ${missing.join(' and ')}.`,
+        }
+      }
+      const existing = address
+        ? db.prepare("SELECT * FROM mailboxes WHERE user_id = ? AND provider = 'outlook' AND email = ? AND deleted_at IS NULL").get(req.wsId, address)
+        : null
+      if (existing?.status === 'connected' && existing.refresh_token) {
+        return {
+          ok: true,
+          configured: true,
+          next: 'already_connected',
+          mailboxId: existing.id,
+          message: `${address} is already connected`,
+        }
+      }
       return {
-        ok: false,
-        supported: false,
-        errorCode: 'PROVIDER_UNAVAILABLE',
-        message: 'Outlook is not a provider this build can send from — the mailboxes table accepts gmail and sandbox only',
+        ok: true,
+        configured: true,
+        next: 'consent',
+        consentUrl: address
+          ? `/api/microsoft/connect?email=${encodeURIComponent(address)}`
+          : '/api/microsoft/connect',
+        mailboxId: existing?.id || null,
+        message: existing
+          ? 'That address needs reconnecting — Continue to Microsoft to replace its tokens'
+          : 'Complete Microsoft consent to finish connecting this mailbox',
       }
     }
 

@@ -48,8 +48,12 @@ function readFilters() {
 }
 
 function writeFilters(f) {
-  const p = new URLSearchParams()
+  // Keep Connections area= (and any other non-filter params) so switching
+  // fleet filters does not kick the page back off Email.
+  const p = new URLSearchParams(window.location.search)
+  for (const key of Object.keys(EMPTY)) p.delete(key)
   for (const [k, v] of Object.entries(f)) if (v) p.set(k, v)
+  if (!p.get('area')) p.set('area', 'email')
   const search = p.toString()
   window.history.replaceState({}, '', `${window.location.pathname}${search ? `?${search}` : ''}`)
 }

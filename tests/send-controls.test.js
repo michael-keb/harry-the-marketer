@@ -24,6 +24,12 @@ db.prepare("INSERT INTO leads (user_id, email) VALUES (?, 'ana@acme.com')").run(
 const api = await mount(registerSendControls, db.prepare('SELECT * FROM users WHERE id = ?').get(user.id))
 test.after(() => api.close())
 
+test.beforeEach(() => {
+  db.prepare('DELETE FROM send_rules').run()
+  db.prepare('DELETE FROM send_holds').run()
+  db.prepare("UPDATE campaigns SET schedule = '{}' WHERE id = 1").run()
+})
+
 test('the workspace rules come back with what is set, what is in force, and the floor', async () => {
   const { status, body } = await api.get('/api/send-rules?scope=workspace')
   assert.equal(status, 200)

@@ -392,7 +392,7 @@ function MailboxStats({ id, dateParams }) {
                   {rows.map((m) => (
                     <tr key={m.mailbox_id} className="border-b border-slate-200 last:border-0">
                       <th scope="row" className="px-3 py-2.5 text-left font-normal">
-                        <Link to="/app/mailboxes" className="text-ink-900 hover:text-accent-700">{m.email}</Link>
+                        <Link to="/app/connections?area=email" className="text-ink-900 hover:text-accent-700">{m.email}</Link>
                         <span className="ml-2 text-xs text-slate-500">{m.provider}</span>
                       </th>
                       <td className="px-3 py-2.5"><Badge value={m.status} /></td>

@@ -29,6 +29,8 @@ Everything a Harry user does to the mailboxes that actually send: connecting the
 - [ ] Given warm-up settings change, when the sending rhythm next runs, then the change takes effect at the next tick without a restart, and today's already-sent count is respected rather than reset.
 - [ ] Given an id from another workspace, when I save, then the response is 404 and nothing changes.
 
+**Divergence — the first-fortnight floor is not switchable.** In Harry these settings can only ever *tighten* the ceiling `server/pacing.js` already enforces; nothing posted here can lift it. So `is_rampup_enabled: false` means "do not climb past the count you chose", not "start at that count on day one": a mailbox connected today is still held to 10, and the figure is flat at `total_warmup_per_day` from day one onwards. TC-7 below reads on days one to three, not on the connection day. Letting a warm-up setting hand an hour-old mailbox its full allowance is the one thing a warm-up ramp exists to prevent.
+
 ## 3. Test cases
 
 | # | Scenario | Steps | Expected result |

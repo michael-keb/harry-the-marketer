@@ -21,6 +21,7 @@ import { register as registerProspects } from './prospects.js'
 import { register as registerSenders } from './senders.js'
 import { register as registerUtilities } from './utilities.js'
 import { register as registerGaps } from './gaps.js'
+import { register as registerChannels } from './channels.js'
 import { providerStatus } from './providers.js'
 
 export function registerParity(api) {
@@ -38,6 +39,7 @@ export function registerParity(api) {
   registerDeliverability(api)
   registerProspects(api)
   registerSenders(api)
+  registerChannels(api)
   registerMailboxes(api)
   registerLeads(api)
   registerCampaigns(api)

@@ -25,7 +25,7 @@
 //     JavaScript samples (Docs/README.md, "Read this before scoping anything").
 //     Correcting any of them is a one-line change to that table and nothing else.
 
-import { db } from '../db.js'
+import { db, logEvent } from '../db.js'
 import {
   HttpError, handler, invalid, notFound,
   str, int, bool, oneOf, idList, page, paged, email as emailField,
@@ -560,6 +560,41 @@ function blacklistSummary(testId, kind = 'ip') {
 }
 
 // ---------------------------------------------------------------------------
+// incidents
+// ---------------------------------------------------------------------------
+
+// Six specs in this category end on the same line: "an incident is written to
+// the Monitoring incident feed". Nothing here was writing one. The feed
+// (server/routes.js) is built from `events` rows of type `needs_attention`
+// together with failed telemetry, so an incident is one such row — and the
+// definitions of done are explicit that it is written on the *transition* into
+// trouble, "exactly one incident, not one per poll".
+//
+// There is no column to remember "already reported", and adding one would be a
+// second source of truth for a fact the stored rows already carry. So the
+// previous state is read immediately before it is replaced, and only a problem
+// that was not in it raises a row. A listing that clears and returns is a new
+// incident, which is correct: it is news again.
+const INCIDENT_TYPE = 'needs_attention'
+
+function raiseIncidents(wsId, test, problems, before) {
+  if (!wsId || !problems.length) return 0
+  const seen = new Set(before)
+  let raised = 0
+  for (const problem of problems) {
+    if (seen.has(problem.key)) continue
+    seen.add(problem.key)
+    logEvent(wsId, {
+      type: INCIDENT_TYPE,
+      detail: `${test.name} (#${test.id}): ${problem.detail}`,
+    })
+    raised += 1
+  }
+  if (raised) meter('deliverability.incidents', 0, true, `${raised} raised for test ${test.id}`)
+  return raised
+}
+
+// ---------------------------------------------------------------------------
 // shaping
 // ---------------------------------------------------------------------------
 
@@ -746,8 +781,139 @@ function classifyReason(reason) {
 }
 
 // ---------------------------------------------------------------------------
+// authentication reports — DKIM, SPF and rDNS through one shape
+// ---------------------------------------------------------------------------
+//
+// The documented response is one group per `from_email`, each carrying a
+// `seed_accounts` array whose entries hold `id`, `email`, `esp` and a per-check
+// boolean named after the check (`dkim_verified`, `spf_verified`,
+// `rdns_verified`). That payload used to be stored and served exactly as it
+// arrived, which left every consumer to re-derive the verdict from three
+// different key names — and the report panel, which looks for a `seeds` array
+// carrying a readable status, found neither and drew a group with nothing in
+// it. So the shape is settled once, here.
+//
+// A value that is neither true nor false stays `null`. An unreadable check is
+// not a pass, and the specs are explicit that one failing seed must be named
+// rather than averaged into a rate.
+const CHECK_LABEL = { dkim: 'DKIM', spf: 'SPF', rdns: 'Reverse DNS' }
+
+const VERIFIED_KEYS = {
+  dkim: ['dkim_verified', 'dkimVerified'],
+  spf: ['spf_verified', 'spfVerified'],
+  rdns: ['rdns_verified', 'rdnsVerified', 'reverse_dns_verified', 'reverseDnsVerified'],
+}
+
+function seedVerdict(check, seed) {
+  for (const key of [...(VERIFIED_KEYS[check] || []), 'verified', 'passed', 'valid']) {
+    const raw = seed?.[key]
+    if (typeof raw === 'boolean') return raw
+    if (raw === 1 || raw === 0) return Boolean(raw)
+  }
+  const text = String(seed?.status ?? seed?.result ?? '').trim().toLowerCase()
+  if (!text) return null
+  if (/^(pass|passed|valid|ok|true|verified|aligned)\b/.test(text)) return true
+  if (/^(fail|failed|invalid|false|missing|none|softfail|permerror|error)\b/.test(text)) return false
+  return null
+}
+
+function shapeAuthGroups(check, groups) {
+  return asArray(groups).map((group) => {
+    const fromEmail = String(group?.fromEmail ?? group?.from_email ?? '').trim().toLowerCase() || null
+    const seeds = asArray(group?.seed_accounts ?? group?.seedAccounts ?? group?.seeds).map((seed) => {
+      const verified = seedVerdict(check, seed)
+      return {
+        id: seed?.id ?? null,
+        email: seed?.email ?? null,
+        esp: seed?.esp ?? null,
+        verified,
+        // The same fact in the two forms the report table already reads, so
+        // nothing downstream re-derives a verdict this function has settled.
+        status: verified === null ? null : (verified ? 'pass' : 'fail'),
+        passed: verified,
+      }
+    })
+    const failing = seeds.filter((s) => s.verified === false)
+    const passing = seeds.filter((s) => s.verified === true)
+    return {
+      fromEmail,
+      seeds,
+      failing: failing.map((s) => ({ email: s.email, esp: s.esp })),
+      esps: [...new Set(seeds.map((s) => s.esp).filter(Boolean).map(String))],
+      passingCount: passing.length,
+      failingCount: failing.length,
+      unknownCount: seeds.length - passing.length - failing.length,
+      // Each sending address is graded on its own, because one address can
+      // pass while another on the same test fails.
+      verdict: failing.length ? 'failing' : passing.length ? 'passing' : 'unknown',
+    }
+  })
+}
+
+// One key per (check, sending address, observing provider), so a failure that
+// is still there on the next fetch does not raise a second incident.
+function authFailures(check, shaped) {
+  const out = []
+  for (const group of shaped) {
+    for (const seed of group.failing) {
+      const esp = seed.esp || seed.email || ''
+      out.push({
+        key: `${check}|${group.fromEmail || ''}|${esp}`,
+        detail: `${CHECK_LABEL[check] || check} failed for ${group.fromEmail || 'an unnamed sending address'}` +
+          ` at ${esp || 'an unnamed provider'}`,
+      })
+    }
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // create — one validated input schema shared by both create routes
 // ---------------------------------------------------------------------------
+
+// A test that names a sequence step seeds that step's own copy — the runner
+// composes it (server/deliverability-runs.js, composeSeed), because a placement
+// test run on content the campaign will never send proves nothing about the
+// campaign.
+//
+// The step id used to be stored without ever being looked at. A typo was
+// accepted, the seed silently fell back to a generic body, and the detail view
+// then reported the step as "no longer in the playbook" — which was untrue: it
+// never was in it. The spec for both create routes asks for a 404 when the
+// sequence step is not mine, so the check happens before anything is written.
+// What the first run will actually be able to do, said before the user walks
+// away. Names whichever end is missing rather than reporting a count.
+function nextRunNote(input, scheduleStartTime) {
+  const seeds = input.seedEmails.length
+  const mailboxes = input.mailboxIds.length
+  if (seeds && mailboxes) {
+    return `The first run opens at ${scheduleStartTime} and sends ${seeds * mailboxes} seed(s).`
+  }
+  if (!seeds && !mailboxes) {
+    return 'No sending mailbox and no seed inboxes were given, so each run will open with nothing to send. Set `mailboxIds` and `seedEmails`.'
+  }
+  if (!mailboxes) {
+    return 'No sending mailbox was given, so each run will open with nothing to send even though seed inboxes are set — a seed is sent from a mailbox. Set `mailboxIds`.'
+  }
+  return 'No seed inboxes were given, so each run will open with nothing to send until `seedEmails` is set or a deliverability provider supplies a seed pool.'
+}
+
+function assertSendStep(campaign, stepId) {
+  let node = null
+  try {
+    node = parsePlaybook(campaign?.mermaid || '').nodes[stepId] || null
+  } catch {
+    node = null
+  }
+  if (!node) throw notFound('sequence step')
+  if (node.type !== 'send') {
+    throw invalid(
+      'sequenceStepId',
+      `"${stepId}" is a ${node.type} step in that playbook, not a Send: step — a placement test seeds the email a Send: step produces`
+    )
+  }
+  return node
+}
 
 function readTestInput(req, { automated }) {
   const body = req.body || {}
@@ -763,12 +929,13 @@ function readTestInput(req, { automated }) {
   const campaignId = body.campaignId === undefined || body.campaignId === null || body.campaignId === ''
     ? 0
     : int(body, 'campaignId', { min: 1 })
-  if (campaignId) owned('campaigns', campaignId, req.wsId, 'campaign')
+  const campaign = campaignId ? owned('campaigns', campaignId, req.wsId, 'campaign') : null
 
   const sequenceStepId = str(body, 'sequenceStepId', { max: 120 })
   if (sequenceStepId && !campaignId) {
     throw invalid('campaignId', 'campaignId is required when a sequenceStepId is given')
   }
+  if (sequenceStepId) assertSendStep(campaign, sequenceStepId)
 
   const mailboxIds = idList(body, 'mailboxIds', { max: MAILBOX_IDS_MAX })
   for (const id of mailboxIds) owned('mailboxes', id, req.wsId, 'mailbox')
@@ -1130,10 +1297,13 @@ export function register(api) {
       // A schedule creates no rows until its first run comes due, so there is
       // nothing to count yet — but whether that run will be able to send
       // anything is knowable now, and worth saying before the user walks away.
-      awaitingSeeds: input.seedEmails.length === 0,
-      nextRunNote: input.seedEmails.length
-        ? `The first run opens at ${scheduleStartTime} and sends ${input.seedEmails.length * (input.mailboxIds.length || 1)} seed(s).`
-        : 'No seed inboxes were given, so each run will open with nothing to send until `seedEmails` is set or a deliverability provider supplies a seed pool.',
+      //
+      // It takes BOTH ends: the runner writes one row per (mailbox × seed
+      // inbox), so a schedule with seed inboxes and no mailbox sends nothing at
+      // all. Counting `mailboxIds.length || 1` promised sends that no run could
+      // ever make — the same untruth `seedsQueued` was corrected for.
+      awaitingSeeds: input.seedEmails.length === 0 || input.mailboxIds.length === 0,
+      nextRunNote: nextRunNote(input, scheduleStartTime),
       duplicateOf: duplicate ? { id: duplicate.id, name: duplicate.name } : null,
     }
   }))
@@ -1324,6 +1494,19 @@ export function register(api) {
   api.put('/deliverability/tests/:testId/stop', handler((req) => {
     const test = ownedTest(req)
 
+    // Stopping is a schedule operation, and a one-off manual test has no
+    // schedule to stop. Accepting it anyway wrote `status = 'stopped'` onto a
+    // test that was never running on a timer — a state the product then had to
+    // explain, describing a recurrence that never existed. The spec asks for
+    // this to be unavailable rather than to fail after the fact, so it is
+    // refused here and the UI hides the control for manual tests.
+    if (test.type !== 'automated') {
+      throw new HttpError(409, {
+        error: 'not_automated',
+        message: 'Only a recurring automated test can be stopped — a one-off test has no schedule. Delete it instead if you want it gone.',
+      })
+    }
+
     const before = {
       runs: db.prepare('SELECT COUNT(*) n FROM deliverability_test_runs WHERE test_id = ?').get(test.id).n,
       reports: db.prepare('SELECT COUNT(*) n FROM deliverability_reports WHERE test_id = ?').get(test.id).n,
@@ -1344,9 +1527,15 @@ export function register(api) {
       }
     }
 
+    // Only the status moves. Blanking `schedule_start_time` as well used to
+    // look like belt and braces, but it is what the runner does NOT read —
+    // openDueRuns selects on `status = 'active'` — so it stopped nothing and
+    // erased when the schedule had run from. The spec asks for a stopped test
+    // to stay readable and to show in the list as stopped, and a row that has
+    // forgotten its own cadence start cannot do that.
     const row = tx(() => {
       db.prepare(
-        "UPDATE deliverability_tests SET status = 'stopped', schedule_start_time = '', updated_at = datetime('now') WHERE id = ? AND workspace_id = ?"
+        "UPDATE deliverability_tests SET status = 'stopped', updated_at = datetime('now') WHERE id = ? AND workspace_id = ?"
       ).run(test.id, req.wsId)
       return db.prepare('SELECT * FROM deliverability_tests WHERE id = ?').get(test.id)
     })
@@ -1387,9 +1576,12 @@ export function register(api) {
     const byKind = new Map(rows.map((r) => [r.kind, r]))
     const checks = ['dkim', 'spf', 'rdns'].map((check) => {
       const row = byKind.get(check) || null
+      const groups = shapeAuthGroups(check, payloadOf(row, { groups: [] }).groups)
       return {
         check,
-        groups: payloadOf(row, { groups: [] }).groups || [],
+        groups,
+        // Named per check so a failure is never diluted across the three.
+        failingAddresses: groups.filter((g) => g.verdict === 'failing').map((g) => g.fromEmail),
         fetchedAt: row ? row.fetched_at : null,
         stale: isStale(row),
         available: Boolean(row),
@@ -1397,9 +1589,13 @@ export function register(api) {
     })
 
     reconcile(`auth:${test.id}`, async () => {
-      for (const [key, kind] of [['dkimDetails', KIND.dkim], ['spfDetails', KIND.spf], ['rdnsReport', KIND.rdns]]) {
+      for (const [key, check, kind] of [
+        ['dkimDetails', 'dkim', KIND.dkim],
+        ['spfDetails', 'spf', KIND.spf],
+        ['rdnsReport', 'rdns', KIND.rdns],
+      ]) {
         const payload = await upstream(key, { providerTestId: test.provider_test_id || String(test.id) })
-        storeReport(test.id, runNo, kind, '', { groups: Array.isArray(payload) ? payload : (payload?.data ?? []) })
+        storeAuthReport(req.wsId, test, runNo, check, kind, payload)
       }
     })
 
@@ -1426,10 +1622,15 @@ export function register(api) {
       const row = cachedReport(test.id, runNo, kind)
       reconcile(`${kind}:${test.id}`, async () => {
         const payload = await upstream(contract, { providerTestId: test.provider_test_id || String(test.id) })
-        storeReport(test.id, runNo, kind, '', { groups: Array.isArray(payload) ? payload : (payload?.data ?? []) })
+        storeAuthReport(req.wsId, test, runNo, route, kind, payload)
       })
       // Grouping by from_email is preserved end to end — nothing is flattened.
-      return reportEnvelope(test, row, { check: route, groups: payloadOf(row, { groups: [] }).groups || [] })
+      const groups = shapeAuthGroups(route, payloadOf(row, { groups: [] }).groups)
+      return reportEnvelope(test, row, {
+        check: route,
+        groups,
+        failingAddresses: groups.filter((g) => g.verdict === 'failing').map((g) => g.fromEmail),
+      })
     }))
   }
 
@@ -1442,7 +1643,7 @@ export function register(api) {
 
     reconcile(`blacklist:${test.id}`, async () => {
       const payload = await upstream('blacklist', { providerTestId: test.provider_test_id || String(test.id) })
-      storeBlacklist(test.id, 'ip', payload)
+      storeBlacklist(req.wsId, test, 'ip', payload)
     })
 
     if (bool(req.query, 'summary', false)) {
@@ -1490,7 +1691,7 @@ export function register(api) {
 
     reconcile(`domain-blacklist:${test.id}`, async () => {
       const payload = await upstream('domainBlacklist', { providerTestId: test.provider_test_id || String(test.id) })
-      storeBlacklist(test.id, 'domain', payload)
+      storeBlacklist(req.wsId, test, 'domain', payload)
     })
 
     const byDomain = new Map()
@@ -1561,7 +1762,7 @@ export function register(api) {
 
     // Matching an address to a connected mailbox is allowed to fail: an
     // unmatched address still renders, it just does not flag a mailbox.
-    const find = db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND lower(email) = ?')
+    const find = db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND lower(email) = ?')
     const items = entries.map((entry) => {
       const fromEmail = String(entry.fromEmail ?? entry.from_email ?? '').toLowerCase()
       const match = fromEmail ? find.get(req.wsId, fromEmail) : null
@@ -1782,9 +1983,15 @@ export function register(api) {
       storeSenders(req.wsId, test.id, runNoOf(test), payload)
     })
 
-    // The match was made once at fetch time and stored, so a later
-    // disconnection does not rewrite history.
-    const connected = new Set(db.prepare('SELECT id FROM mailboxes WHERE user_id = ?').all(req.wsId).map((r) => r.id))
+    // What actually survives a disconnection is the ADDRESS, not the link:
+    // `deliverability_test_senders.mailbox_id` is `ON DELETE SET NULL`, so
+    // removing a mailbox (DELETE /api/mailboxes/:id hard-deletes the row) nulls
+    // it here. `sender_email` was copied onto the row at create time and stays,
+    // which is what lets the list still name the address the test sent from and
+    // label it as no longer connected — the state the spec asks to be shown
+    // rather than omitted. The set below is therefore only ever "is this id
+    // still a live mailbox", and is not a memory of a match that has gone.
+    const connected = new Set(db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL').all(req.wsId).map((r) => r.id))
     const unmatched = rows.filter((r) => !r.mailbox_id).length
     if (rows.length) meter('deliverability.senders.unmatched', 0, true, `${unmatched}/${rows.length}`)
 
@@ -1819,7 +2026,17 @@ export function register(api) {
   }))
 
   // GET /api/deliverability/tests/:testId/senders/report — sender-report.
-  // Keyed on the address, so deleting a test never erases a mailbox's record.
+  //
+  // The RESPONSE is keyed on the address, and an address with no connected
+  // mailbox still gets a row. The STORAGE is not: the payload lives in
+  // `deliverability_reports` keyed (test_id, run_no, kind), so deleting the test
+  // deletes the reputation history with it — POST /tests/delete removes every
+  // report row for the test, as tests/parity-deliverability.test.js asserts.
+  // The spec's definition of done ("records are keyed on the address, and
+  // deleting a test leaves them intact") therefore is NOT met, and cannot be
+  // without a table of its own keyed on the address. Said here rather than
+  // implied to be handled, because a comment claiming the record survives is
+  // exactly how nobody notices that it does not.
   api.get('/deliverability/tests/:testId/senders/report', handler((req) => {
     const test = ownedTest(req)
     const runNo = runNoOf(test)
@@ -1831,7 +2048,7 @@ export function register(api) {
       storeReport(test.id, runNo, KIND.senderReport, '', payload)
     })
 
-    const find = db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND lower(email) = ?')
+    const find = db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND lower(email) = ?')
     const items = entries.map((entry) => {
       const fromEmail = String(entry.fromEmail ?? entry.from_email ?? '').toLowerCase()
       const details = entry.details ?? {}
@@ -1957,29 +2174,102 @@ function storeReport(testId, runNo, kind, ref, payload) {
   ).run(testId, runNo, kind, ref, JSON.stringify(payload ?? null))
 }
 
+// Flatten either published shape into (value, provider, listed) rows.
+//
+// The IP check publishes a flat array, one row per seed delivery. The domain
+// check publishes one group per `from_email` carrying a `seed_accounts` array,
+// and the observing provider is the seed's `esp` — a shape the flat reader
+// below silently produced nothing from, so a blocklisted domain stored as zero
+// rows and read back as "pending". Both are accepted; neither is guessed at.
+export function normaliseBlacklistRows(kind, payload) {
+  const entries = asArray(Array.isArray(payload) ? payload : payload?.data)
+  const out = []
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue
+    const seeds = asArray(entry.seed_accounts ?? entry.seedAccounts)
+    if (seeds.length) {
+      const value = String(
+        kind === 'ip'
+          ? (entry.ip ?? '')
+          : (entry.domain ?? deriveDomain(entry.from_email ?? entry.fromEmail))
+      ).trim()
+      for (const seed of seeds) {
+        out.push({
+          value,
+          provider: String(seed?.esp ?? seed?.provider ?? '').trim(),
+          listed: kind === 'ip'
+            ? (Number(seed?.total_blacklist ?? seed?.totalBlacklist ?? 0) > 0 ? 1 : 0)
+            : ((seed?.domain_blacklisted ?? seed?.domainBlacklisted ?? seed?.blacklisted) ? 1 : 0),
+        })
+      }
+      continue
+    }
+    out.push({
+      value: String(kind === 'ip' ? (entry.ip ?? '') : (entry.domain ?? deriveDomain(entry.from_email ?? entry.fromEmail))).trim(),
+      provider: String(entry.blacklist_type_value ?? entry.blacklistTypeValue ?? entry.provider ?? entry.esp ?? '').trim(),
+      listed: kind === 'ip'
+        ? (Number(entry.total_blacklist ?? entry.totalBlacklist ?? 0) > 0 ? 1 : 0)
+        : ((entry.domain_blacklisted ?? entry.domainBlacklisted ?? entry.blacklisted) ? 1 : 0),
+    })
+  }
+  return out
+}
+
 // Blocklist rows are replaced wholesale per kind inside one transaction, and
 // deduped on (test, kind, value, provider) so a repeat fetch cannot double a
 // count that the list and the detail both read.
-function storeBlacklist(testId, kind, payload) {
-  const rows = asArray(Array.isArray(payload) ? payload : payload?.data)
-  tx(() => {
-    db.prepare('DELETE FROM deliverability_blacklist WHERE test_id = ? AND kind = ?').run(testId, kind)
+//
+// The listings that were already stored are read before they are replaced, so
+// only a listing that is new raises an incident. Polling a listing that has not
+// moved writes nothing, which is what "exactly one incident, not one per poll"
+// asks for.
+export function storeBlacklist(wsId, test, kind, payload) {
+  const rows = normaliseBlacklistRows(kind, payload)
+  const noun = kind === 'ip' ? 'IP' : 'Sending domain'
+
+  const before = db.prepare(
+    'SELECT value, provider FROM deliverability_blacklist WHERE test_id = ? AND kind = ? AND listed = 1'
+  ).all(test.id, kind).map((r) => `${kind}|${r.value}|${r.provider}`)
+
+  const listed = tx(() => {
+    db.prepare('DELETE FROM deliverability_blacklist WHERE test_id = ? AND kind = ?').run(test.id, kind)
     const seen = new Set()
+    const found = []
     const ins = db.prepare(
       "INSERT INTO deliverability_blacklist (test_id, kind, value, provider, listed, checked_at) VALUES (?, ?, ?, ?, ?, datetime('now'))"
     )
     for (const row of rows) {
-      const value = String(kind === 'ip' ? (row.ip ?? '') : (row.domain ?? deriveDomain(row.from_email ?? row.fromEmail))).trim()
-      const provider = String(row.blacklist_type_value ?? row.blacklistTypeValue ?? row.provider ?? '').trim()
-      const key = `${value}|${provider}`
+      const key = `${row.value}|${row.provider}`
       if (seen.has(key)) continue
       seen.add(key)
-      const listed = kind === 'ip'
-        ? (Number(row.total_blacklist ?? row.totalBlacklist ?? 0) > 0 ? 1 : 0)
-        : (row.blacklisted ? 1 : 0)
-      ins.run(testId, kind, value, provider, listed)
+      ins.run(test.id, kind, row.value, row.provider, row.listed)
+      if (row.listed) {
+        found.push({
+          key: `${kind}|${row.value}|${row.provider}`,
+          detail: `${noun} ${row.value || '(unknown)'} is listed on ${row.provider || 'an unnamed blocklist'}`,
+        })
+      }
     }
+    return found
   })
+
+  return raiseIncidents(wsId, test, listed, before)
+}
+
+// Stores an authentication report and raises an incident for each failure that
+// was not already there. Reads the previous payload before overwriting it, for
+// the same reason the blocklist store does.
+export function storeAuthReport(wsId, test, runNo, check, kind, payload) {
+  const before = authFailures(check, shapeAuthGroups(
+    check, payloadOf(cachedReport(test.id, runNo, kind), { groups: [] }).groups
+  )).map((f) => f.key)
+
+  const groups = asArray(Array.isArray(payload) ? payload : payload?.data)
+  storeReport(test.id, runNo, kind, '', { groups })
+
+  const shaped = shapeAuthGroups(check, groups)
+  raiseIncidents(wsId, test, authFailures(check, shaped), before)
+  return shaped
 }
 
 // The domain is derived server-side, once, so the rollup is not recomputed in
@@ -1989,7 +2279,10 @@ function deriveDomain(fromEmail) {
   return value.includes('@') ? value.split('@')[1] : ''
 }
 
-function storeRuns(testId, payload) {
+// Exported for the same reason `storeBlacklist` and `storeAuthReport` are: what
+// a fetched page of run history does to Harry's rows is a question about those
+// rows, answerable without a provider.
+export function storeRuns(testId, payload) {
   const rows = asArray(Array.isArray(payload) ? payload : payload?.data)
   tx(() => {
     // Keyed on (test_id, run_no) so a re-fetch updates rather than duplicates.
@@ -2017,7 +2310,7 @@ function storeRuns(testId, payload) {
 function storeSenders(wsId, testId, runNo, payload) {
   const rows = asArray(Array.isArray(payload) ? payload : payload?.data)
   tx(() => {
-    const find = db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND lower(email) = ?')
+    const find = db.prepare('SELECT id FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL AND lower(email) = ?')
     const existing = db.prepare('SELECT seed_id FROM deliverability_test_senders WHERE test_id = ? AND run_no = ?').all(testId, runNo)
     const known = new Set(existing.map((r) => r.seed_id).filter(Boolean))
     const ins = db.prepare(

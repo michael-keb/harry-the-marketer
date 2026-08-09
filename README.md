@@ -176,7 +176,8 @@ the `/api/public/plans` endpoint, and the JSON-LD offers all move together.
 
 > The published prices are a **starting proposal** benchmarked against the category's
 > self-serve tier (Smartlead $39, Instantly $47, Apollo Basic $49). Nothing else in the
-> codebase hardcodes them, and no billing is wired up yet — the plans are presentational.
+> codebase hardcodes them. Billing uses Stripe Payment Links when `STRIPE_*` env vars
+> are set — see [PROVISIONING-RUNBOOK.md](./PROVISIONING-RUNBOOK.md) and [GO-LIVE-CHECKLIST.md](./GO-LIVE-CHECKLIST.md).
 
 **SEO.** Crawlers and social scrapers do not run JavaScript, so per-route `<title>`,
 description, canonical, Open Graph, Twitter card, and JSON-LD are injected into the HTML

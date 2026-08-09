@@ -30,6 +30,12 @@ export const env = {
 
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '',
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '',
+  // Set to 1 after Google approves OAuth verification (Publishing status = In production).
+  // Until then the Connections page explains Testing-mode test users.
+  GOOGLE_OAUTH_VERIFIED: process.env.GOOGLE_OAUTH_VERIFIED === '1' || process.env.GOOGLE_OAUTH_VERIFIED === 'true',
+
+  MICROSOFT_CLIENT_ID: process.env.MICROSOFT_CLIENT_ID || '',
+  MICROSOFT_CLIENT_SECRET: process.env.MICROSOFT_CLIENT_SECRET || '',
 
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || 'claude-opus-5',
@@ -54,6 +60,28 @@ export const env = {
   SITE_NOINDEX: process.env.SITE_NOINDEX === '1' || process.env.SITE_NOINDEX === 'true',
   // Trust X-Forwarded-* headers (set when running behind a reverse proxy / PaaS).
   TRUST_PROXY: process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true',
+
+  // Persistent SQLite directory (Render disk mount in production).
+  DATA_DIR: process.env.DATA_DIR || '',
+
+  // Stripe Payment Links — hosted checkout; no card data touches this app.
+  STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || '',
+  STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || '',
+  STRIPE_PAYMENT_LINK_STARTER: process.env.STRIPE_PAYMENT_LINK_STARTER || '',
+  STRIPE_PAYMENT_LINK_GROWTH: process.env.STRIPE_PAYMENT_LINK_GROWTH || '',
+  STRIPE_PAYMENT_LINK_SCALE: process.env.STRIPE_PAYMENT_LINK_SCALE || '',
+
+  // Fail fast on unsafe production config (default: warn only).
+  PRODUCTION_STRICT: process.env.PRODUCTION_STRICT === '1' || process.env.PRODUCTION_STRICT === 'true',
+
+  // Twilio — when these are set, every workspace can send SMS without connecting
+  // an account in Settings. TWILIO_PHONE_NUMBER is an alias for TWILIO_FROM_NUMBER.
+  TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID || '',
+  TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
+  TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_PHONE_NUMBER || '',
+  TWILIO_MESSAGING_SERVICE_SID: process.env.TWILIO_MESSAGING_SERVICE_SID || '',
+  // Dev only: skip Twilio request signature checks (never in production).
+  TWILIO_SKIP_SIGNATURE: process.env.TWILIO_SKIP_SIGNATURE || '',
 }
 
 export const isProduction = () => env.NODE_ENV === 'production'
@@ -63,6 +91,14 @@ export const auth0Configured = () =>
 
 export const googleConfigured = () =>
   Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET)
+
+export const googleOAuthVerified = () => Boolean(env.GOOGLE_OAUTH_VERIFIED)
+
+export const microsoftConfigured = () =>
+  Boolean(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET)
+
+export const twilioEnvConfigured = () =>
+  Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID))
 
 export const devLoginEnabled = () =>
   env.DEV_LOGIN !== undefined ? env.DEV_LOGIN === '1' || env.DEV_LOGIN === 'true' : !auth0Configured()

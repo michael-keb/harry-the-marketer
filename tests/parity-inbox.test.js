@@ -36,8 +36,18 @@ const PLAYBOOK = `flowchart TD
 const mailbox = seedMailbox(db, owner.id, 'sender@example.com')
 const campaign = seedCampaign(db, owner.id, 'Q3 outbound', mailbox.id)
 db.prepare('UPDATE campaigns SET mermaid = ? WHERE id = ?').run(PLAYBOOK, campaign.id)
+// The subsequence gets a real playbook of its own. Pushing a lead into a
+// campaign whose diagram does not parse is refused now — it cannot compose
+// anything, so the lead would be moved out of a working campaign and stranded
+// in a broken one. An empty `mermaid` here made this fixture describe a
+// campaign nobody would be allowed to push into.
+const SUB_PLAYBOOK = `flowchart TD
+  S([Start]) --> N[Send: the nurture follow-up]
+  N -- reply --> W([Won])
+`
 const sub = seedCampaign(db, owner.id, 'Q3 nurture', mailbox.id)
-db.prepare('UPDATE campaigns SET parent_campaign_id = ? WHERE id = ?').run(campaign.id, sub.id)
+db.prepare('UPDATE campaigns SET parent_campaign_id = ?, mermaid = ? WHERE id = ?')
+  .run(campaign.id, SUB_PLAYBOOK, sub.id)
 
 // Six threads, each one outbound plus one inbound reply, so every list has
 // something real to return rather than an artificial single-message thread.
@@ -437,8 +447,8 @@ test('a view whose campaign has gone is reported broken, never silently unfilter
   assert.deepEqual(doomed.broken, [`campaignId:${sub.id}`])
   await client.del(`/api/inbox/views/${created.body.id}`)
   // Put the subsequence back for the push test below.
-  db.prepare("INSERT INTO campaigns (id, user_id, name, status, mailbox_id, mermaid, parent_campaign_id) VALUES (?, ?, 'Q3 nurture', 'draft', ?, '', ?)")
-    .run(sub.id, owner.id, mailbox.id, campaign.id)
+  db.prepare("INSERT INTO campaigns (id, user_id, name, status, mailbox_id, mermaid, parent_campaign_id) VALUES (?, ?, 'Q3 nurture', 'draft', ?, ?, ?)")
+    .run(sub.id, owner.id, mailbox.id, SUB_PLAYBOOK, campaign.id)
 })
 
 // ---- untracked replies ------------------------------------------------------
@@ -647,6 +657,29 @@ test('a subsequence that is not a child of the source campaign is a 422', async 
   const res = await client.post(`/api/inbox/threads/${threads[4].anchorId}/push-to-subsequence`, { subsequenceId: orphan.id })
   assert.equal(res.status, 422)
   assert.equal(res.body.field, 'subsequenceId')
+})
+
+test('a subsequence whose playbook does not parse refuses the push and moves nobody', async () => {
+  // Readiness is checked before the lead is moved, not after. A campaign whose
+  // diagram cannot be parsed cannot compose an email, so a lead pushed into it
+  // would be taken out of a working campaign and stranded in a broken one —
+  // neither being worked nor visibly stuck. The refusal names the diagram,
+  // because that is the thing the user has to go and fix.
+  const broken = seedCampaign(db, owner.id, 'Half-drawn nurture', mailbox.id)
+  db.prepare('UPDATE campaigns SET parent_campaign_id = ?, mermaid = ? WHERE id = ?')
+    .run(campaign.id, 'this is not a flowchart', broken.id)
+
+  const before = db.prepare('SELECT COUNT(*) n FROM campaign_leads WHERE campaign_id = ?').get(broken.id).n
+  const res = await client.post(`/api/inbox/threads/${threads[4].anchorId}/push-to-subsequence`, { subsequenceId: broken.id })
+
+  assert.equal(res.status, 422)
+  assert.equal(res.body.field, 'subsequenceId')
+  assert.match(res.body.message, /playbook|diagram/i, 'and says what to fix')
+  assert.equal(
+    db.prepare('SELECT COUNT(*) n FROM campaign_leads WHERE campaign_id = ?').get(broken.id).n,
+    before,
+    'nobody was moved',
+  )
 })
 
 // ---- notes and tasks from a thread -----------------------------------------

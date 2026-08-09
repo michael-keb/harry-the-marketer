@@ -5,12 +5,23 @@
 // Deliberately not a leaderboard: everyone sees the same numbers, inactive
 // members are listed with zeros rather than dropped, and each column states how
 // it is attributed so nobody has to guess what they are being measured on.
+//
+// This lives in Settings → Team, under the member list, and its spec is
+// insistent that it must NOT appear on the Dashboard or Reports. That is a
+// product judgement rather than a layout preference: on Reports it sits beside
+// campaign performance and reads as a scoreboard ranking colleagues, which is
+// what turns "who is handling replies" into something people manage upward for.
+// Under the member list it reads as what it is — context for a conversation
+// about workload. It was on Reports; this is the move.
+//
+// A solo workspace renders nothing at all. A table of one row comparing you to
+// yourself is noise, and the spec asks for absence rather than an empty state.
 
-import { EmptyState, ErrorState, LoadMore } from '../parity-ui.jsx'
+import { ErrorState, LoadMore } from '../parity-ui.jsx'
 import {
   Panel, RangeCaption, SkeletonRows, SortHeader, StaleMarker, TableScroll,
   n, usePagedApi, useSort,
-} from './shared.jsx'
+} from '../reports/shared.jsx'
 
 const COLUMNS = [
   { key: 'campaigns_created', label: 'Campaigns', title: 'Campaigns created in the range, attributed to the campaign owner' },
@@ -23,29 +34,34 @@ const COLUMNS = [
   { key: 'average_reply_seconds', label: 'Avg reply time', title: 'Average gap between an inbound reply and the next manual outbound on that thread' },
 ]
 
-export default function TeamTab({ params }) {
+// Settings has no range picker, so the panel owns its own window: the last 30
+// days, stated in the caption rather than assumed. The figures are for a
+// conversation about the current stretch of work, and a range control here
+// would invite exactly the retrospective slicing the placement is meant to
+// avoid.
+const LAST_30_DAYS = (() => {
+  const day = (offset) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
+  return { from: day(-29), to: day(0) }
+})()
+
+export default function TeamActivity({ params = LAST_30_DAYS }) {
   const list = usePagedApi('/api/analytics/team', params, { limit: 100 })
   const { sort, toggle, apply } = useSort('replies_handled', 'desc')
   const rows = apply(list.items)
 
+  // An error hides the table and leaves membership management working, which is
+  // the more important half of this page.
   if (list.error && !list.items.length) {
-    return <Panel id="team" title="Team activity"><ErrorState error={list.error} onRetry={list.reload} /></Panel>
+    return <Panel id="team-activity" title="Team activity"><ErrorState error={list.error} onRetry={list.reload} /></Panel>
   }
-  // A solo workspace has one member and nothing to compare, so the panel is
-  // absent rather than a table of one row.
-  if (!list.loading && list.items.length <= 1) {
-    return (
-      <EmptyState
-        icon="leads"
-        title="This is a solo workspace"
-        hint="Team activity appears once you invite someone. Inviting a teammate is done from Settings."
-      />
-    )
-  }
+  // Solo workspace: render nothing. Not an empty state — the spec asks for the
+  // panel to be hidden entirely, and it is right that a workspace of one is
+  // never shown a scoreboard of itself.
+  if (!list.loading && list.items.length <= 1) return null
 
   return (
     <Panel
-      id="team"
+      id="team-activity"
       title="Team activity"
       note="Everyone in the workspace sees the same figures — a hidden scoreboard is worse than an open one. Members with no activity in the range are listed with zeros rather than left out."
       actions={<>

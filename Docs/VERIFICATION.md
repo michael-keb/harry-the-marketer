@@ -16,7 +16,7 @@ capture below.
 | [clients](./clients/verification/) | 7 | 4 | 2 | 0 | 2 |
 | [email-account-tags](./email-account-tags/verification/) | 1 | 5 | 0 | 0 | 5 |
 | [email-accounts](./email-accounts/verification/) | 1 | 11 | 2 | 0 | 9 |
-| [inbox](./inbox/verification/) | 1 | 25 | 7 | 1 | 18 |
+| [inbox](./inbox/verification/) | 4 | 25 | 7 | 1 | 18 |
 | [lead-lists](./lead-lists/verification/) | 2 | 9 | 0 | 0 | 9 |
 | [lead-notes](./lead-notes/verification/) | 3 | 2 | 0 | 0 | 2 |
 | [lead-tags](./lead-tags/verification/) | 2 | 4 | 1 | 0 | 3 |

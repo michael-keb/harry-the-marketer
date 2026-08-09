@@ -161,7 +161,10 @@ test('per-campaign performance agrees with the workspace total', async () => {
 
 test('reply categories and sentiment buckets', async () => {
   const cats = await client.get(`/api/analytics/replies/by-category?from=${D1}&to=${D3}`)
-  assert.deepEqual(cats.body.items, [{ category: 'interested', total_response: 2, share: 100 }])
+  assert.equal(cats.body.items.length, 1)
+  assert.equal(cats.body.items[0].category, 'interested')
+  assert.equal(cats.body.items[0].total_response, 2)
+  assert.equal(cats.body.items[0].share, 100)
 
   const resp = await client.get(`/api/analytics/campaigns/response-stats?from=${D1}&to=${D3}`)
   assert.equal(resp.body.counting, 'reply_events')

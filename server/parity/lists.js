@@ -196,6 +196,19 @@ function suppressor(wsId) {
   }
 }
 
+// Has this person opted out? The same test `suppressionFor` applies in
+// server/suppression.js, and deliberately not `status === 'unsubscribed'`
+// alone: the unsubscribe paths do not all write the same columns.
+// `unsubscribeLead()` stamps `unsubscribed_at` and the status; the engine's
+// terminal `unsubscribed` outcome sets only the status. Reading either one
+// means no writer has to be trusted to have written both — and a lead carrying
+// a timestamp but an `active` status is exactly the row that used to be pushed
+// onto a campaign, reported as "not excluded", and only stopped later by the
+// mailer's own check.
+function hasUnsubscribed(lead) {
+  return lead?.status === 'unsubscribed' || String(lead?.unsubscribed_at || '') !== ''
+}
+
 // ---- routes -----------------------------------------------------------------
 
 export function register(api) {
@@ -203,7 +216,10 @@ export function register(api) {
   // GET /api/lead-lists?q=&tagIds=&limit=&offset=
   api.get('/lead-lists', handler((req) => {
     const started = Date.now()
-    const { limit, cursor, offset } = page(req.query, { defaultLimit: 25, maxLimit: 1000 })
+    // Docs/lead-lists/get-all.md is explicit about the default (TC-10: "with no
+    // parameters and 40 segments → 200 with 10 items, the documented default"),
+    // and the segments panel is a sidebar rather than a table — ten is what fits.
+    const { limit, cursor, offset } = page(req.query, { defaultLimit: 10, maxLimit: 1000 })
     // The source API calls the search parameter `listName`; Harry's list
     // handlers call it `q`. Both are accepted, `q` wins.
     const q = str(req.query, 'q', { max: NAME_MAX }) || str(req.query, 'listName', { max: NAME_MAX })
@@ -501,7 +517,7 @@ export function register(api) {
           const existing = findLead.get(req.wsId, emailAddr)
 
           if (existing) {
-            if (existing.status === 'unsubscribed') {
+            if (hasUnsubscribed(existing)) {
               summary.blocked++
               summary.suppression.unsubscribed++
               errors.push({ row: line, email: emailAddr, reason: 'unsubscribed — will never be emailed' })
@@ -699,7 +715,7 @@ function pushToCampaign(req, campaignId, body) {
   const reasons = []
   const eligible = []
   for (const lead of leads) {
-    if (lead.status === 'unsubscribed') {
+    if (hasUnsubscribed(lead)) {
       excluded.unsubscribed++
       reasons.push({ leadId: lead.id, email: lead.email, reason: 'unsubscribed' })
       continue

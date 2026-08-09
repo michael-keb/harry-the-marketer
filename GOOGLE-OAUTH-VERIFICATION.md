@@ -4,9 +4,7 @@ This app connects Gmail with sensitive scopes (`gmail.send`, `gmail.readonly`). 
 
 > Access blocked: Harry The Marketer has not completed the Google verification process
 
-> **The consent screen is still branded `ReqOps Leadgen`.** Renaming it to **Harry The Marketer**
-> is an outstanding console task (see the checklist), so the block message you see today still
-> quotes the old name.
+The OAuth consent screen app name must be **Harry The Marketer**.
 
 ## Ports
 
@@ -19,20 +17,20 @@ fails with `Error 400: redirect_uri_mismatch`. Already-connected mailboxes survi
 
 ## Immediate unblock (dev / internal)
 
-Do this in [Google Cloud Console](https://console.cloud.google.com/) for project **amazing-source-504109-c1** (“My Project 17560”):
+Do this in [Google Cloud Console](https://console.cloud.google.com/) for project **secure-approach-487708-b5** (“My First Project” — rename to **Harry The Marketer** if you want):
 
-1. **APIs & Services → OAuth consent screen** (or **Google Auth Platform → Audience**).
-2. Set **Publishing status** to **Testing** (do **not** leave it in Production while unverified — that hard-blocks everyone).
-3. Under **Test users**, add every Gmail address that will click **Connect Gmail**.
-4. **Branding**: rename the app from `ReqOps Leadgen` → **`Harry The Marketer`** (match this repo’s legal name).
+1. **Google Auth Platform → Overview → Get started** (configures branding + audience).
+2. Keep **Publishing status** as **Testing** until Google verifies the app.
+3. Under **Audience → Test users**, add every Gmail address that will click **Connect Gmail**.
+4. **Branding**: app name **`Harry The Marketer`** (exact casing).
 5. Fill required fields:
    - App name: `Harry The Marketer`
    - User support email: your Google account
-   - Application home page: your `APP_URL` (e.g. `http://localhost:8131` for local, or the public URL)
+   - Application home page: your `APP_URL` (e.g. `http://localhost:8131` for local, or `https://harrythemarketer.com`)
    - Privacy policy: `{APP_URL}/privacy`
    - Terms of service: `{APP_URL}/terms`
-   - Authorized domains: your production host (skip for pure localhost testing)
-6. Confirm scopes include:
+   - Authorized domains: `harrythemarketer.com` for production (skip for pure localhost testing)
+6. **Data access**: add scopes:
    - `https://www.googleapis.com/auth/gmail.send`
    - `https://www.googleapis.com/auth/gmail.readonly`
    - `https://www.googleapis.com/auth/userinfo.email`
@@ -41,9 +39,13 @@ Do this in [Google Cloud Console](https://console.cloud.google.com/) for project
      **non-sensitive** scope: it grants access only to files this app creates, which
      is why Harry creates the spreadsheet for you rather than asking for one. It does
      not add to the Gmail verification burden.
-7. **Credentials → OAuth client** (Web application): authorized redirect URI must match `.env`:
-   - Local: `http://localhost:8131/api/google/callback`
-8. Retry **Mailboxes → Connect Gmail** while signed into a listed test user.
+7. Enable **Gmail API** (+ **Google Drive API** if using the prospect sheet) under APIs & Services → Library.
+8. **Clients → Create client → Web application**:
+   - Name: `Harry The Marketer Web`
+   - Authorized redirect URI: `http://localhost:8131/api/google/callback`
+   - (Later production) also add `https://harrythemarketer.com/api/google/callback`
+9. Copy Client ID + Client secret into `.env` as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, restart the app, then **Connections → Email → Add email → Gmail** while signed into a listed test user.
+10. When Google has approved verification and Publishing status is **In production**, set `GOOGLE_OAUTH_VERIFIED=1` in `.env` (and Render) so the Testing notice disappears from Connections.
 
 Tokens for test users expire after ~7 days; reconnect when that happens.
 
@@ -108,7 +110,7 @@ Console side (still needs Google Cloud Console):
 
 - [x] Redirect URI `http://localhost:8131/api/google/callback` registered (Google returns no
       `redirect_uri_mismatch` for it)
-- [ ] Consent screen app name = **Harry The Marketer** (still reads `ReqOps Leadgen`)
+- [ ] Consent screen app name = **Harry The Marketer**
 - [ ] `hello@thedigitalba.com.au` added as a Test user — only needed if that account
       must connect; it is currently blocked with `Error 403: access_denied`
 - [ ] Privacy + Terms URLs set to `http://localhost:8131/privacy` and `/terms`
@@ -119,6 +121,5 @@ Console side (still needs Google Cloud Console):
 > `oauthconfig.testusers.get`). The consent screen must be edited from the owning
 > account. Grant `roles/oauthconfig.editor` to avoid switching accounts every time.
 
-> Gotcha: this directory was renamed from `ReqOps_Leadgen` → `Harry The Marketer`. A dev server
-> started before the rename keeps serving the old module graph and returns 404/500 for `/privacy`
-> and `/terms`. Restart the dev server after renaming, or Google's reviewers see broken legal URLs.
+> Gotcha: restart the dev server after branding/legal URL changes, or Google's reviewers
+> can see stale `/privacy` and `/terms`.

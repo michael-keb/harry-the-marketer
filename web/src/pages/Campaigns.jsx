@@ -230,17 +230,38 @@ function CampaignCard({ campaign: c }) {
   )
 }
 
+const CAMPAIGN_TYPES = [
+  {
+    value: 'email',
+    label: 'Email',
+    blurb: 'Send from a connected Gmail or Outlook mailbox. Leads need an email address.',
+    next: 'Next you’ll attach a mailbox and draw Send steps.',
+  },
+  {
+    value: 'sms',
+    label: 'SMS',
+    blurb: 'Send texts from a Twilio number. Leads need a phone number and SMS opt-in.',
+    next: 'Next you’ll attach an SMS sender and draw Send sms: steps.',
+  },
+]
+
 function CreateCampaignModal({ onClose, onCreated }) {
   const [name, setName] = useState('')
+  const [channelMode, setChannelMode] = useState('email')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
+
+  const selected = CAMPAIGN_TYPES.find((t) => t.value === channelMode) || CAMPAIGN_TYPES[0]
 
   const submit = async (e) => {
     e.preventDefault()
     setBusy(true)
     setErr(null)
     try {
-      onCreated(await api.post('/api/campaigns/create', { name: name.trim() }))
+      onCreated(await api.post('/api/campaigns/create', {
+        name: name.trim(),
+        channelMode,
+      }))
     } catch (error) {
       setErr(error)
       setBusy(false)
@@ -248,8 +269,8 @@ function CreateCampaignModal({ onClose, onCreated }) {
   }
 
   return (
-    <Modal title="New campaign" onClose={onClose}>
-      <form onSubmit={submit} className="space-y-3">
+    <Modal title="New campaign" lead="Name it, pick how it reaches people, then draw the playbook." onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
         <Field label="Campaign name" htmlFor="new-campaign-name" error={errorFor(err, 'name')}>
           <input
             id="new-campaign-name"
@@ -261,14 +282,50 @@ function CreateCampaignModal({ onClose, onCreated }) {
             onChange={(e) => setName(e.target.value)}
           />
         </Field>
+
+        <fieldset>
+          <legend className="text-sm font-medium text-slate-600">Campaign type</legend>
+          <div className="mt-1.5 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Campaign type">
+            {CAMPAIGN_TYPES.map((type) => {
+              const on = channelMode === type.value
+              return (
+                <label
+                  key={type.value}
+                  className={`cursor-pointer rounded-lg border px-3.5 py-3 transition-colors ${
+                    on
+                      ? 'border-accent-500 bg-accent-500/10 ring-2 ring-accent-500/20'
+                      : 'border-slate-200 hover:border-slate-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    className="sr-only"
+                    name="campaign-type"
+                    value={type.value}
+                    checked={on}
+                    onChange={() => setChannelMode(type.value)}
+                  />
+                  <span className={`block text-sm font-semibold ${on ? 'text-accent-700' : 'text-ink-900'}`}>
+                    {type.label}
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-slate-600">{type.blurb}</span>
+                </label>
+              )
+            })}
+          </div>
+          <p className="mt-2 text-xs text-slate-500">{selected.next}</p>
+        </fieldset>
+
         <p className="text-xs text-slate-500">
-          It starts as a draft with an empty playbook. Nothing sends until you draw the diagram, attach a
-          mailbox and some leads, and start it yourself.
+          It starts as a draft. Nothing sends until the playbook is valid, the right sender is attached,
+          leads are ready, and you start it yourself.
         </p>
         {err && !errorFor(err, 'name') && <p className="text-xs text-red-700" role="alert">{messageOf(err)}</p>}
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-ghost cursor-pointer" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="btn-primary cursor-pointer" disabled={busy || !name.trim()}>{busy ? 'Creating…' : 'Create'}</button>
+          <button className="btn-primary cursor-pointer" disabled={busy || !name.trim()}>
+            {busy ? 'Creating…' : 'Create'}
+          </button>
         </div>
       </form>
     </Modal>

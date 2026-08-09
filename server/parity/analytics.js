@@ -42,6 +42,37 @@ const ratio = (num, den) => (den > 0 ? Math.round((num / den) * 100) / 100 : 0)
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
 
+// Round a set of shares to one decimal so they still total exactly 100.
+//
+// Rounding each share on its own is honest per row and wrong as a column: three
+// equal thirds each read 33.3 and the breakdown sums to 99.9, which reads as a
+// missing category rather than as rounding. Largest remainder gives the spare
+// tenths to the rows that lost the most, so no share moves further than one
+// rounding unit and the total is exact. Mutates `rows` in place.
+function balanceShares(rows, total) {
+  if (!rows.length || total <= 0) return rows
+  const tenths = rows.map((r) => (r.total_response / total) * 1000)
+  const floors = tenths.map((t) => Math.floor(t))
+  let spare = 1000 - floors.reduce((a, b) => a + b, 0)
+  const order = tenths
+    .map((t, i) => ({ i, frac: t - Math.floor(t) }))
+    .sort((a, b) => b.frac - a.frac)
+  const bonus = new Array(rows.length).fill(0)
+  for (let k = 0; spare > 0 && k < order.length; k += 1, spare -= 1) bonus[order[k].i] = 1
+  rows.forEach((r, i) => {
+    // The genuinely unrounded ratio, not the row's own one-decimal rounding.
+    // This used to copy `r.share`, which `pct()` had already rounded — so
+    // `share_exact` on three equal thirds read 33.3, and a field whose whole
+    // purpose is to let someone check the balancing was itself pre-rounded.
+    // A name that promises exactness has to deliver it.
+    r.share_exact = tenths[i] / 10
+    r.share = (floors[i] + bonus[i]) / 10
+    // The documented spelling; the same number, not a second calculation.
+    r.percentage = r.share
+  })
+  return rows
+}
+
 // ------------------------------------------------------------- timezones ----
 
 const ZONE_CACHE = new Map()
@@ -221,21 +252,53 @@ function parseIdList(query, field) {
   return ids
 }
 
+// The campaigns belonging to a set of clients, in this workspace only.
+//
+// `client_ids` is documented beside `campaign_ids` on nearly every spec in both
+// categories, and until now it parsed as nothing at all: the parameter was
+// accepted, ignored, and the caller got the whole workspace back believing it
+// had filtered to one account. That is the silent-wrong-number failure this
+// category exists to catch, so it is resolved here, once.
+//
+// A client id the workspace cannot see is filtered out rather than 404ing — the
+// specs are explicit that the client filter must never reveal whether a client
+// exists elsewhere (client-list TC-3, campaign-list TC-3).
+function campaignIdsForClients(wsId, clientIds) {
+  if (!clientIds) return null
+  if (!clientIds.length) return []
+  const marks = clientIds.map(() => '?').join(',')
+  return db.prepare(`SELECT id FROM campaigns WHERE user_id = ? AND client_id IN (${marks})`)
+    .all(wsId, ...clientIds).map((r) => r.id)
+}
+
 // `campaign_ids` naming a campaign in another workspace 404s rather than
-// quietly returning that campaign's numbers as zeros.
+// quietly returning that campaign's numbers as zeros. `client_ids` narrows the
+// same set; supplying both means the intersection.
+//
+// The return is `null` for "no filter", an array for "these campaigns", and an
+// EMPTY array for "a filter that matched nothing" — which is not the same
+// answer and must not collapse into it.
 function readCampaignIds(req, field = 'campaign_ids') {
   const ids = parseIdList(req.query, field)
-  if (!ids) return null
-  for (const id of ids) {
-    const row = db.prepare('SELECT id FROM campaigns WHERE id = ? AND user_id = ?').get(id, req.wsId)
-    if (!row) throw notFound('campaign')
+  if (ids) {
+    for (const id of ids) {
+      const row = db.prepare('SELECT id FROM campaigns WHERE id = ? AND user_id = ?').get(id, req.wsId)
+      if (!row) throw notFound('campaign')
+    }
   }
-  return ids
+  const fromClients = campaignIdsForClients(req.wsId, parseIdList(req.query, 'client_ids'))
+  if (fromClients === null) return ids
+  if (!ids) return fromClients
+  return ids.filter((id) => fromClients.includes(id))
 }
 
 // `{ sql, params }` for "…AND <alias>.campaign_id IN (…)", or a no-op.
 function campaignClause(ids, column = 'campaign_id') {
-  if (!ids || !ids.length) return { sql: '', params: [] }
+  if (!ids) return { sql: '', params: [] }
+  // An empty list is a filter that matched no campaign. Treating it as "no
+  // filter" would answer a request for one client's numbers with the whole
+  // workspace's, which is worse than an empty table.
+  if (!ids.length) return { sql: ' AND 1 = 0', params: [] }
   return { sql: ` AND ${column} IN (${ids.map(() => '?').join(',')})`, params: ids }
 }
 
@@ -318,7 +381,26 @@ function outcomeRows(wsId, win, campaignIds) {
   const c = campaignClause(campaignIds, 'cl.campaign_id')
   return db.prepare(
     `SELECT cl.campaign_id, cl.lead_id, cl.outcome,
-            COALESCE(NULLIF(cl.unsubscribed_at, ''), NULLIF(cl.completed_at, ''), cl.updated_at) AS at
+            COALESCE(NULLIF(cl.unsubscribed_at, ''), NULLIF(cl.completed_at, ''), cl.updated_at) AS at,
+            -- Which mailbox this outcome belongs to. Without this column every
+            -- mailbox-keyed surface reported zero won, lost and unsubscribed --
+            -- not because there were none, but because the grouping function
+            -- read a mailbox_id that was never selected, found undefined, and
+            -- dropped the row into no bucket at all. Silent, and
+            -- indistinguishable from a quiet week.
+            --
+            -- The mailbox that did the work is the one that sent the last real
+            -- email to this person in this campaign. Falling back to the lead
+            -- pin and then the campaign mailbox covers an outcome reached
+            -- before anything was sent.
+            COALESCE(
+              (SELECT m.mailbox_id FROM messages m
+                WHERE m.campaign_id = cl.campaign_id AND m.lead_id = cl.lead_id
+                  AND m.direction = 'out' AND m.mailbox_id IS NOT NULL
+                ORDER BY m.id DESC LIMIT 1),
+              cl.mailbox_id,
+              c.mailbox_id
+            ) AS mailbox_id
      FROM campaign_leads cl JOIN campaigns c ON c.id = cl.campaign_id
      WHERE c.user_id = ? AND cl.outcome IN ('won','lost','unsubscribed')
        AND datetime(COALESCE(NULLIF(cl.unsubscribed_at, ''), NULLIF(cl.completed_at, ''), cl.updated_at)) >= ?
@@ -479,6 +561,23 @@ const remainingToday = (mb) => {
   return Math.max(0, num(mb.daily_limit) - used)
 }
 
+// Where a mailbox is in its warm-up ramp. Derived from the same columns
+// server/upkeep.js adjusts, so the reported state cannot drift from the one the
+// sender actually obeys. `ramping` is what tells a reader that a low `sent` is
+// the ramp doing its job rather than a mailbox that has quietly stopped.
+function rampState(mb) {
+  const limit = num(mb.daily_limit)
+  const target = num(mb.warmup_daily_count)
+  const enabled = Boolean(mb.warmup_enabled)
+  return {
+    warmup_enabled: enabled,
+    daily_target: enabled ? target : limit,
+    daily_limit: limit,
+    ramping: enabled && target < limit,
+    auto_adjust: Boolean(mb.warmup_auto_adjust),
+  }
+}
+
 const domainOf = (address) => {
   const at = String(address || '').lastIndexOf('@')
   return at === -1 ? '' : String(address).slice(at + 1).trim().toLowerCase()
@@ -493,13 +592,18 @@ export function register(api) {
   api.get('/analytics/campaigns', handler((req) => {
     const t0 = Date.now()
     const wanted = parseIdList(req.query, 'ids')
+    const clientIds = parseIdList(req.query, 'client_ids')
     const page = readPage(req.query, { defaultLimit: 100, maxLimit: 500 })
-    let rows = campaignsOf(req.wsId, { includeArchived: true })
-      .map((c) => ({ id: c.id, name: c.name }))
+    let list = campaignsOf(req.wsId, { includeArchived: true })
+    // Scoping by workspace first means a client id owned by someone else simply
+    // matches nothing — no 404, no hint that it exists.
+    if (clientIds) list = list.filter((c) => c.client_id && clientIds.includes(c.client_id))
+    let rows = list.map((c) => ({ id: c.id, name: c.name }))
     if (wanted) rows = rows.filter((r) => wanted.includes(r.id))
     rows.sort((a, b) => (a.name === b.name ? a.id - b.id : a.name.localeCompare(b.name)))
     meter('GET /analytics/campaigns', Date.now() - t0)
-    return slicePage(rows, page)
+    const sliced = slicePage(rows, page)
+    return { ...sliced, data: { campaign_list: sliced.items } }
   }))
 
   // --- Docs/analytics/campaign-performance.md ------------------------------
@@ -515,14 +619,24 @@ export function register(api) {
     if (ids) campaigns = campaigns.filter((c) => ids.includes(c.id))
     const rows = campaigns.map((c) => ({
       campaign_id: c.id,
+      // The documented spellings alongside Harry's, so a client written against
+      // campaign-performance.md and CampaignsTab read the same row.
+      id: c.id,
       name: c.name,
+      campaign_name: c.name,
       status: c.status,
       client_id: c.client_id ?? null,
       ...(groups.get(c.id) || finishBucket(emptyBucket())),
     }))
     rows.sort((a, b) => (a.name === b.name ? a.campaign_id - b.campaign_id : a.name.localeCompare(b.name)))
     meter('GET /analytics/campaigns/performance', Date.now() - t0, true, `${win.days}d/${rows.length}c`)
-    return { range: rangeMeta(win), workspace: total, ...slicePage(rows, page) }
+    const sliced = slicePage(rows, page)
+    return {
+      range: rangeMeta(win),
+      workspace: total,
+      ...sliced,
+      data: { campaign_wise_performance: sliced.items },
+    }
   }))
 
   // --- Docs/analytics/campaign-response-stats.md ---------------------------
@@ -549,15 +663,31 @@ export function register(api) {
 
     let campaigns = campaignsOf(req.wsId, { includeArchived: true })
     if (ids) campaigns = campaigns.filter((c) => ids.includes(c.id))
-    const rows = campaigns.map((c) => ({
-      campaign_id: c.id,
-      name: c.name,
-      ...(byCampaign.get(c.id) || { positive: 0, neutral: 0, negative: 0, uncategorised: 0, total: 0 }),
-    }))
+    const rows = campaigns.map((c) => {
+      const b = byCampaign.get(c.id) || { positive: 0, neutral: 0, negative: 0, uncategorised: 0, total: 0 }
+      return {
+        campaign_id: c.id,
+        name: c.name,
+        campaign_name: c.name,
+        ...b,
+        // The documented spellings. Same counts, not a second tally.
+        positive_reply: b.positive,
+        neutral_reply: b.neutral,
+        negative_reply: b.negative,
+        uncategorised_reply: b.uncategorised,
+      }
+    })
     rows.sort((a, b) => (a.name === b.name ? a.campaign_id - b.campaign_id : a.name.localeCompare(b.name)))
     meter('GET /analytics/campaigns/response-stats', Date.now() - t0)
+    const sliced = slicePage(rows, page)
     // Stated in the payload so nobody mistakes these for distinct leads.
-    return { range: rangeMeta(win), counting: 'reply_events', totals, ...slicePage(rows, page) }
+    return {
+      range: rangeMeta(win),
+      counting: 'reply_events',
+      totals,
+      ...sliced,
+      data: { campaign_wise_response_stats: sliced.items },
+    }
   }))
 
   // --- Docs/analytics/campaign-status-stats.md -----------------------------
@@ -566,11 +696,21 @@ export function register(api) {
   api.get('/analytics/campaigns/status-counts', handler((req) => {
     const t0 = Date.now()
     const page = readPage(req.query, { defaultLimit: 50 })
+    const clientIds = parseIdList(req.query, 'client_ids')
+    // "the total equals the number of campaigns visible there — no hidden or
+    // archived campaign inflates it". The Campaigns list hides archived
+    // campaigns by default, so this counted a set the user could not see and
+    // the two screens disagreed by however many campaigns had been archived.
+    // Opt back in explicitly if you want them.
+    const includeArchived = ['1', 'true', 'yes'].includes(
+      String(req.query?.include_archived || '').trim().toLowerCase()
+    )
     const win = sendWindow(owner(req.wsId))
     const holding = win.on && !isOpen(win, Date.now())
     const counts = new Map()
     let total = 0
-    for (const c of campaignsOf(req.wsId, { includeArchived: true })) {
+    for (const c of campaignsOf(req.wsId, { includeArchived })) {
+      if (clientIds && !(c.client_id && clientIds.includes(c.client_id))) continue
       const key = c.status === 'running' && holding ? 'holding' : c.status
       counts.set(key, (counts.get(key) || 0) + 1)
       total += 1
@@ -579,7 +719,13 @@ export function register(api) {
     const rows = [...counts].map(([status, count]) => ({ status, count }))
     rows.sort((a, b) => (b.count - a.count) || a.status.localeCompare(b.status))
     meter('GET /analytics/campaigns/status-counts', Date.now() - t0)
-    return { campaigns_total: total, ...slicePage(rows, page) }
+    const sliced = slicePage(rows, page)
+    return {
+      campaigns_total: total,
+      includes_archived: includeArchived,
+      ...sliced,
+      data: { campaign_status_stats: sliced.items },
+    }
   }))
 
   // --- Docs/analytics/client-list.md ---------------------------------------
@@ -587,11 +733,16 @@ export function register(api) {
   api.get('/analytics/clients', handler((req) => {
     const t0 = Date.now()
     const page = readPage(req.query, { defaultLimit: 100, maxLimit: 500 })
-    const rows = db.prepare(
+    const clientIds = parseIdList(req.query, 'client_ids')
+    let rows = db.prepare(
       "SELECT id, name FROM clients WHERE workspace_id = ? AND COALESCE(deleted_at,'') = '' ORDER BY name, id"
     ).all(req.wsId)
+    // Filtered after the workspace scope, so an id belonging to someone else
+    // matches nothing rather than 404ing and confirming it exists.
+    if (clientIds) rows = rows.filter((r) => clientIds.includes(r.id))
     meter('GET /analytics/clients', Date.now() - t0)
-    return slicePage(rows, page)
+    const sliced = slicePage(rows, page)
+    return { ...sliced, data: { client_list: sliced.items } }
   }))
 
   // --- Docs/analytics/client-performance.md --------------------------------
@@ -686,7 +837,7 @@ export function register(api) {
     // An empty workspace gets [], not two years of zeros.
     if (!anyClients) {
       meter('GET /analytics/clients/monthly-active', Date.now() - t0)
-      return { months, items: [], total: 0, limit: months, offset: 0, hasMore: false }
+      return { months, items: [], total: 0, limit: months, offset: 0, hasMore: false, data: { monthly_stats: [] } }
     }
 
     const nowKey = dayFormatter(tz).format(new Date()).slice(0, 7)
@@ -698,9 +849,13 @@ export function register(api) {
     }
     const first = keys[0]
     const active = new Map(keys.map((k) => [k, new Set()]))
-    // Activity means sends, not when the client record was created.
+    // Activity means sends, not when the client record was created — and a
+    // "send" here means what server/metrics.js says it means. Without REAL_SEND
+    // a single "send me a test" marked the client active for that month, so a
+    // dormant account showed a bar it had not earned.
     for (const row of db.prepare(
-      "SELECT campaign_id, created_at FROM messages WHERE user_id = ? AND direction = 'out'"
+      `SELECT m.campaign_id, m.created_at FROM messages m
+        WHERE m.user_id = ? AND m.direction = 'out' AND ${REAL_SEND}`
     ).all(req.wsId)) {
       const clientId = campaignClient.get(row.campaign_id)
       if (!clientId) continue
@@ -711,7 +866,11 @@ export function register(api) {
     }
     const items = keys.map((month) => ({ month, count: active.get(month).size }))
     meter('GET /analytics/clients/monthly-active', Date.now() - t0, true, `${months}m`)
-    return { months, timezone: tz, items, total: items.length, limit: months, offset: 0, hasMore: false }
+    return {
+      months, timezone: tz, items, total: items.length, limit: months, offset: 0, hasMore: false,
+      active_definition: 'a client is active in a month when one of its campaigns made a real send that month',
+      data: { monthly_stats: items },
+    }
   }))
 
   // --- Docs/analytics/day-wise-stats.md ------------------------------------
@@ -771,8 +930,8 @@ export function register(api) {
       if (target) target.unsubscribed += 1
     }
 
-    const items = [...days.values()].map(({ _leads, ...rest }) => ({
-      ...rest, unique_lead_reached: _leads.size,
+    const items = [...days.values()].map(({ _leads, day, ...rest }) => ({
+      day, date: day, ...rest, unique_lead_reached: _leads.size,
     }))
     meter('GET /analytics/daily', Date.now() - t0, true, `${axis}/${win.days}d`)
     return {
@@ -790,6 +949,7 @@ export function register(api) {
       limit: items.length,
       offset: 0,
       hasMore: false,
+      data: { day_wise_stats: items },
     }
   }))
 
@@ -822,7 +982,12 @@ export function register(api) {
     }
 
     const items = denseDays(win).map((day) => ({
-      day, count: days.get(day).size, reply_events: events.get(day),
+      day,
+      date: day,
+      count: days.get(day).size,
+      // The documented spelling. Same distinct-lead count, not a second tally.
+      positive_replied: days.get(day).size,
+      reply_events: events.get(day),
     }))
     meter('GET /analytics/positive-replies/daily', Date.now() - t0, true, `${axis}/${win.days}d`)
     return {
@@ -833,6 +998,7 @@ export function register(api) {
       // Distinct leads across the range, which is not the sum of the days.
       range_total: leads.size,
       items, total: items.length, limit: items.length, offset: 0, hasMore: false,
+      data: { day_wise_stats: items },
     }
   }))
 
@@ -843,7 +1009,7 @@ export function register(api) {
     const ids = readCampaignIds(req)
     const page = readPage(req.query, { defaultLimit: 50 })
 
-    const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY id').all(req.wsId)
+    const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id').all(req.wsId)
     const domainOfMailbox = new Map(mailboxes.map((m) => [m.id, domainOf(m.email)]))
     const boxesPerDomain = new Map()
     for (const m of mailboxes) {
@@ -859,7 +1025,8 @@ export function register(api) {
     }))
     rows.sort((a, b) => (b.sent - a.sent) || a.domain.localeCompare(b.domain))
     meter('GET /analytics/mailboxes/domains', Date.now() - t0)
-    return { range: rangeMeta(win), ...slicePage(rows, page) }
+    const sliced = slicePage(rows, page)
+    return { range: rangeMeta(win), ...sliced, data: { domain_health_metrics: sliced.items } }
   }))
 
   // --- Docs/analytics/email-wise-health.md ---------------------------------
@@ -879,10 +1046,11 @@ export function register(api) {
 
     const { groups } = rollup(req.wsId, win, ids, (row) => row.mailbox_id ?? null)
     // Left-join from the mailbox list, so a silent mailbox is zeros, not absence.
-    let rows = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? ORDER BY email, id').all(req.wsId)
+    let rows = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL ORDER BY email, id').all(req.wsId)
       .map((m) => ({
         mailbox_id: m.id,
         email: m.email,
+        email_account: m.email,
         domain: domainOf(m.email),
         provider: m.provider,
         is_sandbox: m.provider === 'sandbox',
@@ -891,12 +1059,17 @@ export function register(api) {
         warmup_enabled: Boolean(m.warmup_enabled),
         daily_limit: num(m.daily_limit),
         remaining_today: remainingToday(m),
+        // AC: "a mailbox still warming up ... the ramp state is shown next to
+        // the counts so a low `sent` is not read as a fault". Read from the
+        // warmup columns the upkeep job already adjusts, never stored twice.
+        ramp: rampState(m),
         ...(groups.get(m.id) || finishBucket(emptyBucket())),
       }))
     // Filters on the range's bounces, not on lifetime ones.
     if (filterBounced !== null) rows = rows.filter((r) => (r.bounced > 0) === filterBounced)
     meter('GET /analytics/mailboxes/health', Date.now() - t0)
-    return { range: rangeMeta(win), ...slicePage(rows, page) }
+    const sliced = slicePage(rows, page)
+    return { range: rangeMeta(win), ...sliced, data: { email_health_metrics: sliced.items } }
   }))
 
   // --- Docs/analytics/mailbox-health.md ------------------------------------
@@ -908,7 +1081,7 @@ export function register(api) {
   const DISCONNECTED_SEEN = new Map()
   api.get('/analytics/mailboxes/summary', handler((req) => {
     const t0 = Date.now()
-    const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ?').all(req.wsId)
+    const mailboxes = db.prepare('SELECT * FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL').all(req.wsId)
     const inUse = new Set()
     for (const c of db.prepare("SELECT id, mailbox_id FROM campaigns WHERE user_id = ? AND status = 'running'").all(req.wsId)) {
       if (c.mailbox_id) inUse.add(c.mailbox_id)
@@ -956,7 +1129,7 @@ export function register(api) {
     const ids = readCampaignIds(req)
 
     const providerOf = new Map(
-      db.prepare('SELECT id, provider FROM mailboxes WHERE user_id = ?').all(req.wsId)
+      db.prepare('SELECT id, provider FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL').all(req.wsId)
         .map((m) => [m.id, m.provider])
     )
     const campaignName = new Map(
@@ -967,7 +1140,7 @@ export function register(api) {
     const pairs = rollup(req.wsId, win, ids, (row) => {
       if (!row.mailbox_id || !row.campaign_id) return null
       const p = providerOf.get(row.mailbox_id)
-      return p ? `${p} ${row.campaign_id}` : null
+      return p ? `${p}\u0000${row.campaign_id}` : null
     }).groups
 
     // Providers with no sends in the range are omitted.
@@ -975,18 +1148,32 @@ export function register(api) {
       provider, is_sandbox: provider === 'sandbox', ...s,
     })).sort((a, b) => b.sent - a.sent)
     const by_campaign = [...pairs].filter(([, s]) => s.sent > 0).map(([key, s]) => {
-      const [provider, campaignId] = key.split(' ')
+      const [provider, campaignId] = key.split('\u0000')
       return {
         provider,
         is_sandbox: provider === 'sandbox',
         campaign_id: Number(campaignId),
         campaign_name: campaignName.get(Number(campaignId)) || '',
+        // The spec's `tag`. Harry has no separate tagging system for this, and
+        // inventing one would be a second source of truth: the campaign name is
+        // the label, said plainly rather than implied.
+        tag: campaignName.get(Number(campaignId)) || '',
         ...s,
       }
     }).sort((a, b) => b.sent - a.sent)
 
     meter('GET /analytics/mailboxes/providers', Date.now() - t0)
-    return { range: rangeMeta(win), overall, by_campaign }
+    return {
+      range: rangeMeta(win),
+      overall,
+      by_campaign,
+      // "The panel is absent when only one real provider has sent." Sandbox
+      // exists to be tested in seconds and is never part of a verdict, so it is
+      // not counted here either.
+      real_providers: overall.filter((p) => !p.is_sandbox).length,
+      shares: 'open_rate, click_rate and bounce_share are per email sent, not per lead contacted',
+      data: { email_providers_performance_overview: { overall, tag_wise: by_campaign } },
+    }
   }))
 
   // --- Docs/analytics/followup-reply-rate.md -------------------------------
@@ -1042,12 +1229,18 @@ export function register(api) {
     }
 
     meter('GET /analytics/followup-reply-rate', Date.now() - t0)
+    const rate = pct(tally.followup_replies, tally.followups_sent)
     return {
       range: rangeMeta(win),
       ...tally,
       // HARRY-OVER-SPEC: 0 rather than null when nothing was sent.
-      rate: pct(tally.followup_replies, tally.followups_sent),
+      rate,
       first_email_rate: pct(tally.first_replies, tally.first_sent),
+      // `rate` of 0 is ambiguous on its own — "nobody replied" and "nothing was
+      // sent to reply to" are different facts, and the spec wants the second
+      // shown as "—". Stated rather than left for the caller to infer.
+      has_followups: tally.followups_sent > 0,
+      data: { followup_reply_rate: rate },
     }
   }))
 
@@ -1072,10 +1265,22 @@ export function register(api) {
       total_response: n,
       share: pct(n, total),
     })).sort((a, b) => (b.total_response - a.total_response) || a.category.localeCompare(b.category))
+    // Three categories of equal size round to 33.3 each and a breakdown that
+    // adds up to 99.9 invites the reader to hunt for the missing tenth. The
+    // largest remainders take the leftover tenths, so the column totals exactly
+    // 100 while no share moves by more than one rounding unit from its true
+    // value. `share_exact` keeps the unadjusted figure for anyone checking.
+    balanceShares(rows, total)
 
     meter('GET /analytics/replies/by-category', Date.now() - t0, true,
       `unclassified=${counts.get(NEEDS_ATTENTION) || 0}`)
-    return { range: rangeMeta(win), total_replies: total, ...slicePage(rows, page) }
+    const sliced = slicePage(rows, page)
+    return {
+      range: rangeMeta(win),
+      total_replies: total,
+      ...sliced,
+      data: { lead_responses_by_category: sliced.items },
+    }
   }))
 
   // --- Docs/analytics/lead-stats.md ----------------------------------------
@@ -1109,14 +1314,25 @@ export function register(api) {
     }
     const total = fresh + followUp
     meter('GET /analytics/leads/contact-mix', Date.now() - t0)
+    // HARRY-OVER-SPEC: 0, not null, on an empty range.
+    const newShare = pct(fresh, total)
+    const followShare = pct(followUp, total)
     return {
       range: rangeMeta(win),
       total,
       new: fresh,
       follow_up: followUp,
-      // HARRY-OVER-SPEC: 0, not null, on an empty range.
-      new_share: pct(fresh, total),
-      follow_up_share: pct(followUp, total),
+      new_share: newShare,
+      follow_up_share: followShare,
+      // The rule, in the payload, because the panel is required to state it and
+      // a rule stated in two places is a rule that will drift.
+      rule: 'a lead is new when its first message in that campaign falls inside the range; every other contact is a follow-up',
+      data: {
+        lead_stats: {
+          count: { total, new: fresh, follow_up: followUp },
+          percentage: { new: newShare, follow_up: followShare },
+        },
+      },
     }
   }))
 
@@ -1158,7 +1374,17 @@ export function register(api) {
 
     // Every bucket comes back, empty or not, with numeric bounds and a stable
     // order, so a client never parses a label to sort it.
-    const buckets = BUCKETS.map((b, i) => ({ ...b, count: counts[i] }))
+    const buckets = BUCKETS.map((b, i) => ({ ...b, time_range: b.bucket, count: counts[i] }))
+    // The median bucket, derived here rather than in the panel: "half of the
+    // replies arrived within X" is the sentence the spec asks for above the
+    // chart, and computing it twice is how two screens end up saying different
+    // things about the same distribution.
+    let seen = 0
+    let median = null
+    for (const b of buckets) {
+      seen += b.count
+      if (counted > 0 && seen * 2 >= counted) { median = b.bucket; break }
+    }
     meter('GET /analytics/reply-time-distribution', Date.now() - t0)
     return {
       range: rangeMeta(win),
@@ -1166,8 +1392,10 @@ export function register(api) {
       total: counted,
       untraceable_replies: untraceable,
       average_hours: counted > 0 ? Math.round((totalHours / counted) * 100) / 100 : 0,
+      median_bucket: median,
       // Kept list-shaped for symmetry; the bucket set is fixed at six.
       items: buckets, limit: buckets.length, offset: 0, hasMore: false,
+      data: { lead_to_reply_time: buckets },
     }
   }))
 
@@ -1184,9 +1412,11 @@ export function register(api) {
     // stated here rather than left implicit.
     const opens_tracked = total.unique_open_count > 0
     meter('GET /analytics/overview', Date.now() - t0, true, `${win.days}d`)
+    const overall_stats = { ...total, opens_tracked }
     return {
       range: rangeMeta(win),
-      overall_stats: { ...total, opens_tracked },
+      overall_stats,
+      data: { overall_stats },
       // Which timestamp each field sits on, so a client cannot mix the axes.
       axes: {
         sent: 'send_time', opened: 'send_time', clicked: 'send_time',
@@ -1211,8 +1441,15 @@ export function register(api) {
 
     const ownerRow = owner(req.wsId)
     const members = [
-      { email: ownerRow?.email || req.user?.email || '', role: 'owner', status: 'active' },
-      ...db.prepare('SELECT email, role, status FROM team_members WHERE owner_id = ? ORDER BY id').all(req.wsId),
+      {
+        id: 0, email: ownerRow?.email || req.user?.email || '',
+        name: ownerRow?.name || '', role: 'owner', status: 'active',
+      },
+      // `team_members` stores no display name — an invitation is an address.
+      // The local part is the honest fallback; inventing a name column here
+      // would be a second place for it to go stale.
+      ...db.prepare('SELECT id, email, role, status FROM team_members WHERE owner_id = ? ORDER BY id')
+        .all(req.wsId).map((m) => ({ ...m, name: '' })),
     ]
     const seen = new Set()
     const roster = members.filter((m) => m.email && !seen.has(m.email) && seen.add(m.email))
@@ -1335,6 +1572,11 @@ export function register(api) {
       const replyCount = _replyLeads.size
       const positiveCount = _positiveLeads.size
       return {
+        id: m.id ?? 0,
+        name: m.name || String(m.email || '').split('@')[0],
+        // Harry stores no avatars and will not load a third-party image the
+        // content security policy would block; the UI draws initials.
+        profile_pic_url: null,
         email: m.email, role: m.role, status: m.status, ...rest,
         // The spec's column set. `lead_count` is leads contacted in the range,
         // which is the denominator the two rates divide by — the same
@@ -1763,7 +2005,7 @@ export function register(api) {
 
     const rows = [...attached].map((id) => {
       // A revoked-token mailbox still reports its history.
-      const mb = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ?').get(id, req.wsId)
+      const mb = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(id, req.wsId)
       return {
         mailbox_id: id,
         email: mb?.email || '',
@@ -1780,7 +2022,13 @@ export function register(api) {
     meter('GET /campaigns/:id/mailbox-statistics', Date.now() - t0, true, `window=${applied}`)
     return {
       ok: true,
-      range: { ...rangeMeta(win), applied },
+      // The window that was actually applied, not the one `readWindow` would
+      // have defaulted to. Echoing a 30-day from/to beside all-time figures is
+      // how a caption comes to describe a range the numbers were never scoped
+      // by — and the spec is explicit that the UI must never have to guess.
+      range: applied === 'requested'
+        ? { ...rangeMeta(win), applied }
+        : { from: null, to: null, days: null, timezone: win.tz, applied },
       data: sliced.items, offset: sliced.offset, limit: sliced.limit,
       total: sliced.total, hasMore: sliced.hasMore,
     }

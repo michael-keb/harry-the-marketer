@@ -351,7 +351,7 @@ export function parseBlockEntries(input, field = 'domain_block_list') {
 // Blocking your own sending domain breaks reply handling, so the preview says
 // so before the write route refuses it. Same query as utilities.js runs.
 function ownSendingIdentities(wsId) {
-  const rows = db.prepare('SELECT email FROM mailboxes WHERE user_id = ?').all(wsId)
+  const rows = db.prepare('SELECT email FROM mailboxes WHERE user_id = ? AND deleted_at IS NULL').all(wsId)
   const addresses = new Set()
   const domains = new Set()
   for (const row of rows) {

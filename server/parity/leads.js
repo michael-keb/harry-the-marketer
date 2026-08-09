@@ -28,6 +28,12 @@ import { blockMatch } from '../suppression.js'
 import { leadStages, STAGES } from '../stages.js'
 import { discardStaleDraft } from '../drafts.js'
 import { CORE_INTENTS } from '../ai.js'
+import { parsePlaybook } from '../playbook.js'
+// The step-numbering walk and the test-send exclusion are imported, never
+// re-derived: "step 2" and "what counts as a send" have to mean the same thing
+// in this export as they do in the campaign one, or the two files disagree
+// about the same lead.
+import { sendSequence, NOT_TEST } from './campaigns.js'
 import {
   HttpError, invalid, forbidden, handler,
   str, int, oneOf, email as emailField, isoDate, page, paged,
@@ -123,10 +129,12 @@ const PERSON_SELECT = `
          COALESCE(cl.paused_at, '') AS e_paused_at, cl.category_id AS e_category_id,
          COALESCE(cl.unsubscribed_at, '') AS e_unsubscribed_at,
          cl.updated_at AS e_updated_at,
-         c.name AS e_campaign_name, c.status AS e_campaign_status
+         c.name AS e_campaign_name, c.status AS e_campaign_status,
+         lc.name AS e_category_name
     FROM leads l
     LEFT JOIN campaign_leads cl ON cl.lead_id = l.id
-    LEFT JOIN campaigns c ON c.id = cl.campaign_id AND c.user_id = l.user_id`
+    LEFT JOIN campaigns c ON c.id = cl.campaign_id AND c.user_id = l.user_id
+    LEFT JOIN lead_categories lc ON lc.id = cl.category_id AND lc.workspace_id = l.user_id`
 
 function foldPerson(rows) {
   if (!rows.length) return null
@@ -145,6 +153,12 @@ function foldPerson(rows) {
       intent: row.e_intent || '',
       outcome: row.e_outcome || '',
       categoryId: row.e_category_id || null,
+      // Both specs ask the enrolment to carry "the label applied in that
+      // campaign", not just its id — the lookup exists so a colleague can be
+      // answered in one call, and a bare id means a second one.
+      category: row.e_category_id
+        ? { id: row.e_category_id, name: row.e_category_name || '', sentiment: SENTIMENT[String(row.e_category_name || '').toLowerCase()] || 'neutral' }
+        : null,
       pausedAt: row.e_paused_at || '',
       unsubscribedAt: row.e_unsubscribed_at || '',
       updatedAt: row.e_updated_at,
@@ -260,11 +274,82 @@ function csvRow(cells) {
   return `${cells.map(csvCell).join(',')}\r\n`
 }
 
+// `website` is the company URL: `company_url` and `website` are two documented
+// spellings of one column (see `either('website', 'company_url', …)` in
+// server/parity/campaigns.js), so this file carries it once under Harry's own
+// name rather than twice under both.
+//
+// The last four are Docs/leads/export.md §2's engagement criterion. Appended
+// rather than interleaved so every existing column keeps its position for a
+// consumer that maps by index; the header still changed, and that is the
+// breaking part.
 const EXPORT_COLUMNS = [
   'id', 'email', 'firstName', 'lastName', 'company', 'title', 'phone', 'website',
   'linkedin', 'location', 'status', 'stage', 'campaigns', 'customFields',
   'unsubscribedAt', 'createdAt',
+  'lastStepSent', 'openCount', 'clickCount', 'replyCount',
 ]
+
+// Per-lead engagement for the workspace-wide export.
+//
+// The campaign export can read one campaign's aggregate; this one cannot, because
+// a person may sit in five campaigns and the file has one row for them. So the
+// counts are every real send and every reply across the workspace, and the last
+// step sent is the position of the node the most recent outbound email came
+// from, numbered inside whichever campaign that email belonged to.
+//
+// One query per page of leads rather than one per lead, so the export stays a
+// stream. `graphs` is a cache across pages: a workspace has tens of campaigns
+// and tens of thousands of leads, and parsing the same diagram once per lead is
+// the difference between an export and a hang.
+function engagementFor(wsId, leadIds, graphs) {
+  const ids = JSON.stringify(leadIds)
+  const counts = db.prepare(
+    `SELECT lead_id,
+            SUM(CASE WHEN COALESCE(opened_at,'') != '' THEN 1 ELSE 0 END) AS opens,
+            SUM(CASE WHEN COALESCE(clicked_at,'') != '' THEN 1 ELSE 0 END) AS clicks,
+            SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS replies
+       FROM messages
+      WHERE user_id = ? AND ${NOT_TEST} AND lead_id IN (SELECT value FROM json_each(?))
+      GROUP BY lead_id`
+  ).all(wsId, ids)
+
+  const lastSent = db.prepare(
+    `SELECT lead_id, campaign_id, node_id FROM messages
+      WHERE user_id = ? AND direction = 'out' AND ${NOT_TEST}
+        AND lead_id IN (SELECT value FROM json_each(?))
+        AND id IN (SELECT MAX(id) FROM messages
+                    WHERE user_id = ? AND direction = 'out' AND ${NOT_TEST}
+                      AND lead_id IN (SELECT value FROM json_each(?))
+                    GROUP BY lead_id)`
+  ).all(wsId, ids, wsId, ids)
+
+  const seqOfCampaign = (campaignId) => {
+    if (!campaignId) return null
+    if (!graphs.has(campaignId)) {
+      const c = db.prepare('SELECT mermaid FROM campaigns WHERE id = ?').get(campaignId)
+      graphs.set(campaignId, sendSequence(parsePlaybook(c?.mermaid || '')).seqOf)
+    }
+    return graphs.get(campaignId)
+  }
+
+  const out = new Map()
+  for (const row of counts) {
+    out.set(row.lead_id, { opens: row.opens || 0, clicks: row.clicks || 0, replies: row.replies || 0, step: '' })
+  }
+  for (const row of lastSent) {
+    const entry = out.get(row.lead_id) || { opens: 0, clicks: 0, replies: 0, step: '' }
+    // Same rule as the campaign export: a number while the node is still a Send
+    // step in that campaign's diagram, otherwise the node id, which is at least
+    // true about where the email came from.
+    const seq = seqOfCampaign(row.campaign_id)
+    entry.step = row.node_id ? (seq?.get(row.node_id) ?? row.node_id) : ''
+    out.set(row.lead_id, entry)
+  }
+  return out
+}
+
+const NO_ENGAGEMENT = { opens: 0, clicks: 0, replies: 0, step: '' }
 
 // ---- activities --------------------------------------------------------------
 
@@ -338,10 +423,16 @@ export function register(api) {
     // The list is a handful of rows, but it is still paged: the house rule is
     // that no list route can be made unbounded by adding rows to a table.
     const { limit, cursor } = page(req.query, { defaultLimit: 200, maxLimit: 500 })
+    // Docs/leads/categories.md TC-7. Sentiment is derived from the name rather
+    // than stored (see SENTIMENT above), so the filter is applied after shaping
+    // — filtering in SQL would mean a second copy of the mapping in a WHERE.
+    const sentiment = oneOf(req.query, 'sentiment', ['positive', 'negative', 'neutral'], { fallback: '' })
     const rows = db.prepare(
       `SELECT * FROM lead_categories WHERE workspace_id = ? AND id > ? ORDER BY sort, id LIMIT ?`
     ).all(req.wsId, cursor, limit + 1)
-    const out = paged(rows, limit)
+    const out = paged(sentiment
+      ? rows.filter((row) => (SENTIMENT[row.name.toLowerCase()] || 'neutral') === sentiment)
+      : rows, limit)
     const usage = new Map(
       db.prepare(
         `SELECT cl.category_id AS id, COUNT(*) n FROM campaign_leads cl
@@ -513,24 +604,29 @@ export function register(api) {
 
     let cursor = 0
     let rows = 0
+    const graphs = new Map()
     for (;;) {
       const batch = select.all(...args, cursor, EXPORT_BATCH)
       if (!batch.length) break
       cursor = batch[batch.length - 1].id
       // One extra query per batch, not one per lead.
+      const ids = JSON.stringify(batch.map((l) => l.id))
       const names = new Map()
-      for (const row of campaignsFor.all(req.wsId, JSON.stringify(batch.map((l) => l.id)))) {
+      for (const row of campaignsFor.all(req.wsId, ids)) {
         names.set(row.leadId, (names.get(row.leadId) || []).concat(row.name))
       }
+      const engagement = engagementFor(req.wsId, batch.map((l) => l.id), graphs)
       for (const lead of batch) {
         const derived = stages[lead.id] || 'not contacted'
         if (stage && derived !== stage) continue
+        const e = engagement.get(lead.id) || NO_ENGAGEMENT
         res.write(csvRow([
           lead.id, lead.email, lead.first_name, lead.last_name, lead.company, lead.title,
           lead.phone, lead.website, lead.linkedin, lead.location, lead.status, derived,
           (names.get(lead.id) || []).join('; '),
           JSON.stringify(parseObject(lead.custom_fields)),
           lead.unsubscribed_at || '', lead.created_at,
+          e.step, e.opens, e.clicks, e.replies,
         ]))
         rows++
       }
@@ -674,9 +770,29 @@ export function register(api) {
       changed.push('customFields')
     }
 
+    // "Nothing to change" and "nothing I could have changed" are different
+    // answers. A body naming no updatable field at all is a malformed request
+    // and 422s naming the body. A body that names real fields whose values are
+    // already what was sent is a no-op: Docs/leads/update.md TC-6 asks for "200
+    // with no change recorded and no activity trail entry", because the form
+    // re-submits every field and a user who edits nothing has not erred.
+    //
+    // The distinction matters beyond the status code — a no-op must not reach
+    // the write below, which drops the lead's pending drafts. Treating an
+    // unchanged save as a change would discard a queued email for nothing.
     if (!sets.length) {
-      // Naming the offending field is the house rule; here the whole body is it.
-      throw invalid('fields', 'no updatable fields were supplied')
+      const named = TEXT_FIELDS.some(([camel, column]) => has(camel) || has(column))
+        || has('email') || has('customFields') || has('custom_fields')
+      if (!named) throw invalid('fields', 'no updatable fields were supplied')
+      return {
+        ok: true,
+        data: shapeLead(lead),
+        changedFields: [],
+        changed: false,
+        draftsInvalidated: 0,
+        researchRefreshQueued: false,
+        customFields: parseObject(lead.custom_fields),
+      }
     }
 
     // The research profile describes a company. If the company or its website
@@ -713,6 +829,7 @@ export function register(api) {
       ok: true,
       data: shapeLead(result.row),
       changedFields: changed,
+      changed: true,
       draftsInvalidated: result.dropped,
       researchRefreshQueued: profileStale,
       customFields: mergedCustom ?? parseObject(result.row.custom_fields),

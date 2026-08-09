@@ -119,3 +119,76 @@ export function applySuppression(wsId, values, actor = '') {
   }
   return { stoppedLeads, declinedDrafts }
 }
+
+// ---- unsubscribe -------------------------------------------------------------
+
+// Honour an unsubscribe, everywhere it has to land.
+//
+// There were two implementations of this and they disagreed. The route a person
+// clicks in Settings wrote the timestamps, stopped the enrolments and declined
+// the queued drafts. The footer link in the email — the one a *recipient*
+// clicks, which is the one that legally matters — set `leads.status` and
+// nothing else. So an unsubscribe from the outside world left
+// `campaign_leads.unsubscribed_at` empty, which is the column Reports counts,
+// and the campaign went on reporting zero unsubscribes while a draft to that
+// person sat waiting for approval.
+//
+// One function now, called by both, because the failure mode here is two
+// implementations drifting rather than either one being hard to write.
+export function unsubscribeLead(wsId, leadId, { source = 'link', actor = '' } = {}) {
+  const at = new Date().toISOString()
+
+  // Read before the update: the address is what the block-list row is keyed on,
+  // and it is the only part of this that has to outlive the row it came from.
+  const lead = db.prepare('SELECT email FROM leads WHERE id = ? AND user_id = ?').get(leadId, wsId)
+  const address = String(lead?.email || '').trim().toLowerCase()
+
+  db.prepare(
+    `UPDATE leads SET status = 'unsubscribed', unsubscribed_at = ?, unsubscribed_source = ?,
+       updated_at = datetime('now') WHERE id = ? AND user_id = ?`
+  ).run(at, source, leadId, wsId)
+
+  // The opt-out is written to the workspace block list as well as to the person.
+  //
+  // Without this row the suppression lived only on the `leads` row, and
+  // `leads` cascades: deleting the person took `campaign_leads`,
+  // `lead_list_leads` and every other trace with it. So a recipient who clicked
+  // the footer link, was later deleted in a tidy-up, and appeared again in next
+  // month's CSV came back as a brand-new active lead — the importer had nothing
+  // left to match on — and the engine emailed them. Docs/leads/delete.md is
+  // explicit about the rule this restores: "the suppression entry survives the
+  // deletion, so re-importing that address is still refused."
+  //
+  // `POST /api/leads/:id/unsubscribe` already did this; the recipient-facing
+  // path and the campaign-scoped route, which both come through here, did not.
+  let suppressed = 0
+  if (address) {
+    suppressed = db.prepare(
+      `INSERT OR IGNORE INTO blocked_domains (workspace_id, value, is_domain, source, created_by)
+       VALUES (?, ?, 0, 'unsubscribe', ?)`
+    ).run(wsId, address, actor || 'recipient').changes
+  }
+
+  // Every campaign, not just the one whose email they clicked. Opting out of
+  // one is opting out of all of them — anything else is a loophole.
+  const stopped = db.prepare(
+    `UPDATE campaign_leads SET state = 'stopped', outcome = 'unsubscribed', unsubscribed_at = ?,
+       unsubscribed_by = ?, unsubscribed_source = ?, wait_until = '', updated_at = datetime('now')
+     WHERE lead_id = ? AND campaign_id IN (SELECT id FROM campaigns WHERE user_id = ?)
+       AND COALESCE(unsubscribed_at, '') = ''`
+  ).run(at, actor || 'recipient', source, leadId, wsId).changes
+
+  // A pending draft is an email that has not been sent yet, which makes it the
+  // one thing still stoppable at this point.
+  const declined = db.prepare(
+    `UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now')
+     WHERE user_id = ? AND lead_id = ? AND status IN ('pending','approved')`
+  ).run(actor || 'unsubscribed', wsId, leadId).changes
+
+  const cancelled = db.prepare(
+    `UPDATE messages SET send_status = 'cancelled'
+     WHERE user_id = ? AND lead_id = ? AND direction = 'out' AND send_status IN ('queued','scheduled')`
+  ).run(wsId, leadId).changes
+
+  return { at, stopped, declined, cancelled, suppressed }
+}

@@ -68,17 +68,31 @@ Ready in this repo:
 - [x] Homepage explaining what the app does, at the domain that will be verified
 - [x] No human reads mailbox content; stated in the policy and true in the code
 
-Not ready, and only the account owner can do these:
+Ready on our side (confirmed 2026-08-10):
 
-- [ ] Deploy is live at `https://harrythemarketer.com` (in progress — see the
-      Render section of the reply this pack came with)
-- [ ] Consent screen still branded **`ReqOps Leadgen`** → rename to
-      **Harry The Marketer**. Reviewers reject a mismatch between the consent
-      screen, the homepage and the privacy policy
-- [ ] Domain verified in Google Search Console for `harrythemarketer.com`
-- [ ] Authorized domain + redirect URI updated for production
-- [ ] Demo video recorded and uploaded unlisted to YouTube
-- [ ] Submitted
+- [x] Deploy is live at `https://harrythemarketer.com` — `/privacy`, `/terms`,
+      `/api/health` return 200; Render `APP_URL=https://harrythemarketer.com`
+- [x] GoDaddy DNS for `harrythemarketer.com` — apex → Render; Search Console
+      TXT live (`google-site-verification=SNMChkRk…`)
+- [x] Consent screen branding — app name **Harry The Marketer**, home/privacy/
+      terms on `harrythemarketer.com`, authorised domain `harrythemarketer.com`,
+      support email `michael@praxis-au.com`
+- [x] Domain verified in Google Search Console for `harrythemarketer.com`
+- [x] OAuth Web client `975026656566-…` has production redirect
+      `https://harrythemarketer.com/api/google/callback` (+ localhost for dev)
+- [x] Render production `GOOGLE_CLIENT_ID` / `SECRET` pointed at that same
+      client (was `346879…`; reconnect any Gmail linked under the old client)
+
+Still to do (owner):
+
+- [ ] Demo video recorded and uploaded unlisted to YouTube (shot list §3.5 —
+      use **Connections → Email → Connect Gmail**, not Mailboxes)
+- [ ] Submit for verification in Google Auth Platform (+ CASA if keeping
+      `gmail.readonly`)
+- [ ] After Google approves: Audience → **In production**, then set
+      `GOOGLE_OAUTH_VERIFIED=1` on Render
+- [ ] Until then: keep Publishing **Testing** and add every Connect-Gmail
+      address under Audience → Test users
 
 ---
 
@@ -89,8 +103,8 @@ Not ready, and only the account owner can do these:
 | Field | Value |
 |---|---|
 | App name | `Harry The Marketer` |
-| User support email | `support@harrythemarketer.com` |
-| App logo | Optional — **omit it**. A logo triggers a separate brand review and adds weeks for no benefit |
+| User support email | `michael@praxis-au.com` (live) — `support@harrythemarketer.com` also fine |
+| App logo | Optional — **omit it** before submit. A logo triggers a separate brand review; remove if you uploaded one only for Testing |
 | Application home page | `https://harrythemarketer.com` |
 | Privacy policy | `https://harrythemarketer.com/privacy` |
 | Terms of service | `https://harrythemarketer.com/terms` |
@@ -167,7 +181,7 @@ Unlisted YouTube, no narration required, but every item below must be visible on
 screen. Reviewers reject videos that skip the consent screen or the address bar.
 
 1. Start on `https://harrythemarketer.com` — show the homepage and the app name.
-2. Sign in, go to **Mailboxes → Connect Gmail**.
+2. Sign in, go to **Connections → Email → Connect Gmail**.
 3. **Hold on the Google consent screen for several seconds.** It must clearly
    show the app name *Harry The Marketer* and every scope being requested. Keep
    the browser address bar visible — the OAuth client ID in the URL is what
@@ -193,17 +207,19 @@ the submission notes.
 
 ## 4. Order of operations
 
-1. Deploy to `https://harrythemarketer.com` and confirm `/privacy` and `/terms`
+1. [x] Deploy to `https://harrythemarketer.com` and confirm `/privacy` and `/terms`
    return 200 on the public internet.
-2. Rename the consent screen to **Harry The Marketer**.
-3. Verify the domain in Search Console.
-4. Add the production redirect URI and authorized domain.
+2. [x] Rename the consent screen to **Harry The Marketer**.
+3. [x] Verify the domain in Search Console.
+4. [x] Add the production redirect URI and authorized domain; align Render
+   `GOOGLE_*` with that client.
 5. Decide path A, B or C from section 1. If A, stop here and keep managing test
    users.
-6. Record the demo video.
-7. Submit, and expect questions rather than a straight approval.
-8. If restricted-scope verification proceeds, begin the CASA assessment — it runs
-   in parallel and is usually the long pole.
+6. [ ] Record the demo video.
+7. [ ] Submit, and expect questions rather than a straight approval.
+8. [ ] If restricted-scope verification proceeds, begin the CASA assessment — it
+   runs in parallel and is usually the long pole.
+9. [ ] After approval: Publishing → In production + `GOOGLE_OAUTH_VERIFIED=1`.
 
 ---
 
