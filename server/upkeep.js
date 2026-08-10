@@ -26,6 +26,7 @@ import { db, logEvent } from './db.js'
 import { recordTelemetry } from './telemetry.js'
 import { notify } from './alerts.js'
 import { gmailRecentInbound } from './google.js'
+import { dailyBackup } from './backup.js'
 import { outlookRecentInbound } from './microsoft.js'
 import { sendEmail, SuppressedError } from './mailer.js'
 import { canSendNow } from './pacing.js'
@@ -630,6 +631,7 @@ export async function runUpkeep() {
     job('reminders', fireDueReminders),
     job('overdue_tasks', announceOverdueTasks),
     job('warmup', adjustWarmup),
+    job('daily_backup', dailyBackup),
     job('untracked_replies', pullUnmatched),
     // Placement tests: open the runs that have come due, then send the seeds
     // that are waiting. Both claim their work with a conditional UPDATE and

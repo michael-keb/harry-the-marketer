@@ -80,18 +80,19 @@ services:
       - key: OPENAI_MODEL
         sync: false
 
-      # Stripe Payment Links — set in Render dashboard when live keys are ready.
+      # Stripe: the two secrets stay dashboard-only; the Payment Links are
+      # public URLs (test mode until live keys land) and can live here.
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
       - key: STRIPE_PAYMENT_LINK_STARTER
-        sync: false
+        value: https://buy.stripe.com/test_28E6oH4gsdiygFjcAub7y04
       - key: STRIPE_PAYMENT_LINK_GROWTH
-        sync: false
+        value: https://buy.stripe.com/test_3cI6oH5kwguK4WBgQKb7y05
       - key: STRIPE_PAYMENT_LINK_SCALE
         sync: false
 
-      # Set to "1" after Auth0, legal, and disk env are confirmed — refuses unsafe boot.
+      # Auth0, legal, and disk env are confirmed live — refuse any unsafe boot.
       - key: PRODUCTION_STRICT
-        sync: false
+        value: "1"

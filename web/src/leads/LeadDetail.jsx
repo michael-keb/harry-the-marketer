@@ -215,6 +215,8 @@ function Details({ lead, enrolments, onSaved, onUnsubscribed }) {
         </form>
       </Panel>
 
+      <SmsConsent lead={lead} onChanged={onSaved} />
+
       <Panel title="Campaigns" hint="Every enrolment this person has, across the workspace.">
         {enrolments.length === 0 ? (
           <p className="text-sm text-slate-500">Not attached to a campaign yet.</p>
@@ -282,6 +284,73 @@ function Details({ lead, enrolments, onSaved, onUnsubscribed }) {
         />
       )}
     </div>
+  )
+}
+
+// SMS consent — Docs/SMS/implementation-plan.md B2. The send path already
+// refuses `no_opt_in`; this is the missing way to record that consent exists.
+// Recording it is an assertion about a real-world fact (they ticked a form,
+// they texted in, they said yes on a call), so the control asks where the
+// consent came from rather than being a bare toggle.
+function SmsConsent({ lead, onChanged }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+  const [source, setSource] = useState('manual')
+  const [phone, setPhone] = useState(lead.phone || '')
+
+  const optedIn = Boolean(lead.smsOptInAt) && !lead.smsOptOutAt
+
+  return (
+    <Panel
+      title="SMS consent"
+      hint="SMS sends are refused without a recorded opt-in. Record one only when the person actually gave it."
+    >
+      {lead.smsOptOutAt ? (
+        <p className="text-sm text-slate-600">
+          Opted out of SMS on {when(lead.smsOptOutAt)}. An opt-out is theirs to reverse, not ours — a new opt-in must come
+          from the person (for example, texting START).
+        </p>
+      ) : optedIn ? (
+        <p className="text-sm text-slate-600">
+          Opted in on {when(lead.smsOptInAt)}
+          {lead.smsOptInSource ? ` (${lead.smsOptInSource})` : ''}{lead.phone ? ` — ${lead.phone}` : ''}.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-sm text-slate-500">No SMS opt-in recorded — SMS steps will skip this person.</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Mobile number" htmlFor="sms-phone" hint="International format, e.g. +614xxxxxxxx">
+              <input id="sms-phone" className="input" value={phone} onChange={(e) => setPhone(e.target.value)} />
+            </Field>
+            <Field label="How they opted in" htmlFor="sms-source">
+              <select id="sms-source" className="input" value={source} onChange={(e) => setSource(e.target.value)}>
+                <option value="manual">They told us directly</option>
+                <option value="form">Web form</option>
+                <option value="keyword">Texted a keyword</option>
+                <option value="import">Consent came with the import</option>
+              </select>
+            </Field>
+          </div>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={busy || !phone.trim()}
+              onClick={async () => {
+                setBusy(true)
+                try {
+                  const res = await api.post(`/api/leads/${lead.id}/sms-opt-in`, { phone: phone.trim(), source })
+                  toast(`SMS opt-in recorded for ${res.phone}`)
+                  onChanged({ ...lead, phone: res.phone, smsOptInAt: res.smsOptInAt, smsOptInSource: source, smsOptOutAt: '' })
+                } catch (err) { toast(err.message, 'error') } finally { setBusy(false) }
+              }}
+            >
+              {busy ? 'Recording…' : 'Record opt-in'}
+            </button>
+          </div>
+        </div>
+      )}
+    </Panel>
   )
 }
 
