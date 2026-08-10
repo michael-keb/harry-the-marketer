@@ -742,6 +742,29 @@ async function enterNode(ctx, cl, nodeId) {
 // of the "unclassified" query the tick runs, and stamping `intent_set_by`
 // records that a human owns this value — see `processWaiting`.
 export async function routeReply(ctx, cl, intent, message, { setBy = '' } = {}) {
+  // The classifier may read a reply as an unsubscribe; it may never act on
+  // that reading. Acting means suppression — irreversible for the lead's own
+  // footer click and heavy even when reversible — and the classifier has been
+  // wrong about exactly this: a quoted footer under "ok thanks" read as an
+  // opt-out. So the machine parks the lead with its reading attached, and
+  // opting out remains what it always should have been: the recipient's own
+  // click, or a person confirming what the reply actually says.
+  if (intent === 'unsubscribe' && !setBy) {
+    if (message) db.prepare('UPDATE messages SET intent = ? WHERE id = ?').run(intent, message.id)
+    setLead(cl, { intent, state: 'needs_attention' })
+    logEvent(ctx.user.id, {
+      campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'needs_attention',
+      detail: 'reply reads like an unsubscribe — confirm it to opt them out, nothing sends meanwhile',
+    })
+    const who = db.prepare('SELECT * FROM leads WHERE id = ?').get(cl.lead_id)
+    notify(ctx.user.id, {
+      title: 'Possible unsubscribe — your call',
+      text: `A reply from ${[who?.first_name, who?.last_name].filter(Boolean).join(' ') || who?.email || 'a lead'} reads like an unsubscribe. Confirm it to opt them out, or reclassify it — no email goes out while they wait.`,
+      link: '/app/inbox',
+    })
+    return true
+  }
+
   const out = ctx.graph.edges.filter((e) => e.from === cl.node_id)
   const exact = out.find((e) => e.cond.kind === 'reply' && e.cond.intent === intent)
   const catchAll = out.find((e) => e.cond.kind === 'reply' && e.cond.intent === null)

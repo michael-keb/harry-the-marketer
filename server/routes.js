@@ -1022,7 +1022,9 @@ api.post('/inbox/:messageId/reclassify', async (req, res) => {
     if (ctx?.graph?.valid) {
       db.prepare("UPDATE campaign_leads SET state = 'waiting' WHERE id = ?").run(cl.id)
       cl.state = 'waiting'
-      await routeReply(ctx, cl, intent, null)
+      // A person chose this intent — say so, or an unsubscribe they confirmed
+      // would be parked as if the classifier had guessed it.
+      await routeReply(ctx, cl, intent, null, { setBy: req.user?.email || 'user' })
     }
   }
   logEvent(req.wsId, { campaignId: msg.campaign_id, leadId: msg.lead_id, type: 'reclassified', detail: intent })

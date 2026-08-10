@@ -70,12 +70,15 @@ test('catch-all reply edge finishes the lead as won', async () => {
   assert.equal(cl(1).outcome, 'won')
 })
 
-test('unsubscribe reply finishes lead and marks it unsubscribed', async () => {
+test('unsubscribe reply parks the lead for a person — the machine never opts out', async () => {
+  // The classifier's reading of "unsubscribe" no longer acts on its own: it
+  // once misread a quoted footer and opted a real lead out. The lead parks
+  // with the reading attached; the opt-out needs a person (or the footer link).
   simulateReply({ user, campaignLead: cl(2), text: 'Please unsubscribe me from this list.' })
   await tick()
-  assert.equal(cl(2).state, 'finished')
-  assert.equal(cl(2).outcome, 'unsubscribed')
-  assert.equal(db.prepare('SELECT status FROM leads WHERE id = 2').get().status, 'unsubscribed')
+  assert.equal(cl(2).state, 'needs_attention')
+  assert.equal(cl(2).intent, 'unsubscribe')
+  assert.equal(db.prepare('SELECT status FROM leads WHERE id = 2').get().status, 'active')
 })
 
 test('no-reply timeout follows the 3d edge to the follow-up', async () => {

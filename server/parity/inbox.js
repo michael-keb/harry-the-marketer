@@ -1440,7 +1440,9 @@ export function register(api) {
     if (intent && ctx?.graph?.valid && ['waiting', 'needs_attention'].includes(cl.state)) {
       db.prepare("UPDATE campaign_leads SET state = 'waiting' WHERE id = ?").run(cl.id)
       const fresh = db.prepare('SELECT * FROM campaign_leads WHERE id = ?').get(cl.id)
-      await routeReply(ctx, fresh, intent, null)
+      // A person chose this intent — say so, or an unsubscribe they confirmed
+      // would be parked as if the classifier had guessed it.
+      await routeReply(ctx, fresh, intent, null, { setBy: req.user.email })
       routed = true
     }
     audit(req, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'intent_corrected', detail: `${previous || '(none)'} -> ${intent || '(cleared)'} by ${req.user.email}` })
