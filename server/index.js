@@ -60,18 +60,27 @@ app.get('/api/probe', (req, res) => {
   const token = process.env.PROBE_TOKEN
   if (!token || req.query.token !== token) return res.status(404).json({ error: 'Unknown endpoint' })
   const kv = (k) => db.prepare('SELECT value FROM kv WHERE key = ?').get(k)?.value || null
+  const one = (sql) => { try { return db.prepare(sql).get() } catch (e) { return { err: String(e.message || e) } } }
   res.json({
     engineLastTick: kv('engine_last_tick'),
     now: new Date().toISOString(),
+    counts: {
+      messages: one('SELECT COUNT(*) AS n FROM messages'),
+      inbound: one("SELECT COUNT(*) AS n FROM messages WHERE direction = 'in'"),
+      outbound: one("SELECT COUNT(*) AS n FROM messages WHERE direction = 'out'"),
+      unmatched: one('SELECT COUNT(*) AS n FROM unmatched_messages'),
+      replyEvents: one("SELECT COUNT(*) AS n FROM events WHERE type = 'reply'"),
+    },
     campaigns: db.prepare('SELECT id, name, status, user_id, mailbox_id, parent_campaign_id FROM campaigns ORDER BY id DESC LIMIT 10').all(),
-    campaignLeads: db.prepare("SELECT id, campaign_id, lead_id, node_id, state, outcome, wait_until, error, updated_at FROM campaign_leads WHERE state NOT IN ('finished') ORDER BY id DESC LIMIT 20").all(),
-    mailboxes: db.prepare('SELECT id, email, provider, status, is_suspended, suspended_reason, last_error, sent_today, sent_today_date, next_send_at, deleted_at FROM mailboxes').all(),
+    campaignLeads: db.prepare('SELECT id, campaign_id, lead_id, node_id, state, outcome, thread_id, wait_until, error, updated_at FROM campaign_leads ORDER BY id DESC LIMIT 20').all(),
+    mailboxes: db.prepare('SELECT id, email, provider, status, is_suspended, suspended_reason, last_error, last_sync_at, sent_today, sent_today_date, next_send_at, deleted_at FROM mailboxes').all(),
     drafts: db.prepare("SELECT id, campaign_id, lead_id, node_id, status, subject, created_at FROM drafts WHERE status = 'pending' ORDER BY id DESC LIMIT 10").all(),
     leads: db.prepare('SELECT id, email, status FROM leads ORDER BY id DESC LIMIT 10').all(),
     users: db.prepare('SELECT id, email, paced, send_from, send_to, send_days, send_timezone, require_approval FROM users').all(),
     holds: db.prepare('SELECT id, scope, scope_id, reason, source, release_at, created_at FROM send_holds ORDER BY id DESC LIMIT 10').all(),
     events: db.prepare('SELECT id, user_id, campaign_id, lead_id, type, substr(detail,1,140) detail, created_at FROM events ORDER BY id DESC LIMIT 40').all(),
-    messages: db.prepare("SELECT id, campaign_id, lead_id, mailbox_id, direction, send_status, subject, created_at FROM messages ORDER BY id DESC LIMIT 10").all(),
+    messages: db.prepare("SELECT id, campaign_id, lead_id, mailbox_id, direction, send_status, substr(from_email,1,60) from_email, substr(to_email,1,60) to_email, substr(thread_id,1,40) thread_id, substr(provider_message_id,1,30) provider_message_id, substr(subject,1,80) subject, created_at FROM messages ORDER BY id DESC LIMIT 20").all(),
+    unmatched: db.prepare('SELECT id, mailbox_id, substr(from_email,1,60) from_email, substr(subject,1,80) subject, substr(thread_id,1,40) thread_id, substr(provider_message_id,1,30) provider_message_id, status, received_at FROM unmatched_messages ORDER BY id DESC LIMIT 20').all(),
   })
 })
 
