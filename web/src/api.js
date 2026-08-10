@@ -29,7 +29,7 @@ function withLens(url) {
   return url + (url.includes('?') ? '&' : '?') + `clientId=${encodeURIComponent(id)}`
 }
 
-async function request(method, url, body) {
+async function request(method, url, body, { signal } = {}) {
   let res
   if (method === 'GET') url = withLens(url)
   try {
@@ -37,8 +37,10 @@ async function request(method, url, body) {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
     })
-  } catch {
+  } catch (err) {
+    if (err?.name === 'AbortError') throw new ApiError('Request timed out — try again', 0)
     throw new ApiError('Cannot reach the server — is it running?', 0)
   }
   let payload = null
@@ -102,11 +104,11 @@ export async function stream(url, body, onLine, { signal } = {}) {
 }
 
 export const api = {
-  get: (url) => request('GET', url),
-  post: (url, body) => request('POST', url, body ?? {}),
-  put: (url, body) => request('PUT', url, body),
-  patch: (url, body) => request('PATCH', url, body ?? {}),
-  del: (url, body) => request('DELETE', url, body),
+  get: (url, opts) => request('GET', url, undefined, opts),
+  post: (url, body, opts) => request('POST', url, body ?? {}, opts),
+  put: (url, body, opts) => request('PUT', url, body, opts),
+  patch: (url, body, opts) => request('PATCH', url, body ?? {}, opts),
+  del: (url, body, opts) => request('DELETE', url, body, opts),
   stream,
 }
 

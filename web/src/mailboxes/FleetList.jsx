@@ -176,8 +176,10 @@ export default function FleetList({ onMeta, onAdd }) {
 
   const syncReplies = async (row) => {
     setSyncingId(row.id)
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 60_000)
     try {
-      const res = await api.post(`/api/mailboxes/${row.id}/sync-inbound`)
+      const res = await api.post(`/api/mailboxes/${row.id}/sync-inbound`, {}, { signal: ctrl.signal })
       const msg = res.scanned
         ? `${row.fromEmail}: scanned ${res.scanned} message(s) — ${res.attached} attached, ${res.untracked} untracked`
         : `${row.fromEmail}: no recent inbound messages found`
@@ -187,6 +189,7 @@ export default function FleetList({ onMeta, onAdd }) {
     } catch (err) {
       toast(err.message, 'error')
     } finally {
+      clearTimeout(timer)
       setSyncingId(null)
     }
   }

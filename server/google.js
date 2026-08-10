@@ -38,6 +38,7 @@ export async function freshAccessToken(mailbox) {
       refresh_token: mailbox.refresh_token,
       grant_type: 'refresh_token',
     }),
+    signal: AbortSignal.timeout(15_000),
   })
   if (!res.ok) {
     const detail = await res.text()
@@ -190,6 +191,21 @@ export async function gmailThread(mailbox, threadId) {
 // Deliberately bounded: a window in days and a hard cap on messages, so a
 // mailbox with ten years of history costs the same as a fresh one. The list
 // call is cheap; only the capped detail fetches are not.
+async function mapPool(items, concurrency, fn) {
+  const out = new Array(items.length)
+  let next = 0
+  async function worker() {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i], i)
+    }
+  }
+  const n = Math.max(1, Math.min(concurrency, items.length))
+  await Promise.all(Array.from({ length: n }, () => worker()))
+  return out
+}
+
 export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
   // Include spam — a mis-filtered reply is still a reply. Curly-brace OR is the
   // Gmail-search form; `(in:inbox OR in:spam)` is rejected by the API.
@@ -200,15 +216,15 @@ export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } =
   const ids = (list.messages || []).map((m) => m.id)
   if (!ids.length) return []
 
-  const out = []
-  for (const id of ids) {
-    // One failed message must not lose the other twenty-four.
+  // Full fetches in parallel — sequential was hanging Sync replies for minutes
+  // on a busy inbox (and stacking with the Inbox 10s poll).
+  const rows = await mapPool(ids, 5, async (id) => {
     try {
       const msg = await gmailFetch(mailbox, `messages/${id}?format=full`)
       const from = header(msg, 'From')
       const fromEmail = (from.match(/<([^>]+)>/) || [null, from.trim()])[1].toLowerCase()
-      if (fromEmail === mailbox.email.toLowerCase()) continue
-      out.push({
+      if (fromEmail === mailbox.email.toLowerCase()) return null
+      return {
         providerMessageId: msg.id,
         threadId: msg.threadId || '',
         messageIdHeader: header(msg, 'Message-ID'),
@@ -217,10 +233,12 @@ export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } =
         subject: header(msg, 'Subject'),
         body: decodePart(msg.payload) || msg.snippet || '',
         receivedAt: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : '',
-      })
-    } catch { /* skip this message, keep the rest */ }
-  }
-  return out
+      }
+    } catch {
+      return null
+    }
+  })
+  return rows.filter(Boolean)
 }
 
 // ---- OAuth routes -----------------------------------------------------------
