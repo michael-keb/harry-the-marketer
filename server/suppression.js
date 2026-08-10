@@ -11,7 +11,7 @@
 // `ignore_unsubscribe_list` and `ignore_global_block_list` are not offered, and
 // a request carrying one is refused rather than ignored.
 
-import { db } from './db.js'
+import { db, logEvent } from './db.js'
 
 const SOURCES = { manual: 'Added by you', bounced: 'Bounced', unsubscribed: 'Unsubscribed' }
 
@@ -191,4 +191,50 @@ export function unsubscribeLead(wsId, leadId, { source = 'link', actor = '' } = 
   ).run(wsId, leadId).changes
 
   return { at, stopped, declined, cancelled, suppressed }
+}
+
+// Reverse an opt-out the machine inferred — and only one the machine inferred.
+//
+// The classifier reads replies, and a classifier can be wrong: a lead who wrote
+// "ok thanks" above a quoted email containing the unsubscribe footer was opted
+// out, block-listed and stopped, with nothing anywhere in Harry able to undo
+// it. That irreversibility is right for a person's own click on the footer link
+// (`source = 'link'`) — an opt-out someone chose is not a thing software argues
+// with — but wrong for `source = 'reply'`, where "the lead unsubscribed" was
+// only ever the machine's reading of their words. A human who has read the
+// reply outranks that reading, exactly as they do for intent.
+//
+// The reversal is deliberately minimal: the person becomes contactable and the
+// auto-added block-list row is removed (a manually added row stays — someone
+// chose that). Stopped enrolments stay stopped and the trail stays written;
+// re-enrolling is the campaign's own add-leads button, a decision with its own
+// history.
+export function reactivateLead(wsId, leadId, { actor = '' } = {}) {
+  const lead = db.prepare('SELECT * FROM leads WHERE id = ? AND user_id = ?').get(leadId, wsId)
+  if (!lead) return { ok: false, reason: 'not_found', message: 'Lead not found' }
+  const optedOut = lead.status === 'unsubscribed' || String(lead.unsubscribed_at || '') !== ''
+  if (!optedOut) return { ok: true, changed: 0, unblocked: 0 }
+  if (lead.unsubscribed_source === 'link') {
+    return {
+      ok: false,
+      reason: 'link_optout',
+      message: `${lead.email} unsubscribed themselves via the email footer — that decision was theirs and cannot be reversed here`,
+    }
+  }
+  db.prepare(
+    `UPDATE leads SET status = 'active', unsubscribed_at = '', unsubscribed_source = '',
+       updated_at = datetime('now') WHERE id = ?`
+  ).run(lead.id)
+  const address = String(lead.email || '').trim().toLowerCase()
+  const unblocked = address
+    ? db.prepare(
+        `DELETE FROM blocked_domains WHERE workspace_id = ? AND is_domain = 0
+           AND lower(trim(value)) = ? AND source = 'unsubscribe'`
+      ).run(wsId, address).changes
+    : 0
+  logEvent(wsId, {
+    leadId: lead.id, type: 'resubscribed',
+    detail: `${lead.email} reactivated by ${actor || 'a person'} — the unsubscribe was machine-inferred (${lead.unsubscribed_source || 'reply'}), not their own click`,
+  })
+  return { ok: true, changed: 1, unblocked }
 }

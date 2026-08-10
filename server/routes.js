@@ -19,7 +19,7 @@ import { resolveSend, sendingContext } from './gates.js'
 import { registerSendControls } from './send-controls.js'
 import { registerParity } from './parity/index.js'
 import { REVIVE_MAILBOX_SQL } from './parity/schema.js'
-import { suppressionFor } from './suppression.js'
+import { suppressionFor, reactivateLead } from './suppression.js'
 
 // When may this mailbox send, and if not now, why and when? Shared by the
 // mailbox list, the campaign header and the approval queue so they never
@@ -100,6 +100,15 @@ api.put('/leads/:id', (req, res) => {
   if (!lead) return res.status(404).json({ error: 'Lead not found' })
   const { firstName, lastName, company, title, notes, status } = req.body || {}
   if (status && !['active', 'unsubscribed', 'bounced'].includes(status)) return res.status(400).json({ error: 'Invalid status' })
+  // Setting the status back to active is not just a column write: an
+  // unsubscribed lead also carries `unsubscribed_at` and a block-list row, and
+  // suppression reads those. reactivateLead reverses all of it — or refuses,
+  // when the opt-out was the person's own footer click rather than the
+  // classifier's reading of their reply.
+  if (status === 'active' && (lead.status === 'unsubscribed' || String(lead.unsubscribed_at || '') !== '')) {
+    const undo = reactivateLead(req.wsId, lead.id, { actor: req.user?.email || '' })
+    if (!undo.ok) return res.status(409).json({ error: undo.message })
+  }
   db.prepare(
     `UPDATE leads SET first_name = ?, last_name = ?, company = ?, title = ?, notes = ?, status = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(
