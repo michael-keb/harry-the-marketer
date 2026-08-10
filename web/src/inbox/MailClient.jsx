@@ -115,6 +115,30 @@ export default function MailClient() {
   const announce = useCallback((message) => setAnnouncement(message), [])
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
+  // Pull provider inboxes every 10s while this page is open, then refresh the
+  // list. Skips when the tab is hidden or a sync is already in flight so we
+  // don't pile up Gmail calls.
+  useEffect(() => {
+    let cancelled = false
+    let inFlight = false
+    const tick = async () => {
+      if (cancelled || inFlight) return
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      inFlight = true
+      try {
+        await api.post('/api/inbox/sync')
+        if (!cancelled) refresh()
+      } catch {
+        // Quiet — upkeep / next tick will try again; don't toast every 10s.
+      } finally {
+        inFlight = false
+      }
+    }
+    const id = setInterval(tick, 10_000)
+    tick()
+    return () => { cancelled = true; clearInterval(id) }
+  }, [refresh])
+
   const update = useCallback((patch) => {
     const nextFolder = patch.folder ?? folder
     const nextFilters = { ...(patch.filters ?? filters) }

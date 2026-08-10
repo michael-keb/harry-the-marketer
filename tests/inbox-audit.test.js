@@ -716,3 +716,17 @@ test('cancelling a reminder removes the row and records who did it', async () =>
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM events WHERE type = ?').get('reminder_cancelled').n, before + 1)
   assert.match(after.detail, /owner@example\.com/)
 })
+
+test('POST /api/inbox/sync is workspace-scoped and succeeds with no OAuth mailboxes', async () => {
+  const res = await client.post('/api/inbox/sync')
+  assert.equal(res.status, 200)
+  assert.equal(res.body.ok, true)
+  assert.equal(res.body.mailboxes, 0)
+  assert.equal(res.body.attached, 0)
+  assert.equal(res.body.untracked, 0)
+
+  // Another workspace must not see this call fail just because it has no senders.
+  const other = await strangerClient.post('/api/inbox/sync')
+  assert.equal(other.status, 200)
+  assert.equal(other.body.mailboxes, 0)
+})

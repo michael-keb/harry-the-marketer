@@ -64,6 +64,7 @@ import { db } from '../db.js'
 import { blockMatch, suppressionFor } from '../suppression.js'
 import { campaignCtx, routeReply } from '../engine.js'
 import { sendEmail } from '../mailer.js'
+import { pullWorkspaceInbound } from '../upkeep.js'
 import {
   HttpError, invalid, notFound, handler,
   str, int, bool, oneOf, idList, email as emailField,
@@ -806,6 +807,23 @@ const patchSummary = (patch) => Object.entries(patch).map(([k, v]) => `${k}=${v 
 // ------------------------------------------------------------------- routes --
 
 export function register(api) {
+  // ---- on-demand provider sync (Inbox polls this every ~10s) ---------------
+  // Pulls recent Gmail/Outlook replies into Harry now, instead of waiting for
+  // the engine upkeep pass. Scoped to the caller's workspace only.
+  api.post('/inbox/sync', handler(async (req) => {
+    const t0 = Date.now()
+    const result = await pullWorkspaceInbound(req.wsId)
+    meter('inbox.sync', Date.now() - t0, true,
+      `mailboxes=${result.mailboxes} attached=${result.attached} untracked=${result.untracked}`)
+    if (result.attached || result.untracked) {
+      audit(req, {
+        type: 'inbox_synced',
+        detail: `${result.mailboxes} mailbox(es) — scanned ${result.scanned}, attached ${result.attached}, untracked ${result.untracked}`,
+      })
+    }
+    return { ok: true, ...result }
+  }))
+
   // ---- the one list ---------------------------------------------------------
 
   api.get('/inbox/threads', handler(async (req) => {

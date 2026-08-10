@@ -531,6 +531,36 @@ export async function pullMailboxInbound(mailbox, opts = {}) {
   return syncMailboxInbound(mailbox, { withinDays: 7, max: 50, ...opts })
 }
 
+/** Pull recent inbound for every connected Gmail/Outlook mailbox in a workspace. */
+export async function pullWorkspaceInbound(wsId, opts = {}) {
+  const mailboxes = db.prepare(
+    `SELECT * FROM mailboxes
+      WHERE user_id = ?
+        AND deleted_at IS NULL
+        AND provider IN ('gmail','outlook')
+        AND status = 'connected'
+        AND is_suspended = 0
+        AND COALESCE(refresh_token,'') != ''`
+  ).all(wsId)
+  let scanned = 0
+  let attached = 0
+  let untracked = 0
+  const errors = []
+  for (const mb of mailboxes) {
+    try {
+      const result = await pullMailboxInbound(mb, opts)
+      scanned += result.scanned || 0
+      attached += result.attached || 0
+      untracked += result.untracked || 0
+    } catch (err) {
+      const detail = String(err?.message || err).slice(0, 300)
+      db.prepare('UPDATE mailboxes SET last_error = ? WHERE id = ?').run(detail, mb.id)
+      errors.push({ mailboxId: mb.id, email: mb.email, error: detail })
+    }
+  }
+  return { mailboxes: mailboxes.length, scanned, attached, untracked, errors }
+}
+
 async function pullUnmatched() {
   const mailboxes = db.prepare(
     "SELECT * FROM mailboxes WHERE deleted_at IS NULL AND provider IN ('gmail','outlook') AND status = 'connected' AND is_suspended = 0"
@@ -588,6 +618,7 @@ export const jobs = {
   adjustWarmup,
   pullUnmatched,
   pullMailboxInbound,
+  pullWorkspaceInbound,
   ingestRecentInbound,
   openDueRuns,
   dispatchSeedSends,
