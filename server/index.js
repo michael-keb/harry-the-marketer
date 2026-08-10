@@ -56,12 +56,12 @@ app.get('/api/health', (req, res) => {
 })
 
 // TEMPORARY diagnostics probe — guarded by PROBE_TOKEN env, removed after debugging.
-app.get('/api/probe', (req, res) => {
+app.get('/api/probe', async (req, res) => {
   const token = process.env.PROBE_TOKEN
   if (!token || req.query.token !== token) return res.status(404).json({ error: 'Unknown endpoint' })
   const kv = (k) => db.prepare('SELECT value FROM kv WHERE key = ?').get(k)?.value || null
   const one = (sql) => { try { return db.prepare(sql).get() } catch (e) { return { err: String(e.message || e) } } }
-  res.json({
+  const payload = {
     engineLastTick: kv('engine_last_tick'),
     now: new Date().toISOString(),
     counts: {
@@ -81,7 +81,37 @@ app.get('/api/probe', (req, res) => {
     events: db.prepare('SELECT id, user_id, campaign_id, lead_id, type, substr(detail,1,140) detail, created_at FROM events ORDER BY id DESC LIMIT 40').all(),
     messages: db.prepare("SELECT id, campaign_id, lead_id, mailbox_id, direction, send_status, substr(from_email,1,60) from_email, substr(to_email,1,60) to_email, substr(thread_id,1,40) thread_id, substr(provider_message_id,1,30) provider_message_id, substr(subject,1,80) subject, created_at FROM messages ORDER BY id DESC LIMIT 20").all(),
     unmatched: db.prepare('SELECT id, mailbox_id, substr(from_email,1,60) from_email, substr(subject,1,80) subject, substr(thread_id,1,40) thread_id, substr(provider_message_id,1,30) provider_message_id, status, received_at FROM unmatched_messages ORDER BY id DESC LIMIT 20').all(),
-  })
+  }
+  // Optional live Gmail thread peek: ?thread=…&mailboxId=2
+  if (req.query.thread) {
+    try {
+      const { gmailThread } = await import('./google.js')
+      const mbId = Number(req.query.mailboxId) || 2
+      const mb = db.prepare('SELECT * FROM mailboxes WHERE id = ?').get(mbId)
+      if (!mb?.refresh_token) {
+        payload.gmailThread = { error: 'mailbox missing refresh token', mailboxId: mbId }
+      } else {
+        const remote = await gmailThread(mb, String(req.query.thread))
+        payload.gmailThread = {
+          mailbox: mb.email,
+          threadId: String(req.query.thread),
+          count: remote.length,
+          messages: remote.map((m) => ({
+            direction: m.direction,
+            from: m.fromEmail,
+            to: m.toEmail,
+            id: m.providerMessageId,
+            subject: String(m.subject || '').slice(0, 80),
+            body: String(m.body || '').slice(0, 120),
+            at: m.internalDate ? new Date(m.internalDate).toISOString() : '',
+          })),
+        }
+      }
+    } catch (err) {
+      payload.gmailThread = { error: String(err?.message || err).slice(0, 400) }
+    }
+  }
+  res.json(payload)
 })
 
 // Stripe webhook must read raw bytes — register before any JSON body parser.
