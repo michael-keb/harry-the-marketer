@@ -553,7 +553,9 @@ test('connecting Gmail never writes a row from the request body', async () => {
   } else {
     assert.equal(res.status, 200)
     assert.equal(res.body.next, 'consent')
-    assert.equal(res.body.consentUrl, '/api/google/connect')
+    // The consent URL may carry the address as a reconnect hint (?email=…);
+    // what matters is that it points into the OAuth flow and nothing else.
+    assert.ok(String(res.body.consentUrl).startsWith('/api/google/connect'))
   }
   assert.equal(db.prepare("SELECT COUNT(*) n FROM mailboxes WHERE email = 'new@example.com'").get().n, 0)
 

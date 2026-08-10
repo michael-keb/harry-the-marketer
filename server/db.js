@@ -335,7 +335,22 @@ export function resolveWorkspace(user) {
     return { wsId: user.id, role: 'owner', ownerEmail: user.email }
   }
   if (membership.status === 'invited') {
+    // An invite may claim a colleague joining fresh — never someone with a
+    // workspace of their own. Without this check, inviting any existing
+    // user's address silently moved their next session into the inviter's
+    // workspace: their own leads and campaigns vanished and they were
+    // operating — and sending — inside a stranger's data. A person who owns
+    // anything keeps their workspace; the invite stays pending.
+    const ownsData = db.prepare(
+      `SELECT EXISTS(SELECT 1 FROM campaigns WHERE user_id = @id)
+           OR EXISTS(SELECT 1 FROM leads WHERE user_id = @id)
+           OR EXISTS(SELECT 1 FROM mailboxes WHERE user_id = @id) AS owns`
+    ).get({ id: user.id }).owns
+    if (ownsData) return { wsId: user.id, role: 'owner', ownerEmail: user.email }
     db.prepare("UPDATE team_members SET status = 'active' WHERE id = ?").run(membership.id)
+  }
+  if (membership.status !== 'active' && membership.status !== 'invited') {
+    return { wsId: user.id, role: 'owner', ownerEmail: user.email }
   }
   const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(membership.owner_id)
   if (!owner) return { wsId: user.id, role: 'owner', ownerEmail: user.email }
@@ -382,6 +397,38 @@ for (const stmt of [
   "ALTER TABLE users ADD COLUMN billing_updated_at TEXT DEFAULT ''",
 ]) {
   try { db.exec(stmt) } catch { /* column already exists */ }
+}
+
+// Inbound dedupe belongs to the database, not to check-then-insert races: the
+// per-thread engine sync and the whole-inbox upkeep sweep both pull the same
+// Gmail message, and under their overlap a reply could land — and count —
+// twice. Existing duplicates are collapsed to the earliest row first, or the
+// unique index could never build on a database that already raced.
+// Inbound only: outbound rows may carry non-unique ids legitimately (two
+// forwards stamped in the same millisecond), and the race this index closes is
+// two sync paths pulling the same *inbound* Gmail message.
+try {
+  db.exec(`
+    DROP INDEX IF EXISTS idx_messages_provider_id;
+    DELETE FROM messages WHERE direction = 'in' AND COALESCE(provider_message_id, '') != ''
+      AND id NOT IN (
+        SELECT MIN(id) FROM messages
+        WHERE direction = 'in' AND COALESCE(provider_message_id, '') != ''
+        GROUP BY provider_message_id
+      );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_inbound_provider_id
+      ON messages(provider_message_id) WHERE direction = 'in' AND COALESCE(provider_message_id, '') != '';
+    DELETE FROM unmatched_messages WHERE COALESCE(provider_message_id, '') != ''
+      AND id NOT IN (
+        SELECT MIN(id) FROM unmatched_messages
+        WHERE COALESCE(provider_message_id, '') != ''
+        GROUP BY provider_message_id
+      );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_unmatched_provider_id
+      ON unmatched_messages(provider_message_id) WHERE COALESCE(provider_message_id, '') != '';
+  `)
+} catch (err) {
+  console.warn('[db] inbound dedupe indexes not created:', String(err.message || err))
 }
 
 // One-shot backfill of the touch ledger from everything already sent. Without

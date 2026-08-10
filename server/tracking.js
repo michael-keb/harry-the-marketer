@@ -166,25 +166,51 @@ trackingRouter.get('/t/c/:token', (req, res) => {
   res.redirect(302, url)
 })
 
+// The opt-out itself, shared by the POST form below and RFC 8058 one-click.
+function performUnsubscribe(token) {
+  const msg = messageByToken(token)
+  if (!msg?.lead_id) return
+  // The same function the Settings route calls. This path used to write
+  // `leads.status` and stop there, so Reports — which counts
+  // `campaign_leads.unsubscribed_at` — showed zero unsubscribes, and any
+  // draft already written for this person stayed in Needs your OK waiting to
+  // be approved and sent to someone who had just opted out.
+  const result = unsubscribeLead(msg.user_id, msg.lead_id, { source: 'link', actor: 'recipient' })
+  logEvent(msg.user_id, {
+    campaignId: msg.campaign_id, leadId: msg.lead_id, type: 'unsubscribed_link',
+    detail: `one-click unsubscribe — ${result.stopped} enrolment${result.stopped === 1 ? '' : 's'} stopped` +
+      `${result.declined ? `, ${result.declined} draft${result.declined === 1 ? '' : 's'} withdrawn` : ''}` +
+      `${result.cancelled ? `, ${result.cancelled} queued send${result.cancelled === 1 ? '' : 's'} cancelled` : ''}`,
+  })
+}
+
+const unsubscribedPage =
+  `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:80px auto;text-align:center;color:#222">` +
+  `<h2>You're unsubscribed</h2><p>You won't receive further emails from this sender.</p></body></html>`
+
+// GET shows a button; only POST opts out. The old GET-that-unsubscribes was a
+// trap: corporate link scanners (SafeLinks, Mimecast, Gmail's prefetch) fetch
+// every URL in a delivered email, and each fetch permanently opted the lead
+// out with `source: 'link'` — the one source nothing in Harry may reverse.
+// A machine follows GETs; only a person presses the button. Mail clients that
+// honour RFC 8058 one-click POST straight to the same URL and never see the
+// page.
 trackingRouter.get('/t/u/:token', (req, res) => {
   const msg = messageByToken(req.params.token)
-  if (msg?.lead_id) {
-    // The same function the Settings route calls. This path used to write
-    // `leads.status` and stop there, so Reports — which counts
-    // `campaign_leads.unsubscribed_at` — showed zero unsubscribes, and any
-    // draft already written for this person stayed in Needs your OK waiting to
-    // be approved and sent to someone who had just opted out.
-    const result = unsubscribeLead(msg.user_id, msg.lead_id, { source: 'link', actor: 'recipient' })
-    logEvent(msg.user_id, {
-      campaignId: msg.campaign_id, leadId: msg.lead_id, type: 'unsubscribed_link',
-      detail: `one-click unsubscribe — ${result.stopped} enrolment${result.stopped === 1 ? '' : 's'} stopped` +
-        `${result.declined ? `, ${result.declined} draft${result.declined === 1 ? '' : 's'} withdrawn` : ''}` +
-        `${result.cancelled ? `, ${result.cancelled} queued send${result.cancelled === 1 ? '' : 's'} cancelled` : ''}`,
-    })
-  }
   res.set('Content-Type', 'text/html')
+  if (!msg) return res.send(unsubscribedPage)
   res.send(
     `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:80px auto;text-align:center;color:#222">` +
-    `<h2>You're unsubscribed</h2><p>You won't receive further emails from this sender.</p></body></html>`
+    `<h2>Unsubscribe</h2><p>Stop receiving emails from this sender?</p>` +
+    `<form method="post" action="/t/u/${encodeURIComponent(req.params.token)}">` +
+    `<button type="submit" style="background:#1a4731;color:#fff;border:0;border-radius:6px;padding:12px 28px;font-size:16px;cursor:pointer">Unsubscribe</button>` +
+    `</form></body></html>`
   )
+})
+
+// RFC 8058 one-click (List-Unsubscribe-Post) and the page's own form.
+trackingRouter.post('/t/u/:token', (req, res) => {
+  performUnsubscribe(req.params.token)
+  res.set('Content-Type', 'text/html')
+  res.send(unsubscribedPage)
 })

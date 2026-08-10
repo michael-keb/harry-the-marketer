@@ -207,6 +207,16 @@ authRouter.get('/api/auth/callback', async (req, res) => {
       profile = await userRes.json()
     }
 
+    // upsertUser merges accounts by email address, so the email claim is an
+    // identity assertion, not decoration. An unverified claim from a second
+    // Auth0 connection (social login, a database connection without email
+    // verification) would let anyone who *types* victim@example.com land in
+    // the victim's workspace. A profile carrying an email must have proven it.
+    if (profile.email && profile.email_verified === false) {
+      console.warn('[auth] refused login with unverified email claim:', profile.email)
+      return res.redirect(`/login?error=${encodeURIComponent('Verify your email address first — check your inbox for the confirmation link')}`)
+    }
+
     const user = upsertUser({
       sub: profile.sub,
       email: profile.email || `${profile.sub}@no-email.auth0`,

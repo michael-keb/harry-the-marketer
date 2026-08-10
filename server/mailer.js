@@ -242,11 +242,11 @@ export async function syncInbound({ mailbox, user, campaign, lead, threadId }) {
   let added = 0
   for (const msg of remote) {
     if (msg.direction !== 'in' || known.has(msg.providerMessageId)) continue
-    db.prepare(
-      `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
+    const inserted = db.prepare(
+      `INSERT OR IGNORE INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
        VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
-    ).run(user.id, campaign.id, lead.id, mailbox.id, msg.subject, msg.body.slice(0, 20000), msg.fromEmail, msg.toEmail, msg.providerMessageId, threadId)
-    added++
+    ).run(user.id, campaign.id, lead.id, mailbox.id, msg.subject, msg.body.slice(0, 20000), msg.fromEmail, msg.toEmail, msg.providerMessageId, threadId).changes
+    added += inserted
   }
   if (added) {
     db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now') WHERE id = ?").run(mailbox.id)

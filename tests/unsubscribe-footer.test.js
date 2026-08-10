@@ -69,11 +69,23 @@ function recipient() {
   return { leadId, token, email }
 }
 
-const unsubscribe = (token) => fetch(`${base}/t/u/${token}`)
+// POST, as RFC 8058 one-click does and as the confirmation page's button does.
+// GET must never opt anyone out — corporate link scanners fetch every URL in a
+// delivered email, and each fetch used to be a permanent, irreversible opt-out.
+const unsubscribe = (token) => fetch(`${base}/t/u/${token}`, { method: 'POST' })
 const leadRow = (id) => db.prepare('SELECT * FROM leads WHERE id = ?').get(id)
 const links = (id) => db.prepare('SELECT * FROM campaign_leads WHERE lead_id = ? ORDER BY campaign_id').all(id)
 
 // ---- the defect ------------------------------------------------------------
+
+test('a GET on the unsubscribe link shows a page and opts nobody out', async () => {
+  const { leadId, token } = recipient()
+  const res = await fetch(`${base}/t/u/${token}`)
+  assert.equal(res.status, 200)
+  const html = await res.text()
+  assert.match(html, /<form method="post"/)
+  assert.equal(leadRow(leadId).status, 'active', 'a link scanner prefetch must not opt the person out')
+})
 
 test('the footer unsubscribe stamps the columns Reports actually counts', async () => {
   const { leadId, token } = recipient()

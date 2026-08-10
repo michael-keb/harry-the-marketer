@@ -85,6 +85,16 @@ function b64url(str) {
 // cannot be routed around by adding a fifth caller. `workspaceId` is required
 // precisely so that a caller who cannot say whose suppression list applies
 // fails loudly at the call site instead of quietly skipping the check.
+// MIME headers are ASCII-only (RFC 5322); anything else must ride in an RFC
+// 2047 encoded word. Without this, an em dash in a subject went to Gmail as
+// raw UTF-8 bytes, Gmail read them as latin-1, and the mojibake round-tripped
+// back through reply sync into every "Re:" that followed.
+export function encodeHeaderWord(value) {
+  const s = String(value || '')
+  if (!/[^\x20-\x7E]/.test(s)) return s
+  return `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`
+}
+
 export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body, html, threadId, inReplyTo, listUnsubscribe, workspaceId }) {
   const wsId = workspaceId ?? mailbox?.user_id
   if (!wsId) {
@@ -107,9 +117,9 @@ export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body,
   }
 
   const headers = [
-    `From: ${mailbox.display_name ? `${mailbox.display_name} <${mailbox.email}>` : mailbox.email}`,
+    `From: ${mailbox.display_name ? `${encodeHeaderWord(mailbox.display_name)} <${mailbox.email}>` : mailbox.email}`,
     `To: ${to}`,
-    `Subject: ${subject.replace(/[\r\n]/g, ' ')}`,
+    `Subject: ${encodeHeaderWord(subject.replace(/[\r\n]/g, ' '))}`,
     'MIME-Version: 1.0',
   ]
   // Gmail's `messages.send` takes the recipients from the MIME headers and
@@ -123,6 +133,9 @@ export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body,
   }
   if (listUnsubscribe) {
     headers.push(`List-Unsubscribe: <${listUnsubscribe}>`)
+    // RFC 8058: tells Gmail/Yahoo the URL accepts a bare POST — required for
+    // bulk senders, and what lets the GET stay a harmless confirmation page.
+    headers.push('List-Unsubscribe-Post: List-Unsubscribe=One-Click')
   }
   let mime
   if (html) {

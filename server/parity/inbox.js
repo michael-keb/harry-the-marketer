@@ -1286,6 +1286,13 @@ export function register(api) {
       const { gmailSend } = await import('../google.js')
       const result = await gmailSend(mailbox, { to: [to, ...cc, ...bcc].join(', '), subject, body: composed, workspaceId: req.wsId })
       providerMessageId = result.messageId
+    } else if (mailbox.provider !== 'sandbox') {
+      // Only the sandbox may pretend: an Outlook mailbox used to fall through
+      // here, write a `sent` row, and no email ever left.
+      throw new HttpError(501, {
+        error: 'not_implemented',
+        message: `${mailbox.provider} mailboxes cannot forward yet — use a Gmail mailbox`,
+      })
     }
     const info = tx(() => db.prepare(
       `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id, node_id, forwarded_at, forwarded_to, send_status, is_read, read_at)

@@ -29,12 +29,16 @@ function findAccountByTo(toRaw) {
   ).all()
   const hit = rows.find((a) => samePhone(a.phone_number, to))
   if (hit) return hit
-  // .env Twilio number with no Settings row yet — attach to the workspace that
-  // already holds this Account SID, else the first workspace.
+  // .env Twilio number with no Settings row yet — attach only to the workspace
+  // that already holds this Account SID. There used to be a fallback to "the
+  // first workspace", which meant an inbound STOP on a number nobody had
+  // claimed was written into an arbitrary tenant's inbox and block list. An
+  // unattributable message is dropped (Twilio gets a 404 and retries) rather
+  // than filed under whoever happens to be user id 1.
   if (twilioEnvConfigured() && samePhone(env.TWILIO_FROM_NUMBER, to)) {
     const known = rows.find((a) => a.account_sid === env.TWILIO_ACCOUNT_SID)
-      || db.prepare('SELECT id AS workspace_id FROM users ORDER BY id LIMIT 1').get()
-    if (known) return ensureEnvSmsAccount(known.workspace_id || known.id)
+    if (known) return ensureEnvSmsAccount(known.workspace_id)
+    console.warn('[sms] inbound on env Twilio number but no workspace holds the Account SID — dropped')
   }
   return null
 }

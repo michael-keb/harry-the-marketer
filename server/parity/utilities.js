@@ -347,11 +347,20 @@ async function dispatchContextFree({ wsId, mailbox, to, lead, subject, body }) {
       db.prepare('UPDATE mailboxes SET last_error = ? WHERE id = ?').run(String(err.message || err).slice(0, 300), mailbox.id)
       throw err
     }
-  } else {
+  } else if (mailbox.provider === 'sandbox') {
     const rand = () => Math.random().toString(16).slice(2, 14)
     providerMessageId = `sbx-msg-${rand()}`
     threadId = `sbx-thr-${rand()}`
     recordTelemetry('send', { op: 'sandbox', ok: true, ms: Date.now() - t0, detail: 'one-off' })
+  } else {
+    // Only the sandbox is allowed to pretend. An Outlook (or any future)
+    // mailbox used to fall in here, get a fake sbx- id, bump quota, log
+    // `sent` — and no email left. Reporting success for mail that never
+    // existed is the worst failure mode a sender has.
+    throw new HttpError(501, {
+      error: 'not_implemented',
+      message: `${mailbox.provider} mailboxes cannot send one-off system mail yet — use a Gmail mailbox`,
+    })
   }
 
   const info = db.prepare(

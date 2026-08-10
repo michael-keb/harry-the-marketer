@@ -72,7 +72,10 @@ async function callOpenAI({ system, user, maxTokens, effort, schema }) {
   if (schema) {
     req.response_format = { type: 'json_schema', json_schema: { name: 'result', strict: true, schema } }
   }
-  const response = await getOpenAI().chat.completions.create(req)
+  // The engine holds its global tick lock while awaiting this. The SDK default
+  // timeout is ~10 minutes; one hung request would stall every workspace's
+  // sending for that long, so the request must give up first.
+  const response = await getOpenAI().chat.completions.create(req, { timeout: 90_000 })
   const choice = response.choices?.[0]
   if (!choice?.message?.content) throw new Error(`empty response (finish_reason: ${choice?.finish_reason || 'unknown'})`)
   lastError = ''
@@ -91,7 +94,8 @@ async function callClaude({ system, user, maxTokens, effort, schema }) {
     fallbacks: 'default',
   }
   if (schema) req.output_config.format = { type: 'json_schema', schema }
-  const response = await getClient().beta.messages.create(req)
+  // Same reasoning as the OpenAI path: the tick lock is held while this waits.
+  const response = await getClient().beta.messages.create(req, { timeout: 90_000 })
   if (response.stop_reason === 'refusal') throw new Error('model refused the request')
   const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
   lastError = ''
@@ -295,7 +299,7 @@ export async function researchLead({ lead, businessContext }) {
           `\nSearch the web for the company (site, news, hiring, tech signals). Then write the profile in this exact plain-text shape:\n` +
           `Company: ...\nSituation: ...\nLikely pain: ...\nTrigger: ...\nOpportunity: ...\nPersonalization hooks: 2-3 bullets.\n` +
           `If you cannot find reliable information, say what is unknown rather than inventing it.`,
-      }))
+      }, { timeout: 180_000 }))
       const text = (response.output_text || '').trim()
       lastError = ''
       return text || null
@@ -327,7 +331,7 @@ export async function researchLead({ lead, businessContext }) {
         tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 4 }],
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-      })
+      }, { timeout: 180_000 })
       // Server-tool loops can pause; continue once to let the search finish.
       if (response.stop_reason === 'pause_turn') {
         messages = [...messages, { role: 'assistant', content: response.content }]
@@ -335,7 +339,7 @@ export async function researchLead({ lead, businessContext }) {
           model: env.ANTHROPIC_MODEL, max_tokens: 2000, messages,
           tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 4 }],
           betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
-        })
+        }, { timeout: 180_000 })
       }
       if (response.stop_reason === 'refusal') throw new Error('model refused the request')
       return response.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim()

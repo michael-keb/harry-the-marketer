@@ -384,7 +384,7 @@ function findTestSendOut(mailbox, msg) {
 
 function storeInboundReply({ mailbox, msg, campaignId, leadId, cl }) {
   db.prepare(
-    `INSERT INTO messages
+    `INSERT OR IGNORE INTO messages
        (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
      VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
   ).run(
@@ -483,7 +483,7 @@ export function ingestRecentInbound(mailbox, msg) {
   const testOut = findTestSendOut(mailbox, msg)
   if (testOut) {
     db.prepare(
-      `INSERT INTO unmatched_messages
+      `INSERT OR IGNORE INTO unmatched_messages
          (workspace_id, mailbox_id, from_email, subject, body, thread_id, provider_message_id, received_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
@@ -496,7 +496,7 @@ export function ingestRecentInbound(mailbox, msg) {
   }
 
   db.prepare(
-    `INSERT INTO unmatched_messages
+    `INSERT OR IGNORE INTO unmatched_messages
        (workspace_id, mailbox_id, from_email, subject, body, thread_id, provider_message_id, received_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(mailbox.user_id, mailbox.id, msg.fromEmail || '', msg.subject || '',
@@ -577,17 +577,33 @@ export async function pullWorkspaceInbound(wsId, opts = {}) {
   return { mailboxes: mailboxes.length, scanned, attached, untracked, errors }
 }
 
+// The engine ticks every 20 seconds; a whole-inbox Gmail scan per mailbox per
+// tick is ~4,300 list calls a day per mailbox before anyone opens the app,
+// racing the Inbox's own 10-second poll for the same messages. The sweep only
+// exists to catch mail nobody is looking at, so it runs against each mailbox
+// at most once per interval, skips mailboxes with no refresh token (the pull
+// would only error), and goes through pullMailboxInbound so it shares the
+// per-mailbox in-flight lock with the Inbox poll instead of racing it.
+const UNMATCHED_SWEEP_MS = 5 * 60_000
+const lastUnmatchedSweep = new Map()
+
 async function pullUnmatched() {
   const mailboxes = db.prepare(
-    "SELECT * FROM mailboxes WHERE deleted_at IS NULL AND provider IN ('gmail','outlook') AND status = 'connected' AND is_suspended = 0"
+    `SELECT * FROM mailboxes
+      WHERE deleted_at IS NULL AND provider IN ('gmail','outlook')
+        AND status = 'connected' AND is_suspended = 0
+        AND COALESCE(refresh_token,'') != ''`
   ).all()
   if (!mailboxes.length) return {}
 
   let untracked = 0
   let attached = 0
   for (const mb of mailboxes) {
+    const last = lastUnmatchedSweep.get(mb.id) || 0
+    if (Date.now() - last < UNMATCHED_SWEEP_MS) continue
+    lastUnmatchedSweep.set(mb.id, Date.now())
     try {
-      const result = await syncMailboxInbound(mb)
+      const result = await pullMailboxInbound(mb)
       attached += result.attached
       untracked += result.untracked
     } catch (err) {

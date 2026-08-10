@@ -2581,6 +2581,10 @@ export function register(api) {
     if (mailbox.provider === 'gmail') {
       // No html, no listUnsubscribe: a forward carries neither.
       await gmailSend(mailbox, { to: recipients.join(', '), subject, body: quoted, workspaceId: req.wsId })
+    } else if (mailbox.provider !== 'sandbox') {
+      // Only the sandbox may pretend: any other provider used to fall through,
+      // write a `forwarded` row, and no email ever left.
+      throw invalid('messageId', `${mailbox.provider} mailboxes cannot forward yet — use a Gmail mailbox`)
     }
     const at = nowIso()
     db.prepare(

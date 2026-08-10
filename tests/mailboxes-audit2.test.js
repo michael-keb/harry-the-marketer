@@ -205,19 +205,12 @@ test('a signature is stored, sanitised and shown — and never reaches an email 
   const sent = outbound(brandBox.id)
   assert.equal(sent.length, 1, 'the fixture never sent, so the claim below would be vacuous')
 
-  // DEFECT — Docs/email-accounts/update.md AC 7: "Given I set a `signature`,
-  // when it is stored, then the HTML is sanitised, and it is appended below the
-  // agent-composed body". `server/mailer.js` composes the outgoing body from
-  // `subject`/`body` and `withOptOutFooter` only; it never reads
-  // `mailboxes.signature`. The two readers of that column
-  // (server/parity/inbox.js and server/parity/campaigns.js) are the *manual*
-  // reply routes, and both require an explicit `add_signature` flag. So an
-  // agent-composed email — which is every email a campaign sends — carries no
-  // signature at all.
-  assert.equal(
-    sent[0].body.includes(SIG_MARK), false,
-    'if this now passes, the signature has been wired into the send path and this test should become the positive assertion',
-  )
+  // update.md AC 7, now the positive assertion the defect note asked for once
+  // the fix landed: the sanitised signature is appended below the agent-composed
+  // body — and exactly once, because a signer that runs per compose AND per
+  // dispatch would stack copies.
+  const appearances = sent[0].body.split(SIG_MARK).length - 1
+  assert.equal(appearances, 1, `the signature appears ${appearances} times in the sent body`)
 })
 
 test('a custom tracking domain is stored and shown — and no link in any email can use it', async () => {
@@ -291,68 +284,71 @@ test('the detail route can answer "what does this break" before anything is dele
   assert.deepEqual(impact.wouldHold, [])
 })
 
-test('deleting a mailbox a running campaign uses is refused outright, not detached', async () => {
+test('deleting a mailbox a running campaign uses detaches it and moves the campaign to holding', async () => {
   const res = await owner.client.del(`/api/mailboxes/${liveBox.id}`)
 
-  // DEFECT — delete.md AC 2: "when I delete it, then it is detached from all of
-  // them as part of the same operation, and any campaign left with no mailbox
-  // moves to holding with a stated reason". The route refuses instead, so the
-  // documented flow (confirm the consequences, then delete) cannot happen at
-  // all for the case the spec spends most of its words on.
-  assert.equal(res.status, 409)
-  assert.match(res.body.error, /archive them first/)
-  assert.ok(rowOf(liveBox.id), 'the mailbox survived, which is the one thing the refusal gets right')
-  assert.equal(
-    db.prepare('SELECT status FROM campaigns WHERE id = ?').get(liveCampaign.id).status, 'running',
-    'the campaign was neither detached nor moved to holding',
-  )
+  // delete.md AC 2, implemented: detached from every campaign in the same
+  // operation, and a campaign left with no mailbox is paused with a stated
+  // reason rather than failing lead by lead on the next tick.
+  assert.equal(res.status, 200)
+  assert.equal(res.body.ok, true)
+  assert.equal(res.body.campaignsDetached, 1)
+  assert.ok(res.body.campaignsHolding.some((c) => c.id === liveCampaign.id), 'the campaign left with no sender is named')
+  const after = db.prepare('SELECT status, status_reason, mailbox_id FROM campaigns WHERE id = ?').get(liveCampaign.id)
+  assert.equal(after.status, 'paused')
+  assert.equal(after.status_reason, 'no mailbox attached')
+  assert.equal(after.mailbox_id, null)
+  const box = rowOf(liveBox.id)
+  assert.ok(box, 'soft delete keeps the row')
+  assert.ok(String(box.deleted_at || ''), 'the row is marked deleted')
 })
 
-test('a delete is a hard delete: the row is gone and its sent mail loses the address it came from', async () => {
+test('a delete is a soft delete: the row is marked and sent mail keeps its address', async () => {
   start(goneCampaign.id)
   await tick()
   const sent = outbound(goneBox.id)
   assert.equal(sent.length, 1, 'nothing was sent, so "history survives" would be vacuous')
   const messageId = sent[0].id
 
-  // Parked so the 409 guard above lets the delete through at all.
   park(goneCampaign.id)
 
   const res = await owner.client.del(`/api/mailboxes/${goneBox.id}`)
   assert.equal(res.status, 200)
 
-  // DEFECT — delete.md AC 1: the response is documented as carrying the deleted
-  // id (`emailAccountId`). It carries `{ ok: true }` and nothing else.
-  assert.deepEqual(res.body, { ok: true })
+  // delete.md AC 1: the response names what it deleted and what that touched.
+  assert.equal(res.body.emailAccountId, goneBox.id)
+  assert.equal(typeof res.body.campaignsDetached, 'number')
+  assert.equal(typeof res.body.draftsCancelled, 'number')
 
-  // DEFECT — delete.md AC 4 and §5: "the mailbox is soft-deleted ... so Inbox
-  // and Reports history stays intact". There is no `deleted_at` column on
-  // `mailboxes` at all, and the row is physically removed.
-  const columns = db.prepare('PRAGMA table_info(mailboxes)').all().map((c) => c.name)
-  assert.equal(columns.includes('deleted_at'), false, 'a deleted_at column now exists — soft delete may have landed')
-  assert.equal(rowOf(goneBox.id), undefined, 'the row was removed rather than marked')
+  // delete.md AC 4 and §5: soft-deleted, so Inbox and Reports history stays
+  // intact — the row is marked, warm-up is off, and the credentials are zeroed
+  // so a soft-deleted row holds nothing usable.
+  const box = rowOf(goneBox.id)
+  assert.ok(box, 'the row survives the delete')
+  assert.ok(String(box.deleted_at || ''), 'the row is marked deleted')
+  assert.equal(box.warmup_enabled, 0)
+  assert.equal(box.access_token, '')
+  assert.equal(box.refresh_token, '')
 
-  // The message row survives, but the foreign key is ON DELETE SET NULL, so the
-  // send is no longer attributable to any address. delete.md TC-9 asks for
-  // history "labelled with the removed mailbox"; what is left cannot be.
+  // TC-9: history stays labelled with the removed mailbox.
   const message = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId)
   assert.ok(message, 'the message itself was destroyed, which would be worse still')
-  assert.equal(message.mailbox_id, null, 'the sending address survived the delete — soft delete may have landed')
-  assert.equal(message.from_email, 'gone.sender@sandbox.local', 'the address is only still readable off the message text')
+  assert.equal(message.mailbox_id, goneBox.id, 'the send is still attributable to the removed mailbox')
+  assert.equal(message.from_email, 'gone.sender@sandbox.local')
 
-  // And the campaign silently loses its sender rather than being told.
+  // The campaign is told, not silently emptied: detached as part of the delete.
   assert.equal(db.prepare('SELECT mailbox_id FROM campaigns WHERE id = ?').get(goneCampaign.id).mailbox_id, null)
 })
 
-test('a mailbox id from another workspace is a 404 that leaks nothing — without the documented error code', async () => {
+test('a mailbox id from another workspace is a 404 that leaks nothing, with the documented error code', async () => {
   const theirs = sandbox(stranger.user.id, 'theirs.sender@sandbox.local')
 
   const res = await owner.client.del(`/api/mailboxes/${theirs.id}`)
   assert.equal(res.status, 404)
   assert.ok(rowOf(theirs.id), 'a cross-workspace delete destroyed somebody else’s mailbox')
-  // The isolation is right; only the shape differs from delete.md AC 5, which
-  // names `errorCode: "ACCOUNT_NOT_FOUND"`.
-  assert.equal(res.body.errorCode, undefined)
+  // delete.md AC 5: the same answer for a stranger's id and a missing one,
+  // carrying the documented code.
+  assert.equal(res.body.errorCode, 'ACCOUNT_NOT_FOUND')
 
   // Deleting the same id twice reads as already-gone, which TC-10 asks for.
   const again = await owner.client.del(`/api/mailboxes/${goneBox.id}`)

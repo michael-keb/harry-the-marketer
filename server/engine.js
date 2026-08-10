@@ -525,6 +525,20 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
 
 // Move a lead onto a node and act on it. Returns true if the lead can keep advancing this tick.
 async function enterNode(ctx, cl, nodeId) {
+  // The hop budget, on the object rather than a parameter: enterNode recurses
+  // through helpers (send → always-edge → enterNode), and a cycle of send
+  // nodes reachable by `always` edges used to advance — and email — without
+  // bound. `cl` is a fresh row object each tick and each route call, so the
+  // counter naturally scopes to one burst of advancing, wherever it started.
+  cl.__hops = (cl.__hops || 0) + 1
+  if (cl.__hops > MAX_HOPS_PER_TICK) {
+    setLead(cl, { state: 'needs_attention' })
+    logEvent(ctx.user.id, {
+      campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'needs_attention',
+      detail: `advanced ${MAX_HOPS_PER_TICK} steps in one go — the playbook may loop; parked for a person`,
+    })
+    return false
+  }
   const node = ctx.graph.nodes[nodeId]
   if (!node) {
     setLead(cl, { state: 'error', error: `Node "${nodeId}" no longer exists in the playbook` })
@@ -692,7 +706,7 @@ async function enterNode(ctx, cl, nodeId) {
         // any draft still waiting for a human is withdrawn — approving an email
         // for someone who has opted out must not be possible.
         if (err?.suppressed) {
-          if (draft) discardStaleDraft(cl.campaign_id, cl.lead_id)
+          if (draft) discardStaleDraft(draft)
           logEvent(ctx.user.id, {
             campaignId: cl.campaign_id, leadId: cl.lead_id,
             type: 'suppressed', detail: err.message,
@@ -982,7 +996,6 @@ export async function processCampaign(campaign) {
 
   for (const cl of leads) {
     try {
-      let hops = 0
       if (cl.state === 'queued') {
         setLead(cl, { state: 'active' })
         await enterNode(ctx, cl, graph.startId)
@@ -991,7 +1004,6 @@ export async function processCampaign(campaign) {
       } else if (cl.state === 'waiting') {
         await processWaiting(ctx, cl)
       }
-      if (++hops > MAX_HOPS_PER_TICK) break
     } catch (err) {
       console.error('[engine] lead processing failed', cl.id, err)
       setLead(cl, { state: 'error', error: String(err.message || err).slice(0, 300) })
@@ -1008,7 +1020,19 @@ export async function tick() {
   const t0 = Date.now()
   try {
     const campaigns = db.prepare("SELECT * FROM campaigns WHERE status = 'running'").all()
-    for (const campaign of campaigns) await processCampaign(campaign)
+    for (const campaign of campaigns) {
+      // One campaign with a broken owner row or corrupt playbook must not
+      // starve every other tenant's campaigns — or upkeep — on every tick.
+      try {
+        await processCampaign(campaign)
+      } catch (err) {
+        console.error('[engine] campaign processing failed', campaign.id, err)
+        logEvent(campaign.user_id, {
+          campaignId: campaign.id, type: 'error',
+          detail: `campaign skipped this tick: ${String(err.message || err).slice(0, 200)}`,
+        })
+      }
+    }
 
     // Work that belongs to nobody's request: releasing scheduled replies,
     // firing due reminders, adjusting warm-up, pulling untracked mail. It runs
