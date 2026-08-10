@@ -226,7 +226,15 @@ async function timedSync(mailbox, threadId) {
 // Pull any new inbound messages for a thread into `messages` (oauth providers —
 // sandbox inbound messages are inserted directly by the simulate endpoint).
 export async function syncInbound({ mailbox, user, campaign, lead, threadId }) {
-  if (!isOAuthProvider(mailbox.provider) || !threadId) return 0
+  if (!isOAuthProvider(mailbox.provider)) return 0
+  if (!threadId) {
+    const row = db.prepare(
+      `SELECT thread_id FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'out'
+         AND COALESCE(thread_id, '') != '' ORDER BY id DESC LIMIT 1`
+    ).get(campaign.id, lead.id)
+    threadId = row?.thread_id || ''
+  }
+  if (!threadId) return 0
   const remote = await timedSync(mailbox, threadId)
   const known = new Set(
     db.prepare('SELECT provider_message_id FROM messages WHERE thread_id = ?').all(threadId).map((r) => r.provider_message_id)

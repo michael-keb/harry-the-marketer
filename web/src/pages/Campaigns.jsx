@@ -203,9 +203,12 @@ function CampaignCard({ campaign: c }) {
         <h2 className="min-w-0 truncate text-base font-semibold text-ink-900">{c.name}</h2>
         <StateChip state={c.state} />
       </div>
-      {c.parentCampaignId && (
-        <div className="mt-1 text-[11px] text-slate-500">Subsequence of campaign #{c.parentCampaignId}</div>
-      )}
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+        <span className="rounded-full border border-slate-200 px-2 py-0.5 text-slate-600">
+          {c.channelMode === 'sms' ? 'SMS' : c.channelMode === 'multi' ? 'Email + SMS' : 'Email'}
+        </span>
+        {c.parentCampaignId && <span>Subsequence of campaign #{c.parentCampaignId}</span>}
+      </div>
       <dl className="mt-3 grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
         {[
           ['Leads', nfmt(counts.total)],
@@ -242,6 +245,12 @@ const CAMPAIGN_TYPES = [
     label: 'SMS',
     blurb: 'Send texts from a Twilio number. Leads need a phone number and SMS opt-in.',
     next: 'Next you’ll attach an SMS sender and draw Send sms: steps.',
+  },
+  {
+    value: 'multi',
+    label: 'Email + SMS',
+    blurb: 'One playbook can email and text. Attach both a mailbox and an SMS sender.',
+    next: 'Next you’ll attach mailboxes and SMS senders. Gates still allow one channel per person per day.',
   },
 ]
 
@@ -285,7 +294,7 @@ function CreateCampaignModal({ onClose, onCreated }) {
 
         <fieldset>
           <legend className="text-sm font-medium text-slate-600">Campaign type</legend>
-          <div className="mt-1.5 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Campaign type">
+          <div className="mt-1.5 grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Campaign type">
             {CAMPAIGN_TYPES.map((type) => {
               const on = channelMode === type.value
               return (

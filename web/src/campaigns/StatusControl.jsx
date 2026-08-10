@@ -22,16 +22,22 @@ import { StateChip, blockersOf, codeOf, messageOf } from './shared.jsx'
 const BLOCKER_FIX = {
   playbook: { label: 'A valid playbook', fix: 'Fix the diagram in the Playbook tab' },
   mailboxes: { label: 'A sending mailbox', fix: 'Attach one in the Sending from panel' },
+  sms_accounts: { label: 'An SMS sender', fix: 'Attach one in the Sending from panel' },
   leads: { label: 'At least one lead', fix: 'Attach leads in the Leads tab' },
 }
 
-const ALL_CONDITIONS = ['playbook', 'mailboxes', 'leads']
+function conditionsFor(channelMode = 'email') {
+  if (channelMode === 'sms') return ['playbook', 'sms_accounts', 'leads']
+  if (channelMode === 'multi') return ['playbook', 'mailboxes', 'sms_accounts', 'leads']
+  return ['playbook', 'mailboxes', 'leads']
+}
 
 // The readiness strip: what is still missing, and where to fix it. It disappears
 // once every condition is met.
-export function LaunchChecklist({ blockers = [], onGoTo }) {
+export function LaunchChecklist({ blockers = [], onGoTo, channelMode = 'email' }) {
   if (!blockers.length) return null
   const unmet = new Map(blockers.map((b) => [b.field, b]))
+  const conditions = conditionsFor(channelMode)
   return (
     <div className="card border-amber-200 bg-amber-50 p-4" role="status">
       <h3 className="text-sm font-semibold text-amber-800">Not ready to start</h3>
@@ -40,7 +46,7 @@ export function LaunchChecklist({ blockers = [], onGoTo }) {
         so you can fix them in one pass.
       </p>
       <ul className="mt-3 space-y-2">
-        {ALL_CONDITIONS.map((field) => {
+        {conditions.map((field) => {
           const blocker = unmet.get(field)
           const meta = BLOCKER_FIX[field]
           return (

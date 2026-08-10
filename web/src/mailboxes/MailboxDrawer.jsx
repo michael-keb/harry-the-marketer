@@ -65,6 +65,7 @@ export default function MailboxDrawer({ mailboxId, fleet, onClose, onChanged }) 
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [testing, setTesting] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   const [dialog, setDialog] = useState('')
   const [busyTag, setBusyTag] = useState(null)
   const [announcement, say] = useAnnounce()
@@ -126,6 +127,26 @@ export default function MailboxDrawer({ mailboxId, fleet, onClose, onChanged }) 
       setTesting(false)
     }
   }
+
+  const syncReplies = async () => {
+    setSyncing(true)
+    try {
+      const res = await api.post(`/api/mailboxes/${mailboxId}/sync-inbound`)
+      const msg = res.scanned
+        ? `Scanned ${res.scanned} recent message(s): ${res.attached} attached to campaigns, ${res.untracked} in Untracked`
+        : 'No recent inbound messages found in this mailbox'
+      say(msg)
+      toast(msg, res.attached || res.untracked ? 'success' : 'info')
+      refresh()
+    } catch (err) {
+      toast(err.message, 'error')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const canSyncInbound = data?.provider === 'gmail' || data?.provider === 'outlook'
+    || data?.type === 'GMAIL' || data?.type === 'OUTLOOK'
 
   const title = data ? data.fromEmail : 'Mailbox'
 
@@ -201,9 +222,16 @@ export default function MailboxDrawer({ mailboxId, fleet, onClose, onChanged }) 
             title="Health"
             hint="Sending and reading are checked separately: a mailbox that cannot read replies can still send, and saying so is the point."
             action={(
-              <button className="btn-ghost text-xs cursor-pointer" onClick={runTest} disabled={testing}>
-                {testing ? 'Checking…' : 'Re-check connection'}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                {canSyncInbound && (
+                  <button className="btn-ghost text-xs cursor-pointer" onClick={syncReplies} disabled={syncing || testing}>
+                    {syncing ? 'Syncing replies…' : 'Sync replies now'}
+                  </button>
+                )}
+                <button className="btn-ghost text-xs cursor-pointer" onClick={runTest} disabled={testing || syncing}>
+                  {testing ? 'Checking…' : 'Re-check connection'}
+                </button>
+              </div>
             )}
           >
             <ul className="space-y-1.5">

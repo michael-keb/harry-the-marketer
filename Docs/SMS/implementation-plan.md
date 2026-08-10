@@ -33,7 +33,7 @@ Credentials: `.env` → `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` (+ From number
 
 A workspace can:
 
-1. **Pick a campaign type at create time** (Email or SMS) — this drives which senders and playbook defaults are required.
+1. **Pick a campaign type at create time** (Email, SMS, or Email + SMS) — this drives which senders and playbook defaults are required.
 2. Connect Twilio (env auto-connect **or** Settings → Connections → Messages).
 3. Opt-in a lead’s phone; attach the right sender(s) for that type.
 4. Run playbook steps for the chosen channel(s) through the existing engine / approval path.
@@ -96,28 +96,27 @@ These are the remaining build items for “operators can use SMS,” not greenfi
 
 On **New campaign**, require a **campaign type** before create.
 
-**v1 types only (locked):** Email and SMS. WhatsApp and Telegram are later — no create options, no playbook labels, no channel accounts for those yet.
+**v1 types (locked):** Email, SMS, and **Email + SMS** (`multi`). WhatsApp and Telegram stay later — no create options for those yet.
 
 | Type | Value | Required senders to launch | Playbook default | Lead address |
 |------|--------|----------------------------|------------------|--------------|
 | **Email** | `email` | ≥1 mailbox | Starter with `Send:` / `Send email:` | email |
 | **SMS** | `sms` | ≥1 SMS channel account | Starter with `Send sms:` | phone + SMS opt-in |
-
-No **Multi** type in v1 either — keep create simple. Mixing email + SMS in one playbook can wait until after pure SMS is live (or a later `multi` mode). Operators who need both run two campaigns for now.
+| **Email + SMS** | `multi` | ≥1 mailbox **and** ≥1 SMS account | Starter with email then SMS | email + phone/opt-in as steps need |
 
 **Data**
 
-- Store on campaign, e.g. `campaigns.channel_mode TEXT NOT NULL DEFAULT 'email'` with values `email` | `sms`.
+- Store on campaign, e.g. `campaigns.channel_mode TEXT NOT NULL DEFAULT 'email'` with values `email` | `sms` | `multi`.
 - Migration + backfill: existing rows → `email`.
 - Create API: `POST /api/campaigns/create` accepts `{ name, channelMode }` (required from UI; default `email` for API/Goals compatibility).
 - Response and list/detail include `channelMode` so UI can badge cards and gate readiness.
-- Reject unknown modes (`whatsapp`, `telegram`, `multi`, …) with 422 until those phases ship.
+- Reject unknown modes (`whatsapp`, `telegram`, …) with 422 until those phases ship.
 
 **UI — create modal**
 
 1. Name (as today).
-2. **Campaign type** — two clear choices: **Email** or **SMS** (radio / segmented control).
-3. Short helper under the choice: mailbox vs SMS number next.
+2. **Campaign type** — three choices: **Email**, **SMS**, **Email + SMS**.
+3. Short helper under the choice: what you’ll attach next.
 4. Create → navigate to detail as today.
 
 **UI — after create (driven by type)**
@@ -125,14 +124,16 @@ No **Multi** type in v1 either — keep create simple. Mixing email + SMS in one
 - Readiness strip adapts:
   - `email` → playbook, mailbox, leads (current).
   - `sms` → playbook, SMS account, leads with phone/opt-in.
-- Steps / AI playbook generator: SMS campaigns get a `Send sms:` starter only.
-- List card shows a small type badge (Email / SMS).
+  - `multi` → playbook, mailbox, SMS account, leads.
+- **Sending from** tab shows mailboxes and/or SMS senders for the mode (`multi` shows both attach panels).
+- List card shows a small type badge (Email / SMS / Email + SMS).
 
 **Launch rules**
 
 - `sms` campaigns must **not** require a mailbox; must have ≥1 SMS channel account.
 - `email` campaigns must **not** require an SMS account; must have ≥1 mailbox.
-- If an `email` playbook contains `Send sms:` (or an `sms` playbook contains email Send nodes), **block launch + explain** — do not auto-upgrade.
+- `multi` requires both sender kinds; playbook may mix `Send email:` and `Send sms:` nodes.
+- If playbook contains a channel the mode forbids, **block launch + explain** — do not auto-upgrade.
 
 **Files (likely)**
 
@@ -144,10 +145,11 @@ No **Multi** type in v1 either — keep create simple. Mixing email + SMS in one
 
 **Acceptance**
 
-- [ ] Create modal cannot submit without a selected type (Email or SMS).
+- [ ] Create modal cannot submit without a selected type (Email, SMS, or Email + SMS).
 - [ ] New SMS campaign launches with only SMS account + valid playbook + opted-in phones (no mailbox).
 - [ ] New email campaign unchanged from today aside from explicit type.
-- [ ] WhatsApp / Telegram / Multi are not offered in create.
+- [ ] Multi requires both a mailbox and an SMS account before launch; Sending from shows both attach UIs.
+- [ ] WhatsApp / Telegram are not offered in create.
 - [ ] Existing campaigns behave as `email`.
 
 ### B1 — Campaign attach SMS sender (UI)
@@ -156,11 +158,11 @@ No **Multi** type in v1 either — keep create simple. Mixing email + SMS in one
 
 **Build**
 
-- Campaign detail / settings: list workspace SMS accounts, attach/detach — **shown when `channelMode` is `sms`**.
+- Campaign detail **Sending from**: list workspace SMS accounts, attach/detach — **shown when `channelMode` is `sms` or `multi`** (mailboxes shown for `email` or `multi`).
 - Validate before start per B0 launch rules.
 - Surface gate reason when missing account / phone / opt-in (reuse send-status patterns).
 
-**Files (likely):** `web/src/pages/CampaignDetail.jsx`, `web/src/campaigns/SettingsPanel.jsx`, new or extended panel next to `MailboxesPanel.jsx`, parity campaign routes if needed.
+**Files (likely):** `web/src/pages/CampaignDetail.jsx`, `web/src/campaigns/MailboxesPanel.jsx`, new `SmsSendersPanel.jsx`, parity campaign routes if needed.
 
 ### B2 — Lead phone + opt-in in Leads UI
 
@@ -221,7 +223,6 @@ Do **not** start these until pure SMS campaigns are live and trusted:
 
 | Phase | Scope |
 |-------|--------|
-| **D0 Multi (email+SMS)** | Optional third create type; mixed playbooks; both sender kinds |
 | **D1 WhatsApp** | Create type + Twilio/Meta; templates; 24h session |
 | **D2 Telegram** | Create type + bot token; `/start` bind |
 | **D3 Unified Inbox** | Per-channel views + combined |
@@ -261,4 +262,4 @@ Do **not** start these until pure SMS campaigns are live and trusted:
 2. **Opt-in source of truth:** import flag only, or also a public form / keyword `START`? (Webhook already handles START/STOP keywords.)  
 3. **Inbox scope for this sprint:** badge + reply only, or start D3 unified folders now?  
 4. **Playbook vs type mismatch:** **locked — block launch + explain** (no auto-upgrade).  
-5. **Create types for v1:** **locked — Email \| SMS only.** WhatsApp, Telegram, and Multi later.
+5. **Create types for v1:** **locked — Email \| SMS \| Email+SMS (`multi`).** WhatsApp and Telegram later.

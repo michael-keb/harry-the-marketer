@@ -25,6 +25,7 @@ import { BehaviourPanel } from '../campaigns/SettingsPanel.jsx'
 import CampaignSendControls from '../send-controls/CampaignSendControls.jsx'
 import SendScheduleGrid from '../campaigns/SendScheduleGrid.jsx'
 import MailboxesPanel from '../campaigns/MailboxesPanel.jsx'
+import SmsSendersPanel from '../campaigns/SmsSendersPanel.jsx'
 import LeadsPanel from '../campaigns/LeadsPanel.jsx'
 import SubsequencesPanel from '../campaigns/SubsequencesPanel.jsx'
 import ManagePanel, { ActivityPanel } from '../campaigns/ManagePanel.jsx'
@@ -274,11 +275,17 @@ export default function CampaignDetail({ user }) {
     } catch (err) { toast(messageOf(err), 'error') } finally { setBusy('') }
   }
 
+  const channelMode = detail?.channelMode || campaign?.channelMode || 'email'
+  const usesEmail = channelMode === 'email' || channelMode === 'multi'
+  const usesSms = channelMode === 'sms' || channelMode === 'multi'
+
   const goTo = (field) => {
-    if (field === 'mailboxes') setTab('mailboxes')
+    if (field === 'mailboxes' || field === 'sms_accounts') setTab('mailboxes')
     else if (field === 'leads') setTab('leads')
     else setTab('playbook')
   }
+
+  const modeLabel = channelMode === 'sms' ? 'SMS' : channelMode === 'multi' ? 'Email + SMS' : 'Email'
 
   return (
     <div className="space-y-5">
@@ -303,6 +310,9 @@ export default function CampaignDetail({ user }) {
               aria-label="Campaign name"
             />
             <StateChip state={detail.state} />
+            <span className="rounded-full border border-slate-300 px-2.5 py-0.5 text-xs font-medium text-slate-600">
+              {modeLabel}
+            </span>
           </div>
           <StatusControl
             campaign={campaign}
@@ -358,12 +368,11 @@ export default function CampaignDetail({ user }) {
         </p>
       )}
 
-      {mailboxes.length === 0 && (
+      {usesEmail && mailboxes.length === 0 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
           You have no mailboxes yet — <Link className="underline" to="/app/connections?area=email">connect Gmail or add a sandbox mailbox</Link> before launching.
         </div>
       )}
-
       {/* Why a running campaign is quiet right now. Without this, waiting for a
           sending window looks identical to being broken.
           Shown for every gate, not only the clock: a plan stopped by a hold, a
@@ -382,7 +391,7 @@ export default function CampaignDetail({ user }) {
         </div>
       )}
 
-      <LaunchChecklist blockers={detail.blockers} onGoTo={goTo} />
+      <LaunchChecklist blockers={detail.blockers} onGoTo={goTo} channelMode={channelMode} />
 
       <MetricsStrip campaignId={id} onOpenSetting={() => setTab('settings')} />
 
@@ -502,7 +511,16 @@ export default function CampaignDetail({ user }) {
         />
       )}
 
-      {tab === 'mailboxes' && <MailboxesPanel campaign={campaign} onChanged={refresh} />}
+      {tab === 'mailboxes' && (
+        <div className="space-y-4">
+          {usesEmail && (
+            <MailboxesPanel campaign={campaign} onChanged={refresh} compact={usesSms} />
+          )}
+          {usesSms && (
+            <SmsSendersPanel campaign={campaign} onChanged={refresh} compact={usesEmail} />
+          )}
+        </div>
+      )}
 
       {tab === 'schedule' && (
         <SendScheduleGrid campaignId={id} />

@@ -366,6 +366,42 @@ async function adjustWarmup() {
 // went from a rotated/pinned mailbox (sync looked at the wrong account) or the
 // lead is no longer in `waiting` — and the reply vanished from Harry entirely.
 // Exported so tests can drive the matcher without a live Gmail call.
+function findTestSendOut(mailbox, msg) {
+  const from = String(msg.fromEmail || '').toLowerCase().trim()
+  if (msg.threadId) {
+    const byThread = db.prepare(
+      `SELECT * FROM messages WHERE user_id = ? AND mailbox_id = ? AND direction = 'out'
+         AND send_status = 'test' AND thread_id = ? ORDER BY id DESC LIMIT 1`
+    ).get(mailbox.user_id, mailbox.id, msg.threadId)
+    if (byThread) return byThread
+  }
+  if (!from) return null
+  return db.prepare(
+    `SELECT * FROM messages WHERE user_id = ? AND mailbox_id = ? AND direction = 'out'
+       AND send_status = 'test' AND lower(trim(to_email)) = ? ORDER BY id DESC LIMIT 1`
+  ).get(mailbox.user_id, mailbox.id, from) || null
+}
+
+function storeInboundReply({ mailbox, msg, campaignId, leadId, cl }) {
+  db.prepare(
+    `INSERT INTO messages
+       (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
+     VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
+  ).run(
+    mailbox.user_id, campaignId, leadId, mailbox.id,
+    msg.subject || '', String(msg.body || '').slice(0, 20000),
+    msg.fromEmail || '', msg.toEmail || mailbox.email,
+    msg.providerMessageId, msg.threadId || cl?.thread_id || ''
+  )
+  if (cl && !cl.thread_id && msg.threadId) {
+    db.prepare('UPDATE campaign_leads SET thread_id = ? WHERE id = ?').run(msg.threadId, cl.id)
+  }
+  logEvent(mailbox.user_id, {
+    campaignId, leadId, type: 'reply',
+    detail: String(msg.body || msg.subject || '').slice(0, 120),
+  })
+}
+
 export function ingestRecentInbound(mailbox, msg) {
   if (!msg?.providerMessageId) return null
 
@@ -391,8 +427,33 @@ export function ingestRecentInbound(mailbox, msg) {
         ).get(lead.id, msg.threadId, mailbox.user_id)
       : null
 
+    // A reply to a campaign test send shares the Gmail thread but not a
+    // campaign_leads.thread_id — match via the stored test outbound instead.
+    if (!cl) {
+      const testOut = findTestSendOut(mailbox, msg)
+      if (testOut?.campaign_id) {
+        cl = db.prepare(
+          `SELECT cl.* FROM campaign_leads cl
+             JOIN campaigns c ON c.id = cl.campaign_id
+            WHERE cl.lead_id = ? AND cl.campaign_id = ? AND c.user_id = ?
+              AND COALESCE(cl.completed_at, '') = ''
+            ORDER BY cl.id DESC LIMIT 1`
+        ).get(lead.id, testOut.campaign_id, mailbox.user_id)
+        if (!cl) {
+          db.prepare(
+            'INSERT INTO campaign_leads (campaign_id, lead_id, state, thread_id) VALUES (?, ?, ?, ?)'
+          ).run(testOut.campaign_id, lead.id, 'waiting', msg.threadId || testOut.thread_id || '')
+          cl = db.prepare(
+            'SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?'
+          ).get(testOut.campaign_id, lead.id)
+        }
+      }
+    }
+
     // Otherwise any open conversation with this lead that was sent from this
     // mailbox — rotation means the campaign's primary mailbox is often wrong.
+    // Test sends count too: they carry no lead_id but name the recipient in
+    // to_email, which is how a confirmed test to a real lead is matched.
     if (!cl) {
       cl = db.prepare(
         `SELECT cl.* FROM campaign_leads cl
@@ -401,33 +462,37 @@ export function ingestRecentInbound(mailbox, msg) {
             AND COALESCE(cl.completed_at, '') = ''
             AND EXISTS (
               SELECT 1 FROM messages m
-               WHERE m.campaign_id = cl.campaign_id AND m.lead_id = cl.lead_id
-                 AND m.direction = 'out' AND m.mailbox_id = ?
+               WHERE m.campaign_id = cl.campaign_id AND m.direction = 'out' AND m.mailbox_id = ?
+                 AND (m.lead_id = cl.lead_id
+                      OR (m.send_status = 'test' AND lower(trim(m.to_email)) = ?))
             )
           ORDER BY cl.id DESC LIMIT 1`
-      ).get(lead.id, mailbox.user_id, mailbox.id)
+      ).get(lead.id, mailbox.user_id, mailbox.id, from)
     }
 
     if (cl) {
-      db.prepare(
-        `INSERT INTO messages
-           (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
-         VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
-      ).run(
-        mailbox.user_id, cl.campaign_id, lead.id, mailbox.id,
-        msg.subject || '', String(msg.body || '').slice(0, 20000),
-        msg.fromEmail || '', msg.toEmail || mailbox.email,
-        msg.providerMessageId, msg.threadId || cl.thread_id || ''
-      )
-      if (!cl.thread_id && msg.threadId) {
-        db.prepare('UPDATE campaign_leads SET thread_id = ? WHERE id = ?').run(msg.threadId, cl.id)
-      }
-      logEvent(mailbox.user_id, {
-        campaignId: cl.campaign_id, leadId: lead.id, type: 'reply',
-        detail: String(msg.body || msg.subject || '').slice(0, 120),
+      storeInboundReply({
+        mailbox, msg, campaignId: cl.campaign_id, leadId: lead.id, cl,
       })
       return 'attached'
     }
+  }
+
+  // Reply to a test send from an address that is not a lead — still record it
+  // so the Untracked folder can surface it, with the campaign named for context.
+  const testOut = findTestSendOut(mailbox, msg)
+  if (testOut) {
+    db.prepare(
+      `INSERT INTO unmatched_messages
+         (workspace_id, mailbox_id, from_email, subject, body, thread_id, provider_message_id, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      mailbox.user_id, mailbox.id, msg.fromEmail || '',
+      msg.subject || `[TEST reply] ${String(testOut.subject || '').slice(0, 180)}`,
+      String(msg.body || '').slice(0, 20000), msg.threadId || testOut.thread_id || '',
+      msg.providerMessageId, msg.receivedAt || isoNow()
+    )
+    return 'untracked'
   }
 
   db.prepare(
@@ -440,6 +505,28 @@ export function ingestRecentInbound(mailbox, msg) {
   return 'untracked'
 }
 
+async function syncMailboxInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
+  let inbound = []
+  inbound = mailbox.provider === 'outlook'
+    ? await outlookRecentInbound(mailbox, { withinDays, max })
+    : await gmailRecentInbound(mailbox, { withinDays, max })
+
+  let attached = 0
+  let untracked = 0
+  for (const msg of inbound) {
+    const result = ingestRecentInbound(mailbox, msg)
+    if (result === 'attached') attached++
+    else if (result === 'untracked') untracked++
+  }
+  db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now'), last_error = '' WHERE id = ?").run(mailbox.id)
+  return { attached, untracked, scanned: inbound.length }
+}
+
+// On-demand pull for one mailbox — used by the fleet "Sync replies" action.
+export async function pullMailboxInbound(mailbox, opts = {}) {
+  return syncMailboxInbound(mailbox, { withinDays: 7, max: 50, ...opts })
+}
+
 async function pullUnmatched() {
   const mailboxes = db.prepare(
     "SELECT * FROM mailboxes WHERE deleted_at IS NULL AND provider IN ('gmail','outlook') AND status = 'connected' AND is_suspended = 0"
@@ -449,23 +536,15 @@ async function pullUnmatched() {
   let untracked = 0
   let attached = 0
   for (const mb of mailboxes) {
-    let inbound = []
     try {
-      inbound = mb.provider === 'outlook'
-        ? await outlookRecentInbound(mb, { withinDays: 2, max: 25 })
-        : await gmailRecentInbound(mb, { withinDays: 2, max: 25 })
+      const result = await syncMailboxInbound(mb)
+      attached += result.attached
+      untracked += result.untracked
     } catch (err) {
       db.prepare('UPDATE mailboxes SET last_error = ? WHERE id = ?')
         .run(String(err?.message || err).slice(0, 300), mb.id)
       continue
     }
-
-    for (const msg of inbound) {
-      const result = ingestRecentInbound(mb, msg)
-      if (result === 'attached') attached++
-      else if (result === 'untracked') untracked++
-    }
-    db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now') WHERE id = ?").run(mb.id)
   }
   const parts = []
   if (attached) parts.push(`${attached} campaign repl(ies) attached`)
@@ -504,6 +583,7 @@ export const jobs = {
   rollUpWarmupStats,
   adjustWarmup,
   pullUnmatched,
+  pullMailboxInbound,
   ingestRecentInbound,
   openDueRuns,
   dispatchSeedSends,

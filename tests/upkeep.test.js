@@ -563,6 +563,58 @@ test('a stranger reply still lands in untracked', () => {
   ).get())
 })
 
+test('a reply to a campaign test send attaches when the recipient is a known lead', () => {
+  const sender = seedMailbox(db, owner.id, 'test-sender@example.com')
+  const lead = seedLead(db, owner.id, 'm.elnakeeb@gmail.com')
+  const campaign = seedCampaign(db, owner.id, 'Test send reply', sender.id)
+  db.prepare(
+    `INSERT INTO messages
+       (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id, send_status)
+     VALUES (?, ?, NULL, ?, 'out', '[TEST] Intro', 'Hi', ?, ?, 'test-out-1', 'gmail-test-thread', 'test')`
+  ).run(owner.id, campaign.id, sender.id, sender.email, lead.email)
+
+  const result = jobs.ingestRecentInbound(sender, {
+    providerMessageId: 'test-reply-1',
+    threadId: 'gmail-test-thread',
+    fromEmail: lead.email,
+    toEmail: sender.email,
+    subject: 'Re: [TEST] Intro',
+    body: 'Got it — looks good.',
+    receivedAt: iso(-1_000),
+  })
+
+  assert.equal(result, 'attached')
+  const inbound = db.prepare("SELECT * FROM messages WHERE provider_message_id = 'test-reply-1'").get()
+  assert.equal(inbound.campaign_id, campaign.id)
+  assert.equal(inbound.lead_id, lead.id)
+  assert.equal(inbound.direction, 'in')
+})
+
+test('a reply to a test send from an unknown address is recorded as untracked', () => {
+  const sender = seedMailbox(db, owner.id, 'test-sender2@example.com')
+  const campaign = seedCampaign(db, owner.id, 'Test to personal inbox', sender.id)
+  db.prepare(
+    `INSERT INTO messages
+       (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id, send_status)
+     VALUES (?, ?, NULL, ?, 'out', '[TEST] Intro', 'Hi', ?, ?, 'test-out-2', 'gmail-test-thread-2', 'test')`
+  ).run(owner.id, campaign.id, sender.id, sender.email, 'personal.tester@example.com')
+
+  const result = jobs.ingestRecentInbound(sender, {
+    providerMessageId: 'test-reply-2',
+    threadId: 'gmail-test-thread-2',
+    fromEmail: 'personal.tester@example.com',
+    toEmail: sender.email,
+    subject: 'Re: [TEST] Intro',
+    body: 'Replying from my personal Gmail.',
+    receivedAt: iso(-1_000),
+  })
+
+  assert.equal(result, 'untracked')
+  assert.ok(db.prepare(
+    "SELECT 1 FROM unmatched_messages WHERE provider_message_id = 'test-reply-2'"
+  ).get())
+})
+
 // ---- the whole pass ----------------------------------------------------------
 
 test('a failing job cannot take down the pass or the tick', async () => {

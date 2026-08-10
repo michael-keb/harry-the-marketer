@@ -656,6 +656,8 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     'ALTER TABLE campaigns ADD COLUMN stop_on_source_reply INTEGER NOT NULL DEFAULT 0',
     "ALTER TABLE campaigns ADD COLUMN tracking_domain TEXT DEFAULT ''",
     "ALTER TABLE campaigns ADD COLUMN reply_to TEXT DEFAULT ''",
+    // Outreach mode chosen at create: email | sms | multi (email + SMS).
+    "ALTER TABLE campaigns ADD COLUMN channel_mode TEXT NOT NULL DEFAULT 'email'",
 
     // --- mailboxes: warmup, suspension, per-client scope.
     'ALTER TABLE mailboxes ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0',

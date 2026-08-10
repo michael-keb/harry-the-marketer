@@ -155,7 +155,8 @@ function DuplicateModal({ campaign, onClose, onDone }) {
               <li>Any copy you approved for its steps</li>
               <li>Behaviour settings</li>
               <li>The sending window</li>
-              <li>The attached mailboxes</li>
+              <li>The attached mailboxes and SMS senders</li>
+              <li>Campaign type (Email / SMS / Email + SMS)</li>
             </ul>
           </div>
           <div className="rounded-lg border border-slate-200 bg-white p-3">

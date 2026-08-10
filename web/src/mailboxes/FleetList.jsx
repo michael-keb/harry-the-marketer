@@ -127,6 +127,7 @@ export default function FleetList({ onMeta, onAdd }) {
   const [bulkMode, setBulkMode] = useState('')
   const [lookup, setLookup] = useState(false)
   const [fleetAll, setFleetAll] = useState([])
+  const [syncingId, setSyncingId] = useState(null)
   const [announcement, say] = useAnnounce()
 
   const query = useMemo(() => toQuery(filters), [filters])
@@ -170,8 +171,39 @@ export default function FleetList({ onMeta, onAdd }) {
 
   const toggleRow = (id, on) => setSelected((s) => (on ? [...new Set([...s, id])] : s.filter((x) => x !== id)))
 
+  const canSyncInbound = (row) => row.provider === 'gmail' || row.provider === 'outlook'
+    || row.type === 'GMAIL' || row.type === 'OUTLOOK'
+
+  const syncReplies = async (row) => {
+    setSyncingId(row.id)
+    try {
+      const res = await api.post(`/api/mailboxes/${row.id}/sync-inbound`)
+      const msg = res.scanned
+        ? `${row.fromEmail}: scanned ${res.scanned} message(s) — ${res.attached} attached, ${res.untracked} untracked`
+        : `${row.fromEmail}: no recent inbound messages found`
+      say(msg)
+      toast(msg, res.attached || res.untracked ? 'success' : 'info')
+      refresh()
+    } catch (err) {
+      toast(err.message, 'error')
+    } finally {
+      setSyncingId(null)
+    }
+  }
+
   const rowActions = (row) => (
     <span className="flex flex-wrap items-center gap-2">
+      {canSyncInbound(row) && (
+        <button
+          type="button"
+          className="btn-ghost px-2 py-1 text-xs cursor-pointer"
+          disabled={syncingId === row.id}
+          onClick={() => syncReplies(row)}
+          aria-label={`Sync replies for ${row.fromEmail}`}
+        >
+          {syncingId === row.id ? 'Syncing…' : 'Sync replies'}
+        </button>
+      )}
       <button
         type="button"
         className="btn-ghost px-2 py-1 text-xs cursor-pointer"

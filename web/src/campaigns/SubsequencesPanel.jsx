@@ -52,7 +52,7 @@ export default function SubsequencesPanel({ campaign, steps = [], onChanged }) {
     <Panel
       id="subsequences"
       title="Follow-on campaigns"
-      note="Separate campaigns that leads move into from this one. Each is a real campaign with its own playbook, mailboxes and leads."
+      note="Separate campaigns that leads move into from this one. Each is a real campaign with its own playbook, senders and leads."
       actions={<button className="btn-ghost cursor-pointer py-1.5" onClick={() => setCreating(true)}>New follow-on campaign</button>}
     >
       {campaign.parent && (
@@ -192,7 +192,7 @@ function CreateSubsequenceModal({ campaignId, steps, onClose, onDone }) {
 
         <p className="text-xs text-slate-500">
           It is created as a draft with an empty playbook. Nothing routes into it, and nothing sends from it, until
-          you draw its diagram, attach a mailbox and start it.
+          you draw its diagram, attach senders and start it.
         </p>
 
         {err && !['name', 'triggers'].includes(err?.payload?.field) && (

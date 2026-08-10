@@ -52,6 +52,7 @@ import {
   owned, tx, audit, meter,
 } from './http.js'
 import { REVIVE_MAILBOX_SQL } from './schema.js'
+import { pullMailboxInbound } from '../upkeep.js'
 
 // The documented ceiling on the fleet list. A request above it is refused
 // rather than served, per Docs/README "unbounded requests are rejected".
@@ -909,6 +910,26 @@ export function register(api) {
     audit(req, { type: 'mailbox_tested', detail: `${m.email} — ${check.ok ? 'ok' : 'failed'}` })
     meter('mailboxes.test', 0, check.ok, m.email)
     return { ok: true, data: { accountId: m.id, ...check } }
+  }))
+
+  // ---- POST /api/mailboxes/:id/sync-inbound ---------------------------------
+  // Pull recent replies from Gmail/Outlook now instead of waiting for the
+  // engine's 20-second upkeep pass — useful after a test send or when a reply
+  // has not appeared yet.
+  api.post('/mailboxes/:id/sync-inbound', handler(async (req) => {
+    const m = loadMailbox(req)
+    if (!isOAuthProvider(m.provider)) {
+      throw invalid('id', 'Only connected Gmail and Outlook mailboxes can sync inbound replies')
+    }
+    if (m.status !== 'connected') {
+      throw invalid('id', `${m.email} is ${m.status} — reconnect it before syncing`)
+    }
+    if (m.is_suspended) {
+      throw invalid('id', `${m.email} is suspended — unsuspend it before syncing`)
+    }
+    const result = await pullMailboxInbound(m)
+    audit(req, { type: 'mailbox_synced', detail: `${m.email} — scanned ${result.scanned}, attached ${result.attached}, untracked ${result.untracked}` })
+    return { ok: true, mailbox: m.email, ...result }
   }))
 
   // ---- PUT /api/mailboxes/:id/suspend ---------------------------------------

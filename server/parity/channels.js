@@ -168,14 +168,30 @@ export function register(api) {
 
   api.post('/campaigns/:id/channel-accounts', handler((req) => {
     const c = owned('campaigns', req.params.id, req.wsId, 'campaign')
-    const accountId = int(req.body, 'channel_account_id', { required: true, min: 1 })
-    const account = owned('channel_accounts', accountId, req.wsId, 'channel account')
-    if (account.deleted_at) throw notFound('channel account')
-    db.prepare(
-      'INSERT OR IGNORE INTO campaign_channel_accounts (campaign_id, channel_account_id) VALUES (?, ?)'
-    ).run(c.id, account.id)
-    audit(req, { campaignId: c.id, type: 'campaign_channel_accounts_added', detail: String(account.id) })
-    return { ok: true }
+    let ids = []
+    if (Array.isArray(req.body?.channelAccountIds)) {
+      ids = req.body.channelAccountIds.map((v) => Number(v)).filter((n) => Number.isFinite(n) && n >= 1)
+    } else if (req.body?.channel_account_id !== undefined || req.body?.channelAccountId !== undefined) {
+      ids = [int(req.body, req.body?.channel_account_id !== undefined ? 'channel_account_id' : 'channelAccountId', {
+        required: true, min: 1,
+      })]
+    }
+    if (!ids.length) throw invalid('channelAccountIds', 'Select at least one SMS sender')
+    let attached = 0
+    for (const accountId of ids) {
+      const account = owned('channel_accounts', accountId, req.wsId, 'channel account')
+      if (account.deleted_at) throw notFound('channel account')
+      if (account.channel !== 'sms') throw invalid('channelAccountIds', 'Only SMS senders can be attached')
+      attached += db.prepare(
+        'INSERT OR IGNORE INTO campaign_channel_accounts (campaign_id, channel_account_id) VALUES (?, ?)'
+      ).run(c.id, account.id).changes
+    }
+    audit(req, {
+      campaignId: c.id,
+      type: 'campaign_channel_accounts_added',
+      detail: `${attached} attached by ${req.user.email}`,
+    })
+    return { ok: true, attached }
   }))
 
   api.delete('/campaigns/:id/channel-accounts/:accountId', handler((req) => {

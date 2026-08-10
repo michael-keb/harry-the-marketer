@@ -26,6 +26,7 @@
 // preferred path was taken the divergence is noted at the route itself.
 
 import { db } from '../db.js'
+import crypto from 'node:crypto'
 import { blockMatch, unsubscribeLead } from '../suppression.js'
 // Rates are read from server/metrics.js, never redefined here. `REAL_SEND` is
 // the one predicate that decides what counts as outreach, so a filtered rollup
@@ -48,6 +49,7 @@ import { dailyCap, remainingToday, isWarmingUp } from '../pacing.js'
 import { reputationScore } from './mailboxes.js'
 import { sendEmail } from '../mailer.js'
 import { gmailSend } from '../google.js'
+import { outlookSend } from '../microsoft.js'
 import { composeStepSample, exampleLead, CORE_INTENTS } from '../ai.js'
 // The intent route branches through the engine's own code rather than a copy of
 // it, so a hand-set intent and a classified one take the same path.
@@ -253,6 +255,39 @@ function campaignCounts(campaignId) {
   }
 }
 
+const CHANNEL_MODES = new Set(['email', 'sms', 'multi'])
+
+function channelModeOf(c) {
+  const mode = String(c?.channel_mode || 'email').toLowerCase()
+  return CHANNEL_MODES.has(mode) ? mode : 'email'
+}
+
+function parseChannelMode(body) {
+  const raw = body?.channelMode ?? body?.channel_mode
+  if (raw === undefined || raw === null || raw === '') return 'email'
+  const mode = String(raw).trim().toLowerCase()
+  if (!CHANNEL_MODES.has(mode)) {
+    throw invalid('channelMode', 'channelMode must be email, sms, or multi')
+  }
+  return mode
+}
+
+const STARTER_MERMAID = {
+  email: '',
+  sms: `flowchart TD
+  S([Start]) --> A[Send sms: Short intro and ask for a good time]
+  A -- no reply 2d --> B[Send sms: Brief follow-up with booking link]
+  B -- no reply 3d --> Lost([Lost: no reply])
+  A -- positive --> Won([Won: call booked])
+  B -- positive --> Won`,
+  multi: `flowchart TD
+  S([Start]) --> A[Send email: Intro and ask for 15 minutes]
+  A -- no reply 2d --> B[Send sms: Short nudge with booking link]
+  B -- no reply 3d --> Lost([Lost: no reply])
+  A -- positive --> Won([Won: call booked])
+  B -- positive --> Won`,
+}
+
 function campaignRow(c) {
   const counts = campaignCounts(c.id)
   const totals = campaignTotals(c.id)
@@ -267,6 +302,7 @@ function campaignRow(c) {
     clientId: c.client_id || null,
     parentCampaignId: c.parent_campaign_id || null,
     mailboxId: c.mailbox_id || null,
+    channelMode: channelModeOf(c),
     trackOpens: Boolean(c.track_opens),
     trackClicks: Boolean(c.track_clicks),
     stopOnReply: Boolean(c.stop_on_reply),
@@ -302,13 +338,24 @@ function statusLabel(c) {
 // Every unmet launch condition, together, rather than the first one found.
 function launchBlockers(campaign) {
   const blockers = []
+  const mode = channelModeOf(campaign)
   const graph = graphOf(campaign)
   if (!graph.valid) {
     blockers.push({ field: 'playbook', message: 'Fix the playbook before starting', errors: graph.errors })
   }
-  const mailboxes = db.prepare('SELECT COUNT(*) n FROM campaign_mailboxes WHERE campaign_id = ?').get(campaign.id).n
-  if (!mailboxes && !campaign.mailbox_id) {
-    blockers.push({ field: 'mailboxes', message: 'Attach a sending mailbox before starting' })
+  if (mode === 'email' || mode === 'multi') {
+    const mailboxes = db.prepare('SELECT COUNT(*) n FROM campaign_mailboxes WHERE campaign_id = ?').get(campaign.id).n
+    if (!mailboxes && !campaign.mailbox_id) {
+      blockers.push({ field: 'mailboxes', message: 'Attach a sending mailbox before starting' })
+    }
+  }
+  if (mode === 'sms' || mode === 'multi') {
+    const smsAccounts = db.prepare(
+      'SELECT COUNT(*) n FROM campaign_channel_accounts WHERE campaign_id = ?'
+    ).get(campaign.id).n
+    if (!smsAccounts) {
+      blockers.push({ field: 'sms_accounts', message: 'Attach an SMS sender before starting' })
+    }
   }
   const leads = db.prepare('SELECT COUNT(*) n FROM campaign_leads WHERE campaign_id = ?').get(campaign.id).n
   if (!leads) blockers.push({ field: 'leads', message: 'Attach at least one lead before starting' })
@@ -535,6 +582,7 @@ export function register(api) {
       throw invalid('name', 'name cannot be blank — leave it out entirely to get the default "Untitled campaign"')
     }
     const name = str(req.body, 'name', { max: 200, fallback: '' }) || 'Untitled campaign'
+    const channelMode = parseChannelMode(req.body)
     const goalId = int(req.body, 'goalId', { min: 1, fallback: 0 })
     const clientId = int(req.body, 'clientId', { min: 1, fallback: 0 })
     if (goalId) owned('goals', goalId, req.wsId, 'goal')
@@ -548,15 +596,20 @@ export function register(api) {
     ).get(req.wsId, name)
     if (twin) return { ...campaignRow(twin), deduplicated: true }
 
+    const mermaid = STARTER_MERMAID[channelMode] || ''
     const created = tx(() => {
       const info = db.prepare(
-        `INSERT INTO campaigns (user_id, name, status, mermaid, owner_email, client_id, status_at)
-         VALUES (?, ?, 'draft', '', ?, ?, ?)`
-      ).run(req.wsId, name, req.user.email, clientId || null, nowIso())
+        `INSERT INTO campaigns (user_id, name, status, mermaid, owner_email, client_id, status_at, channel_mode)
+         VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)`
+      ).run(req.wsId, name, mermaid, req.user.email, clientId || null, nowIso(), channelMode)
       if (goalId) db.prepare('UPDATE goals SET campaign_id = ? WHERE id = ? AND user_id = ?').run(info.lastInsertRowid, goalId, req.wsId)
       return db.prepare('SELECT * FROM campaigns WHERE id = ?').get(info.lastInsertRowid)
     })
-    audit(req, { campaignId: created.id, type: 'campaign_created', detail: `${name} (${goalId ? 'goal' : 'manual'})` })
+    audit(req, {
+      campaignId: created.id,
+      type: 'campaign_created',
+      detail: `${name} (${goalId ? 'goal' : 'manual'}, ${channelMode})`,
+    })
     return { ok: true, ...campaignRow(created) }
   }))
 
@@ -1029,17 +1082,22 @@ export function register(api) {
         `INSERT INTO campaigns
            (user_id, name, status, mailbox_id, mermaid, client_id, parent_campaign_id, owner_email,
             status_reason, status_at, schedule, settings, track_opens, track_clicks,
-            stop_on_reply, stop_on_source_reply, tracking_domain, reply_to)
-         VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            stop_on_reply, stop_on_source_reply, tracking_domain, reply_to, channel_mode)
+         VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         source.user_id, newName, source.mailbox_id, source.mermaid, source.client_id,
         parentId, source.owner_email, nowIso(), source.schedule || '{}', source.settings || '{}',
         source.track_opens, source.track_clicks, source.stop_on_reply, source.stop_on_source_reply,
-        source.tracking_domain || '', source.reply_to || ''
+        source.tracking_domain || '', source.reply_to || '', channelModeOf(source)
       )
       const newId = info.lastInsertRowid
       for (const row of db.prepare('SELECT mailbox_id FROM campaign_mailboxes WHERE campaign_id = ?').all(source.id)) {
         db.prepare('INSERT OR IGNORE INTO campaign_mailboxes (campaign_id, mailbox_id) VALUES (?, ?)').run(newId, row.mailbox_id)
+      }
+      for (const row of db.prepare('SELECT channel_account_id FROM campaign_channel_accounts WHERE campaign_id = ?').all(source.id)) {
+        db.prepare(
+          'INSERT OR IGNORE INTO campaign_channel_accounts (campaign_id, channel_account_id) VALUES (?, ?)'
+        ).run(newId, row.channel_account_id)
       }
       // Approved copy is configuration, not a statistic — it travels with the
       // playbook step it belongs to. Leads, messages and stats do not.
@@ -2365,15 +2423,31 @@ export function register(api) {
       meetingLink: owner?.meeting_link || '',
     })
 
+    let providerMessageId = ''
+    let threadId = ''
+    const subject = `[TEST] ${composed.subject}`
     if (mailbox.provider === 'gmail') {
-      await gmailSend(mailbox, { to: toEmail, subject: `[TEST] ${composed.subject}`, body: composed.body, workspaceId: req.wsId })
+      const result = await gmailSend(mailbox, { to: toEmail, subject, body: composed.body, workspaceId: req.wsId })
+      providerMessageId = result.messageId
+      threadId = result.threadId || ''
+    } else if (mailbox.provider === 'outlook') {
+      const result = await outlookSend(mailbox, { to: toEmail, subject, body: composed.body, workspaceId: req.wsId })
+      providerMessageId = result.messageId
+      threadId = result.threadId || ''
+    } else if (mailbox.provider === 'sandbox') {
+      providerMessageId = `sbx-test-${crypto.randomBytes(6).toString('hex')}`
+      threadId = `sbx-test-thr-${crypto.randomBytes(6).toString('hex')}`
+    } else {
+      throw invalid('mailbox_id', `Test sends require a connected Gmail, Outlook, or sandbox mailbox — ${mailbox.email} is ${mailbox.provider}`)
     }
     // Flagged as a test in the one column every aggregate here filters on.
+    // thread_id and provider_message_id are stored so inbound sync can match
+    // replies — without them a test reply never reaches the Inbox.
     db.prepare(
       `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body,
-         from_email, to_email, thread_id, node_id, is_read, send_status)
-       VALUES (?, ?, NULL, ?, 'out', ?, ?, ?, ?, '', ?, 1, 'test')`
-    ).run(req.wsId, c.id, mailbox.id, `[TEST] ${composed.subject}`, composed.body, mailbox.email, toEmail, `test:${nodeId}`)
+         from_email, to_email, provider_message_id, thread_id, node_id, is_read, send_status)
+       VALUES (?, ?, NULL, ?, 'out', ?, ?, ?, ?, ?, ?, ?, 1, 'test')`
+    ).run(req.wsId, c.id, mailbox.id, subject, composed.body, mailbox.email, toEmail, providerMessageId, threadId, `test:${nodeId}`)
     bumpQuota(mailbox)
     audit(req, { campaignId: c.id, type: 'campaign_test_send', detail: `${nodeId} -> ${toEmail} by ${req.user.email}` })
     return {

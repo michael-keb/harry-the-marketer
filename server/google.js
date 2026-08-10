@@ -191,7 +191,11 @@ export async function gmailThread(mailbox, threadId) {
 // mailbox with ten years of history costs the same as a fresh one. The list
 // call is cheap; only the capped detail fetches are not.
 export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
-  const query = encodeURIComponent(`in:inbox -from:me newer_than:${Math.max(1, withinDays)}d`)
+  // Include spam — a mis-filtered reply is still a reply. Without this, mail
+  // that never reached Primary still vanishes from Harry entirely.
+  const query = encodeURIComponent(
+    `-from:me newer_than:${Math.max(1, withinDays)}d (in:inbox OR in:spam)`
+  )
   const list = await gmailFetch(mailbox, `messages?q=${query}&maxResults=${Math.max(1, max)}`)
   const ids = (list.messages || []).map((m) => m.id)
   if (!ids.length) return []

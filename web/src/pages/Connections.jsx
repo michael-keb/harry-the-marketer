@@ -80,9 +80,6 @@ export default function Connections() {
   const googleConfigured = meta?.googleConfigured !== false
   const googleOAuthVerified = Boolean(meta?.googleOAuthVerified)
   const microsoftConfigured = meta?.microsoftConfigured !== false
-  const healthyGmail = (meta?.data || []).some(
-    (m) => m.provider === 'gmail' && (m.isSmtpSuccess || m.sendable) && m.isImapSuccess !== false
-  )
 
   const seedDomain = useMemo(() => {
     const gmail = (meta?.data || []).find((m) => m.provider === 'gmail')
@@ -122,10 +119,7 @@ export default function Connections() {
 
           {googleConfigured && !googleOAuthVerified && !oauthNoticeHidden && (
             <Notice
-              tone={healthyGmail ? 'info' : undefined}
-              title={healthyGmail
-                ? 'Gmail is working — Google app is still in Testing'
-                : 'Before Connect Gmail works: add Test users in Google Cloud'}
+              title="Google OAuth is still in Testing — not publicly verified"
               onDismiss={() => hideOauthNotice()}
               actions={
                 <>
@@ -135,25 +129,16 @@ export default function Connections() {
                 </>
               }
             >
-              {healthyGmail ? (
-                <>
-                  Your connected Gmail accounts are fine. The yellow warning only means the OAuth app is not
-                  publicly verified yet — anyone <span className="font-medium">not</span> on the Test users list
-                  will see “Access blocked”. App name in the console must be{' '}
-                  <span className="font-medium">Harry The Marketer</span>. Public verification is a separate
-                  Google review (see <span className="font-mono">GOOGLE-VERIFICATION-PACK.md</span>); until then
-                  stay in Testing and add each sender as a test user.
-                </>
-              ) : (
-                <>
-                  <ol className="mt-1 list-decimal space-y-1 pl-5 text-sm">
-                    <li>Google Cloud Console → <span className="font-medium">Audience → Test users</span> — add every Gmail that will click Connect (e.g. michael@praxis-au.com, michael.keb83@gmail.com).</li>
-                    <li><span className="font-medium">Branding</span> — app name exactly <span className="font-medium">Harry The Marketer</span>; Privacy <span className="font-mono">https://harrythemarketer.com/privacy</span>; Terms <span className="font-mono">…/terms</span>.</li>
-                    <li><span className="font-medium">Clients</span> — redirect URIs include <span className="font-mono">http://localhost:8131/api/google/callback</span> and <span className="font-mono">https://harrythemarketer.com/api/google/callback</span>.</li>
-                    <li>Then use <span className="font-medium">Add email → Gmail</span> while signed into that test user.</li>
-                  </ol>
-                </>
-              )}
+              A connected mailbox does not mean Google has verified the app. Until Publishing status is
+              In production, every Gmail that clicks Connect must be on the Test users list or they get
+              “Access blocked”. App name in the console must be{' '}
+              <span className="font-medium">Harry The Marketer</span>.
+              <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
+                <li>Google Cloud Console → <span className="font-medium">Audience → Test users</span> — add every Gmail that will click Connect.</li>
+                <li><span className="font-medium">Branding</span> — app name exactly <span className="font-medium">Harry The Marketer</span>; Privacy <span className="font-mono">https://harrythemarketer.com/privacy</span>; Terms <span className="font-mono">…/terms</span>.</li>
+                <li><span className="font-medium">Clients</span> — redirect URIs include <span className="font-mono">http://localhost:8131/api/google/callback</span> and <span className="font-mono">https://harrythemarketer.com/api/google/callback</span>.</li>
+                <li>Then use <span className="font-medium">Add email → Gmail</span> while signed into that test user.</li>
+              </ol>
             </Notice>
           )}
 
