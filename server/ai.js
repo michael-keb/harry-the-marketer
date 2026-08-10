@@ -204,9 +204,41 @@ function templateCompose({ instruction, lead, thread, senderName, consentLink })
 // Baseline intents the engine always understands, beyond the campaign's own edge labels.
 export const CORE_INTENTS = ['interested', 'not interested', 'not now', 'question', 'unsubscribe', 'out of office', 'other']
 
+// The part of a reply the sender actually typed, with the quoted history cut
+// off. Every outbound email carries the "Unsubscribe here:" footer, and mail
+// clients quote the original below the reply — so classifying the full body
+// means every reply "contains" the word unsubscribe and the keyword heuristic
+// opts the lead out of a conversation they just joined. Classification must
+// only ever read the fresh text; the thread transcript is passed separately
+// for context.
+const QUOTE_MARKERS = [
+  /\bOn [\s\S]{5,300}? wrote:/, // Gmail/Apple Mail attribution, tolerating a wrapped line
+  /^\s*-{2,}\s*Original Message\s*-{2,}/im, // Outlook classic
+  /^\s*-{2,}\s*Forwarded message\s*-{2,}/im,
+  /^From:\s.+$/m, // Outlook top-post header block
+  /^>+/m, // any quoted line
+  /^--\s*$/m, // signature delimiter
+  /^_{10,}\s*$/m, // Outlook divider
+  /^Sent from my /im,
+]
+
+export function freshReplyText(body) {
+  const text = String(body || '')
+  let cut = text.length
+  for (const marker of QUOTE_MARKERS) {
+    const idx = text.search(marker)
+    if (idx !== -1 && idx < cut) cut = idx
+  }
+  const fresh = text.slice(0, cut).trim()
+  // A reply that is nothing but quoted text (or an unrecognised layout) falls
+  // back to the full body — worse input, but never an empty classification.
+  return fresh || text
+}
+
 export async function classifyReply({ intents, replyText, thread, businessContext }) {
   const vocabulary = [...new Set([...(intents || []), ...CORE_INTENTS])]
-  const heuristic = heuristicClassify(replyText, vocabulary)
+  const fresh = freshReplyText(replyText)
+  const heuristic = heuristicClassify(fresh, vocabulary)
   // Unsubscribe requests are honored regardless of what the model would say.
   if (heuristic.intent === 'unsubscribe' && heuristic.confidence >= 0.9) return { ...heuristic, via: 'heuristic' }
   try {
@@ -217,7 +249,7 @@ export async function classifyReply({ intents, replyText, thread, businessContex
         `Pick exactly one intent from the allowed list. "other" means none fit well and a human should look.`,
       user:
         (thread?.length ? `Thread so far:\n${threadTranscript(thread)}\n\n` : '') +
-        `Reply to classify:\n"""\n${String(replyText).slice(0, 4000)}\n"""\n\nAllowed intents: ${vocabulary.join(' | ')}`,
+        `Reply to classify (quoted history removed):\n"""\n${fresh.slice(0, 4000)}\n"""\n\nAllowed intents: ${vocabulary.join(' | ')}`,
       op: 'classify',
       maxTokens: 256,
       effort: 'low',
