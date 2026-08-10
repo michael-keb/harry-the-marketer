@@ -191,10 +191,10 @@ export async function gmailThread(mailbox, threadId) {
 // mailbox with ten years of history costs the same as a fresh one. The list
 // call is cheap; only the capped detail fetches are not.
 export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
-  // Include spam — a mis-filtered reply is still a reply. Without this, mail
-  // that never reached Primary still vanishes from Harry entirely.
+  // Include spam — a mis-filtered reply is still a reply. Curly-brace OR is the
+  // Gmail-search form; `(in:inbox OR in:spam)` is rejected by the API.
   const query = encodeURIComponent(
-    `-from:me newer_than:${Math.max(1, withinDays)}d (in:inbox OR in:spam)`
+    `-from:me newer_than:${Math.max(1, withinDays)}d {in:inbox in:spam}`
   )
   const list = await gmailFetch(mailbox, `messages?q=${query}&maxResults=${Math.max(1, max)}`)
   const ids = (list.messages || []).map((m) => m.id)

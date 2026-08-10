@@ -126,6 +126,15 @@ function loadMailbox(req) {
   return row
 }
 
+// OAuth sync/send paths need tokens; SAFE_COLUMNS deliberately omits them.
+function loadMailboxWithCredentials(req) {
+  const id = mailboxId(req)
+  const row = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL')
+    .get(id, req.wsId)
+  if (!row) throw notFound('email account')
+  return row
+}
+
 function owner(wsId) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(wsId)
 }
@@ -917,7 +926,7 @@ export function register(api) {
   // engine's 20-second upkeep pass — useful after a test send or when a reply
   // has not appeared yet.
   api.post('/mailboxes/:id/sync-inbound', handler(async (req) => {
-    const m = loadMailbox(req)
+    const m = loadMailboxWithCredentials(req)
     if (!isOAuthProvider(m.provider)) {
       throw invalid('id', 'Only connected Gmail and Outlook mailboxes can sync inbound replies')
     }
@@ -927,7 +936,17 @@ export function register(api) {
     if (m.is_suspended) {
       throw invalid('id', `${m.email} is suspended — unsuspend it before syncing`)
     }
-    const result = await pullMailboxInbound(m)
+    if (!m.refresh_token) {
+      throw invalid('id', `${m.email} has no refresh token — reconnect it before syncing`)
+    }
+    let result
+    try {
+      result = await pullMailboxInbound(m)
+    } catch (err) {
+      const detail = String(err?.message || err).slice(0, 300)
+      db.prepare('UPDATE mailboxes SET last_error = ? WHERE id = ?').run(detail, m.id)
+      throw new HttpError(502, { error: 'sync_failed', message: detail || 'Inbound sync failed' })
+    }
     audit(req, { type: 'mailbox_synced', detail: `${m.email} — scanned ${result.scanned}, attached ${result.attached}, untracked ${result.untracked}` })
     return { ok: true, mailbox: m.email, ...result }
   }))

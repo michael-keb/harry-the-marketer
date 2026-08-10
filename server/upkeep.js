@@ -524,6 +524,10 @@ async function syncMailboxInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
 
 // On-demand pull for one mailbox — used by the fleet "Sync replies" action.
 export async function pullMailboxInbound(mailbox, opts = {}) {
+  if (!mailbox.refresh_token) {
+    const full = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(mailbox.id)
+    if (full) mailbox = full
+  }
   return syncMailboxInbound(mailbox, { withinDays: 7, max: 50, ...opts })
 }
 
