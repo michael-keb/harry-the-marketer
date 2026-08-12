@@ -98,6 +98,21 @@ export function registerSendControls(api) {
       if (err instanceof RuleError) return res.status(400).json({ error: err.message, field: err.field })
       throw err
     }
+    // Coral Marten: when the workspace already gates sending behind approval,
+    // the same control gates edits to shared automation defaults (reply handling,
+    // delays, variants, random windows) — not ordinary hour/cap narrowing.
+    // Callers that have already confirmed pass `confirmed: true`.
+    const AUTOMATION_KEYS = ['replyHandling', 'defaultDelays', 'defaultMessageVariants', 'randomWindow']
+    const touchesAutomation = AUTOMATION_KEYS.some((k) => req.body?.rules?.[k] !== undefined)
+    if (scope === 'workspace' && touchesAutomation) {
+      const owner = db.prepare('SELECT require_approval FROM users WHERE id = ?').get(req.wsId)
+      if (owner?.require_approval && !req.body?.confirmed) {
+        return res.status(409).json({
+          error: 'approval_required',
+          message: 'This workspace requires confirmation before changing global campaign defaults. Re-submit with confirmed: true.',
+        })
+      }
+    }
     saveRules(req.wsId, scope, id, clean, req.user?.email || '')
     const view = rulesView(req.wsId, scope, id)
     if (scope === 'campaign') syncCampaignScheduleColumn(id, view.effective)

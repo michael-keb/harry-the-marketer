@@ -658,6 +658,10 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     "ALTER TABLE campaigns ADD COLUMN reply_to TEXT DEFAULT ''",
     // Outreach mode chosen at create: email | sms | multi (email + SMS).
     "ALTER TABLE campaigns ADD COLUMN channel_mode TEXT NOT NULL DEFAULT 'email'",
+    // Exact-time / randomised-window send scheduling (server/step-timing.js).
+    "ALTER TABLE campaigns ADD COLUMN email_subject TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE campaigns ADD COLUMN defaults_snapshot TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE campaigns ADD COLUMN launched_at TEXT DEFAULT ''",
 
     // --- mailboxes: warmup, suspension, per-client scope.
     'ALTER TABLE mailboxes ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0',
@@ -711,27 +715,50 @@ function defaultClause(dflt) {
   return ` DEFAULT ${s}`
 }
 
-function migrateOutlookProvider(db) {
+export function migrateOutlookProvider(db) {
   const ddl = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='mailboxes'").get()?.sql || ''
-  if (ddl.includes("'outlook'")) return
+  if (!ddl || ddl.includes("'outlook'")) return
   const cols = db.prepare('PRAGMA table_info(mailboxes)').all()
   if (!cols.length) return
   const colNames = cols.map((c) => c.name).join(', ')
-  const colDefs = cols.map((c) => {
-    if (c.name === 'provider') return "provider TEXT NOT NULL CHECK (provider IN ('gmail','outlook','sandbox'))"
-    let def = `${c.name} ${c.type || 'TEXT'}`
-    if (c.pk) def += ' PRIMARY KEY'
-    else if (c.notnull) def += ' NOT NULL'
-    def += defaultClause(c.dflt_value != null && !c.pk ? c.dflt_value : null)
-    return def
-  })
-  db.exec('DROP TABLE IF EXISTS mailboxes_outlook_mig')
+
+  // Widen the provider CHECK to include 'outlook'. Rewrite the REAL table DDL
+  // (which carries user_id's `REFERENCES users(id) ON DELETE CASCADE`, the
+  // `status` CHECK and every NOT NULL) rather than reconstructing columns from
+  // PRAGMA table_info — that PRAGMA cannot see CHECK or FOREIGN KEY clauses, so
+  // the old rebuild silently dropped the cascade and the status CHECK, leaving a
+  // table that orphans mailboxes on user delete and accepts any status string.
+  const tmp = 'mailboxes_outlook_mig'
+  let newDdl = ddl
+    // Rename only the table being declared (right after CREATE TABLE), not any
+    // other `mailboxes` token that may appear inside the body.
+    .replace(/^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(["'`\[]?)mailboxes(["'`\]]?)/i, `$1${tmp}`)
+    // Widen the provider allow-list wherever it appears in the CHECK.
+    .replace(/provider\s+IN\s*\(([^)]*)\)/i, "provider IN ('gmail','outlook','sandbox')")
+
+  const rewriteWorked = newDdl.includes(tmp) && newDdl.includes("'outlook'") && newDdl !== ddl
+
+  db.exec(`DROP TABLE IF EXISTS ${tmp}`)
   db.pragma('foreign_keys = OFF')
   try {
-    db.exec(`CREATE TABLE mailboxes_outlook_mig (${colDefs.join(', ')}, UNIQUE (user_id, provider, email))`)
-    db.exec(`INSERT INTO mailboxes_outlook_mig (${colNames}) SELECT ${colNames} FROM mailboxes`)
+    if (rewriteWorked) {
+      db.exec(newDdl)
+    } else {
+      // Fallback: the stored DDL didn't match the expected shape. Reconstruct
+      // from PRAGMA (loses CHECK/FK, as before) rather than fail the boot.
+      const colDefs = cols.map((c) => {
+        if (c.name === 'provider') return "provider TEXT NOT NULL CHECK (provider IN ('gmail','outlook','sandbox'))"
+        let def = `${c.name} ${c.type || 'TEXT'}`
+        if (c.pk) def += ' PRIMARY KEY'
+        else if (c.notnull) def += ' NOT NULL'
+        def += defaultClause(c.dflt_value != null && !c.pk ? c.dflt_value : null)
+        return def
+      })
+      db.exec(`CREATE TABLE ${tmp} (${colDefs.join(', ')}, UNIQUE (user_id, provider, email))`)
+    }
+    db.exec(`INSERT INTO ${tmp} (${colNames}) SELECT ${colNames} FROM mailboxes`)
     db.exec('DROP TABLE mailboxes')
-    db.exec('ALTER TABLE mailboxes_outlook_mig RENAME TO mailboxes')
+    db.exec(`ALTER TABLE ${tmp} RENAME TO mailboxes`)
   } finally {
     db.pragma('foreign_keys = ON')
   }

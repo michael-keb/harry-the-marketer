@@ -215,6 +215,35 @@ test('a scheduled reply to a suppressed address is cancelled, not sent', async (
   assert.ok(trail >= 1, 'the refusal is on the record')
 })
 
+test('a scheduled send orphaned in "sending" past the grace window is reclaimed', async () => {
+  const mailbox = seedMailbox(db, owner.id, 'stuck@example.com')
+  const campaign = seedCampaign(db, owner.id, 'Stuck campaign', mailbox.id)
+  const lead = seedLead(db, owner.id, 'stuck@acme.test')
+  // Orphaned: a process died mid-send ~20 min ago, leaving it in 'sending'.
+  db.prepare(
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, scheduled_at, send_status)
+     VALUES (?, ?, ?, ?, 'out', 'Stuck', 'Body', ?, 'sending')`
+  ).run(owner.id, campaign.id, lead.id, mailbox.id, iso(-20 * 60e3))
+  // Fresh: legitimately in-flight this instant — must NOT be reclaimed.
+  db.prepare(
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, scheduled_at, send_status)
+     VALUES (?, ?, ?, ?, 'out', 'Fresh', 'Body', ?, 'sending')`
+  ).run(owner.id, campaign.id, lead.id, mailbox.id, iso(-30e3))
+
+  await jobs.dispatchScheduled()
+
+  // The stale row was requeued and then dispatched (its intent row is deleted on
+  // a successful send); either way it is no longer stranded in 'sending'.
+  const stuck = db.prepare("SELECT send_status FROM messages WHERE subject = 'Stuck'").get()
+  assert.notEqual(stuck?.send_status, 'sending', 'the orphaned row is no longer stranded')
+  // A fresh in-flight send inside the grace window is left untouched.
+  assert.equal(
+    db.prepare("SELECT send_status FROM messages WHERE subject = 'Fresh'").get().send_status,
+    'sending',
+    'a fresh in-flight send is not reclaimed',
+  )
+})
+
 // ---- warm-up statistics ------------------------------------------------------
 
 // `warmup_stats` had two readers and no writer outside test files, so the panel

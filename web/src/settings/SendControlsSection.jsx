@@ -2,9 +2,10 @@
 // campaign's Settings tab (see send-controls/CampaignSendControls.jsx).
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api.js'
-import { useToast } from '../ui.jsx'
+import { useToast, Modal } from '../ui.jsx'
 import {
-  SendStatus, HoursGroup, PeopleGroup, VolumeGroup, BrakesGroup, SchedulePreview,
+  SendStatus, HoursGroup, PeopleGroup, VolumeGroup, BrakesGroup,
+  AutomationDefaultsGroup, SchedulePreview,
 } from '../send-controls/shared.jsx'
 
 export default function SendControlsSection() {
@@ -14,6 +15,10 @@ export default function SendControlsSection() {
   const [status, setStatus] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  // When the workspace gates automation-default edits behind approval, the
+  // server answers 409 approval_required. We hold the pending change here and
+  // only re-submit with confirmed: true once the operator confirms in the modal.
+  const [confirm, setConfirm] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -30,20 +35,57 @@ export default function SendControlsSection() {
 
   useEffect(() => { load() }, [load])
 
+  // The actual write. `confirmed` is sent only after the operator has agreed to
+  // it in the modal — never blanket-hardcoded, or the approval gate protects
+  // nothing.
+  const put = async (patch, message, confirmed) => {
+    const res = await api.put('/api/send-rules', {
+      scope: 'workspace',
+      rules: patch,
+      ...(confirmed ? { confirmed: true } : {}),
+    })
+    setEffective(res.effective)
+    setRules((r) => ({ ...r, ...patch }))
+    if (res.warning) toast(res.warning, 'error')
+    else if (message) toast(message)
+    await load()
+  }
+
   const save = async (patch, message) => {
     setBusy(true)
     try {
-      const res = await api.put('/api/send-rules', { scope: 'workspace', rules: patch })
-      setEffective(res.effective)
-      setRules((r) => ({ ...r, ...patch }))
-      if (res.warning) toast(res.warning, 'error')
-      else if (message) toast(message)
-      await load()
+      await put(patch, message, false)
+      setBusy(false)
       return true
     } catch (err) {
+      // Workspace requires sign-off before changing shared automation defaults:
+      // surface a confirmation the operator has to accept, then retry.
+      if (err?.status === 409 && err?.payload?.error === 'approval_required') {
+        setBusy(false)
+        return await new Promise((resolve) => setConfirm({ patch, message, note: err.message, resolve }))
+      }
       toast(err.message, 'error')
+      setBusy(false)
       return false
+    }
+  }
+
+  const confirmSave = async () => {
+    const pending = confirm
+    setConfirm(null)
+    setBusy(true)
+    try {
+      await put(pending.patch, pending.message, true)
+      pending.resolve(true)
+    } catch (err) {
+      toast(err.message, 'error')
+      pending.resolve(false)
     } finally { setBusy(false) }
+  }
+
+  const cancelConfirm = () => {
+    confirm?.resolve(false)
+    setConfirm(null)
   }
 
   if (error) {
@@ -75,9 +117,29 @@ export default function SendControlsSection() {
         <PeopleGroup rules={rules} set={set} save={save} cancel={load} busy={busy} />
         <VolumeGroup rules={rules} set={set} save={save} cancel={load} busy={busy} />
         <BrakesGroup rules={rules} set={set} save={save} cancel={load} busy={busy} />
+        <AutomationDefaultsGroup rules={rules} set={set} save={save} cancel={load} busy={busy} />
       </section>
 
       <SchedulePreview />
+
+      {confirm && (
+        <Modal
+          title="Confirm change to shared defaults"
+          lead={confirm.note}
+          onClose={cancelConfirm}
+        >
+          <p className="text-sm text-slate-600">
+            This edit changes the automation defaults every new campaign inherits. Your workspace requires
+            confirmation before it takes effect.
+          </p>
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button type="button" className="btn-ghost" disabled={busy} onClick={cancelConfirm}>Cancel</button>
+            <button type="button" className="btn-primary" disabled={busy} onClick={confirmSave}>
+              {busy ? 'Saving…' : 'Confirm and save'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </>
   )
 }

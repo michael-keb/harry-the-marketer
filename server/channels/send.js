@@ -70,7 +70,13 @@ export async function sendSms({ account, user, campaign, lead, nodeId, body }) {
   }
   if (!twilioConfigured(account)) throw new Error('SMS account is not configured')
   if (remainingChannelQuota(account) <= 0) {
-    throw new Error(`Daily SMS limit reached for ${account.phone_number || account.display_name}`)
+    // A daily cap is a "come back tomorrow", not a failure — tag it transient so
+    // the engine defers the lead to the next window instead of stranding it in a
+    // terminal 'error' state. The engine also gates on this quota before it ever
+    // reaches here; this is the belt-and-braces at the transport.
+    const err = new Error(`Daily SMS limit reached for ${account.phone_number || account.display_name}`)
+    err.transient = true
+    throw err
   }
 
   const existing = db.prepare(

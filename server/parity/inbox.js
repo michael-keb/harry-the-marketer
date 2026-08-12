@@ -92,6 +92,12 @@ export const INBOX_STATES = [
 // as `rowType` so a client never has to guess which shape it received.
 const MESSAGE_STATES = new Set(['scheduled', 'sent'])
 
+// How long a message may sit in 'sending' before DELETE /scheduled/:id treats
+// it as stranded (process killed mid-send) and lets the user reclaim it. Any
+// genuine send resolves to sent/failed in seconds; fifteen minutes is well
+// clear of that and of a slow provider round-trip.
+const SENDING_STALE_MS = 15 * 60 * 1000
+
 // The `lead_tasks.priority` CHECK constraint, restated where the inbox-side
 // task route can see it. Kept identical to PRIORITIES in server/parity/notes.js
 // on purpose: two routes writing one column must agree on what it accepts.
@@ -1240,9 +1246,13 @@ export function register(api) {
     // being emailed.
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.wsId)
     const sent = await sendEmail({ mailbox, user: user || { id: req.wsId }, campaign, lead, nodeId: 'manual', subject, body: outgoing, cc, bcc })
-    const written = db.prepare('SELECT id FROM messages WHERE provider_message_id = ? ORDER BY id DESC LIMIT 1').get(sent.providerMessageId)
+    // Scoped by user_id on both the read and the write. `provider_message_id` is
+    // a provider-assigned string that is unique only within an account, not
+    // across workspaces, so an unscoped lookup could match — and flip
+    // manual_reply / send_status on — another workspace's message row.
+    const written = db.prepare('SELECT id FROM messages WHERE provider_message_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1').get(sent.providerMessageId, req.wsId)
     if (written) {
-      db.prepare("UPDATE messages SET manual_reply = 1, send_status = 'sent' WHERE id = ?").run(written.id)
+      db.prepare("UPDATE messages SET manual_reply = 1, send_status = 'sent' WHERE id = ? AND user_id = ?").run(written.id, req.wsId)
     }
     audit(req, {
       campaignId: campaign.id, leadId: lead.id, type: 'manual_reply',
@@ -1263,7 +1273,18 @@ export function register(api) {
     const cc = addressList(req.body, 'cc')
     const bcc = addressList(req.body, 'bcc')
     if (req.body?.confirm !== true) throw invalid('confirm', 'Nothing sends without your OK — send confirm: true')
-    for (const addr of [to, ...cc, ...bcc]) assertNotBlocked(req.wsId, addr, 'to')
+    // Suppression parity with the reply route. This used to call
+    // assertNotBlocked, which checks the block list only, so a forward to an
+    // unsubscribed or hard-bounced address passed here and was refused deep in
+    // gmailSend as a SuppressedError — which escapes a handler as an HTTP 500.
+    // suppressionFor covers block list + unsubscribes + bounces, and each is a
+    // clean 422 naming the field, exactly as the reply route does it.
+    for (const [field, list] of [['to', [to]], ['cc', cc], ['bcc', bcc]]) {
+      for (const address of list) {
+        const stop = suppressionFor(req.wsId, { address })
+        if (stop) throw invalid(field, `${address} — ${stop.message}`)
+      }
+    }
 
     const source = db.prepare('SELECT * FROM messages WHERE id = ? AND user_id = ?').get(Number(req.params.messageId), req.wsId)
     const anchor = messages.find((m) => m.campaign_id && m.lead_id) || messages[0]
@@ -1284,7 +1305,11 @@ export function register(api) {
     if (mailbox.provider === 'gmail') {
       // Imported lazily: a sandbox workspace must never need Google wired up.
       const { gmailSend } = await import('../google.js')
-      const result = await gmailSend(mailbox, { to: [to, ...cc, ...bcc].join(', '), subject, body: composed, workspaceId: req.wsId })
+      // to, cc and bcc are passed as first-class params so gmailSend builds a
+      // proper Bcc: header that Gmail strips from every delivered copy. Joining
+      // them all into `to` (as this used to) exposed the blind-copied
+      // recipients to everyone in the To: line — the opposite of blind.
+      const result = await gmailSend(mailbox, { to, cc, bcc, subject, body: composed, workspaceId: req.wsId })
       providerMessageId = result.messageId
     } else if (mailbox.provider !== 'sandbox') {
       // Only the sandbox may pretend: an Outlook mailbox used to fall through
@@ -1327,13 +1352,42 @@ export function register(api) {
   }))
 
   // Cancel a queued send. Atomic: the UPDATE only matches while the row is
-  // still queued, so a race with the engine either cancels or sends, not both.
+  // still in the status it expects, so a race with the engine either cancels or
+  // sends, not both.
+  //
+  // A row stranded in 'sending' — the process was killed between upkeep.js
+  // flipping it to 'sending' and writing a terminal status — used to be
+  // uncancellable forever, because this only matched 'queued'. Once it has sat
+  // in 'sending' well past any real send (SENDING_STALE_MS), it is treated as
+  // dead and may be reclaimed to 'cancelled' from here. There is no column
+  // recording when it entered 'sending', so the reference time is scheduled_at
+  // (it flips to 'sending' at or just after that) or created_at for an
+  // immediate send. The proper systemic reset belongs in upkeep.js (owned by
+  // another agent); this reclaim path is the user-facing escape hatch.
   api.delete('/scheduled/:id', handler((req) => {
     const msg = owned('messages', req.params.id, req.wsId, 'scheduled message')
-    const changed = tx(() => db.prepare("UPDATE messages SET send_status = 'cancelled' WHERE id = ? AND send_status = 'queued'").run(msg.id).changes)
+    let changed = tx(() => db.prepare(
+      "UPDATE messages SET send_status = 'cancelled' WHERE id = ? AND user_id = ? AND send_status = 'queued'"
+    ).run(msg.id, req.wsId).changes)
+    let reclaimed = false
+    if (!changed && msg.send_status === 'sending') {
+      const ref = msg.scheduled_at || msg.created_at || ''
+      const refMs = ref ? Date.parse(ref.includes('T') ? ref : `${ref.replace(' ', 'T')}Z`) : NaN
+      if (!Number.isFinite(refMs) || Date.now() - refMs < SENDING_STALE_MS) {
+        throw invalid('id', 'That message is being sent right now — wait a few minutes before cancelling')
+      }
+      changed = tx(() => db.prepare(
+        "UPDATE messages SET send_status = 'cancelled' WHERE id = ? AND user_id = ? AND send_status = 'sending'"
+      ).run(msg.id, req.wsId).changes)
+      reclaimed = !!changed
+    }
     if (!changed) throw invalid('id', 'That message is no longer queued')
-    audit(req, { campaignId: msg.campaign_id, leadId: msg.lead_id, type: 'scheduled_cancelled', detail: `by ${req.user.email}` })
-    return { ok: true }
+    audit(req, {
+      campaignId: msg.campaign_id, leadId: msg.lead_id,
+      type: reclaimed ? 'scheduled_reclaimed' : 'scheduled_cancelled',
+      detail: `by ${req.user.email}${reclaimed ? ' (stranded in sending)' : ''}`,
+    })
+    return { ok: true, reclaimed }
   }))
 
   // ---- lead triage on the pairing -------------------------------------------
@@ -1380,7 +1434,9 @@ export function register(api) {
   api.patch('/campaign-leads/:id/resume', handler((req) => {
     const cl = ownedPairing(req.params.id, req.wsId)
     const delayDays = int(req.body, 'delayDays', { min: 0, max: 365, fallback: 0 })
-    const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(cl.lead_id)
+    // Scoped by user_id for consistency with every other lead read on this
+    // module, even though the pairing is already workspace-verified.
+    const lead = db.prepare('SELECT * FROM leads WHERE id = ? AND user_id = ?').get(cl.lead_id, req.wsId)
     if (!cl.paused_at) throw invalid('id', 'That lead is not paused')
     if (lead?.status === 'unsubscribed') throw invalid('id', 'That lead has unsubscribed')
     if (lead?.status === 'bounced') throw invalid('id', 'That lead bounced')

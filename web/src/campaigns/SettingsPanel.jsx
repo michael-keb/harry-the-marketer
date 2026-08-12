@@ -1,7 +1,7 @@
 // Behaviour and Sending window.
 //
 // `PUT /api/campaigns/:id/settings` validates against a fixed allow-list: an
-// unknown key is a 422 naming it. So this form offers exactly the eight keys the
+// unknown key is a 422 naming it. So this form offers exactly the keys the
 // backend accepts and sends only the ones that changed — there is nothing here
 // the server will reject, and nothing the server accepts that is hidden.
 //
@@ -13,26 +13,42 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api.js'
 import { LiveRegion } from '../parity-ui.jsx'
 import { useToast } from '../ui.jsx'
-import { Field, Panel, DAY_NAMES, errorFor, messageOf } from './shared.jsx'
+import { Field, Panel, errorFor, messageOf } from './shared.jsx'
 
 const DONT_OPEN = 'DONT_TRACK_EMAIL_OPEN'
 const DONT_CLICK = 'DONT_TRACK_LINK_CLICK'
 const DONT_REPLY = 'DONT_TRACK_REPLY_TO_AN_EMAIL'
 
-// The day pills show the short name and read out the long one, so both forms
-// are needed here. Indexes match `DAY_NAMES` (0 = Sunday), which is what the
-// schedule API stores in `days`.
-const FULL_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const MS_HOUR = 3600e3
+const MS_DAY = 86400e3
 
-// Suggestions for the timezone box only — it stays a free-text input backed by
-// a datalist, because the server accepts any IANA zone and the browser's own
-// zone is offered first.
-const COMMON_ZONES = [
-  'Australia/Sydney', 'Australia/Melbourne', 'Australia/Brisbane', 'Australia/Perth',
-  'Pacific/Auckland', 'Europe/London', 'Europe/Berlin', 'Europe/Madrid',
-  'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-  'Asia/Singapore', 'Asia/Tokyo', 'Asia/Kolkata', 'UTC',
+const NO_REPLY_SWITCH = [
+  { value: 'sms', label: 'Switch to SMS' },
+  { value: 'email', label: 'Switch to email' },
+  { value: 'none', label: "Don't switch" },
 ]
+
+// Engine defaults when the campaign has never set reply_handling.
+const REPLY_DEFAULTS = {
+  email: { noReplySwitchTo: 'sms', timeoutMs: 2 * MS_DAY },
+  sms: { noReplySwitchTo: 'email', timeoutMs: 2 * MS_DAY },
+}
+
+function timeoutParts(ms) {
+  const n = Number(ms)
+  if (!Number.isFinite(n) || n < 0) return { amount: 2, unit: 'days' }
+  if (n === 0) return { amount: 0, unit: 'days' }
+  if (n % MS_DAY === 0) return { amount: n / MS_DAY, unit: 'days' }
+  if (n % MS_HOUR === 0) return { amount: n / MS_HOUR, unit: 'hours' }
+  if (n >= MS_DAY) return { amount: Math.round((n / MS_DAY) * 10) / 10, unit: 'days' }
+  return { amount: Math.max(1, Math.round(n / MS_HOUR)), unit: 'hours' }
+}
+
+function timeoutMsOf(amount, unit) {
+  const n = Number(amount)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return unit === 'hours' ? n * MS_HOUR : n * MS_DAY
+}
 
 const STOP_WHEN = [
   { value: 'REPLY_TO_AN_EMAIL', label: 'they reply to an email' },
@@ -63,6 +79,7 @@ const TRACKING = [
 const NAMED_FIELDS = [
   'name', 'track_settings', 'stop_lead_settings', 'unsubscribe_text',
   'follow_up_percentage', 'out_of_office_detection_settings',
+  'email_subject', 'reply_handling',
 ]
 
 export function BehaviourPanel({ campaign, onSaved }) {
@@ -77,6 +94,16 @@ export function BehaviourPanel({ campaign, onSaved }) {
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
   const setOoo = (patch) => setForm((f) => ({ ...f, out_of_office_detection_settings: { ...f.out_of_office_detection_settings, ...patch } }))
+  const setReplySide = (side, patch) => setForm((f) => {
+    const rh = f.reply_handling || {}
+    return {
+      ...f,
+      reply_handling: {
+        ...rh,
+        [side]: { ...(rh[side] || {}), ...patch },
+      },
+    }
+  })
 
   const trackOn = (flag) => !(form.track_settings || []).includes(flag)
   const toggleTrack = (flag, on) => set({
@@ -91,7 +118,7 @@ export function BehaviourPanel({ campaign, onSaved }) {
     const out = {}
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
     if (form.name !== undefined && form.name !== campaign.name) out.name = form.name
-    for (const key of ['stop_lead_settings', 'send_as_plain_text', 'force_plain_text', 'unsubscribe_text', 'follow_up_percentage']) {
+    for (const key of ['stop_lead_settings', 'send_as_plain_text', 'force_plain_text', 'unsubscribe_text', 'follow_up_percentage', 'email_subject']) {
       if (!same(form[key], saved[key])) out[key] = form[key]
     }
     if (!same([...(form.track_settings || [])].sort(), [...(saved.track_settings || [])].sort())) {
@@ -99,6 +126,9 @@ export function BehaviourPanel({ campaign, onSaved }) {
     }
     if (!same(form.out_of_office_detection_settings, saved.out_of_office_detection_settings)) {
       out.out_of_office_detection_settings = form.out_of_office_detection_settings
+    }
+    if (!same(form.reply_handling, saved.reply_handling)) {
+      out.reply_handling = form.reply_handling
     }
     return out
   }, [form, saved, campaign.name])
@@ -207,6 +237,22 @@ export function BehaviourPanel({ campaign, onSaved }) {
           </fieldset>
 
           <Field
+            label="Email subject"
+            htmlFor="cs-email-subject"
+            hint="Used for all email steps in this campaign when set. Leave blank to keep the existing template/AI subject."
+            error={errorFor(err, 'email_subject')}
+          >
+            <input
+              id="cs-email-subject"
+              className="input"
+              maxLength={200}
+              placeholder="Leave blank for template/AI subject"
+              value={form.email_subject ?? ''}
+              onChange={(e) => set({ email_subject: e.target.value })}
+            />
+          </Field>
+
+          <Field
             label="Opt-out wording"
             htmlFor="cs-unsub"
             hint="Leave it empty to use Harry's default wording. An email with no way to opt out is never sent, so this line cannot be removed — only changed."
@@ -225,9 +271,9 @@ export function BehaviourPanel({ campaign, onSaved }) {
           </p>
 
           <Field
-            label="Share of leads that get follow-ups"
+            label={<>Share of leads that get follow-ups <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500 align-middle">Not yet active</span></>}
             htmlFor="cs-followup"
-            hint="100 means every lead runs the whole playbook. Lower it to hold part of the audience back."
+            hint="Coming soon — the engine does not yet hold any audience back, so every lead runs the whole playbook regardless of this value."
             error={errorFor(err, 'follow_up_percentage')}
           >
             <div className="flex items-center gap-2">
@@ -236,6 +282,7 @@ export function BehaviourPanel({ campaign, onSaved }) {
                 type="number"
                 min="0"
                 max="100"
+                disabled
                 className="input w-28"
                 value={form.follow_up_percentage}
                 onChange={(e) => set({ follow_up_percentage: e.target.value === '' ? '' : Number(e.target.value) })}
@@ -255,24 +302,31 @@ export function BehaviourPanel({ campaign, onSaved }) {
                 onChange={(e) => setOoo({ ignoreOOOasReply: e.target.checked })} />
               <span>Do not count an auto-reply as a real reply</span>
             </label>
-            <label className="flex cursor-pointer items-start gap-2 text-sm text-slate-700">
-              <input type="checkbox" className="mt-0.5 accent-accent-500"
+            {/* The reactivation controls below are not wired into the engine yet;
+                shown disabled so the panel does not promise behaviour it can't
+                deliver. Only "Do not count an auto-reply" above is enforced. */}
+            <p className="pt-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+              Coming soon — not yet acted on by the engine
+            </p>
+            <label className="flex items-start gap-2 text-sm text-slate-400">
+              <input type="checkbox" className="mt-0.5 accent-accent-500" disabled
                 checked={Boolean(form.out_of_office_detection_settings?.autoCategorizeOOO)}
                 onChange={(e) => setOoo({ autoCategorizeOOO: e.target.checked })} />
               <span>Label those replies as “out of office” automatically</span>
             </label>
-            <label className="flex cursor-pointer items-start gap-2 text-sm text-slate-700">
-              <input type="checkbox" className="mt-0.5 accent-accent-500"
+            <label className="flex items-start gap-2 text-sm text-slate-400">
+              <input type="checkbox" className="mt-0.5 accent-accent-500" disabled
                 checked={Boolean(form.out_of_office_detection_settings?.autoReactivateOOO)}
                 onChange={(e) => setOoo({ autoReactivateOOO: e.target.checked })} />
               <span>Pick the sequence back up when they are expected back</span>
             </label>
-            <label className="block text-sm text-slate-700">
-              <span className="text-xs text-slate-600">Wait this many days before picking it back up</span>
+            <label className="block text-sm text-slate-400">
+              <span className="text-xs text-slate-400">Wait this many days before picking it back up</span>
               <input
                 type="number"
                 min="0"
                 max="90"
+                disabled
                 className="input mt-1 w-28"
                 value={form.out_of_office_detection_settings?.reactivateOOOwithDelay ?? 0}
                 onChange={(e) => setOoo({ reactivateOOOwithDelay: e.target.value === '' ? 0 : Number(e.target.value) })}
@@ -280,10 +334,100 @@ export function BehaviourPanel({ campaign, onSaved }) {
             </label>
           </fieldset>
 
+          <fieldset className="space-y-3">
+            <legend className="text-xs font-medium text-slate-700">When nobody replies</legend>
+            <p className="text-[11px] text-slate-500">
+              After the wait below with no reply, switch the next touch to another channel — or stay put.
+            </p>
+            {errorFor(err, 'reply_handling') && (
+              <p className="text-[11px] text-red-700" role="alert">{errorFor(err, 'reply_handling')}</p>
+            )}
+            {['email', 'sms'].map((side) => {
+              const sideCfg = form.reply_handling?.[side] || {}
+              const fallback = REPLY_DEFAULTS[side]
+              // Display falls back to defaults, but the first edit materialises
+              // both sides so Save persists what the operator actually sees.
+              const switchTo = sideCfg.noReplySwitchTo ?? fallback.noReplySwitchTo
+              const timeoutMs = sideCfg.timeoutMs ?? fallback.timeoutMs
+              const parts = timeoutParts(timeoutMs)
+              const writeSide = (patch) => setForm((f) => {
+                const current = f.reply_handling || {}
+                const materialize = (key) => {
+                  const cfg = current[key] || {}
+                  const def = REPLY_DEFAULTS[key]
+                  return {
+                    noReplySwitchTo: cfg.noReplySwitchTo ?? def.noReplySwitchTo,
+                    timeoutMs: cfg.timeoutMs ?? def.timeoutMs,
+                  }
+                }
+                return {
+                  ...f,
+                  reply_handling: {
+                    email: materialize('email'),
+                    sms: materialize('sms'),
+                    [side]: { ...materialize(side), ...patch },
+                  },
+                }
+              })
+              return (
+                <div key={side} className="space-y-2">
+                  <p className="text-xs text-slate-600">
+                    After {side === 'email' ? 'an email' : 'an SMS'}
+                  </p>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <label className="block text-sm text-slate-700" htmlFor={`cs-reply-${side}-switch`}>
+                      <span className="text-xs text-slate-600">If no reply</span>
+                      <select
+                        id={`cs-reply-${side}-switch`}
+                        className="input mt-1 w-auto"
+                        value={switchTo}
+                        onChange={(e) => writeSide({ noReplySwitchTo: e.target.value })}
+                      >
+                        {NO_REPLY_SWITCH.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block text-sm text-slate-700" htmlFor={`cs-reply-${side}-wait`}>
+                      <span className="text-xs text-slate-600">Wait</span>
+                      <div className="mt-1 flex items-center gap-2">
+                        <input
+                          id={`cs-reply-${side}-wait`}
+                          type="number"
+                          min="0"
+                          className="input w-24"
+                          value={parts.amount}
+                          onChange={(e) => writeSide({
+                            timeoutMs: timeoutMsOf(e.target.value === '' ? 0 : Number(e.target.value), parts.unit),
+                          })}
+                        />
+                        <select
+                          id={`cs-reply-${side}-unit`}
+                          className="input w-auto"
+                          value={parts.unit}
+                          aria-label={`${side} no-reply wait unit`}
+                          onChange={(e) => writeSide({
+                            timeoutMs: timeoutMsOf(parts.amount, e.target.value),
+                          })}
+                        >
+                          <option value="days">days</option>
+                          <option value="hours">hours</option>
+                        </select>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+              )
+            })}
+          </fieldset>
+
           <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-[11px] text-slate-500">
-            <span className="text-slate-600">What the engine reads right now:</span>{' '}
-            opens {saved.track_opens ? 'on' : 'off'} · clicks {saved.track_clicks ? 'on' : 'off'} ·
-            stop on reply {saved.stop_on_reply ? 'on' : 'off'}
+            <span className="text-slate-600">What the engine enforces right now:</span>{' '}
+            opens {(saved.track_settings || []).includes(DONT_OPEN) ? 'off' : 'on'} ·
+            clicks {(saved.track_settings || []).includes(DONT_CLICK) ? 'off' : 'on'} ·
+            stops when {STOP_WHEN.find((s) => s.value === saved.stop_lead_settings)?.label || 'they reply'} ·
+            {saved.send_as_plain_text ? ' plain text' : ' HTML'} ·
+            opt-out wording {(saved.unsubscribe_text || '').trim() ? 'custom' : 'default'}
             {saved.tracking_domain ? ` · tracking domain ${saved.tracking_domain}` : ''}
             {saved.reply_to ? ` · replies go to ${saved.reply_to}` : ''}
           </div>
@@ -308,179 +452,6 @@ export function BehaviourPanel({ campaign, onSaved }) {
           <LiveRegion message={note} />
         </div>
       </details>
-    </Panel>
-  )
-}
-
-function scheduleSentence(s) {
-  if (!s) return ''
-  const days = (s.days || []).slice().sort()
-  const weekdays = [1, 2, 3, 4, 5]
-  const label = days.length === 7
-    ? 'Every day'
-    : days.length === 5 && weekdays.every((d) => days.includes(d))
-      ? 'Weekdays'
-      : days.map((d) => DAY_NAMES[d]).join(', ') || 'No days selected'
-  const gap = s.min_gap_minutes
-    ? `, at least ${s.min_gap_minutes >= 60 ? `${Math.round(s.min_gap_minutes / 60)} hour${s.min_gap_minutes >= 120 ? 's' : ''}` : `${s.min_gap_minutes} minutes`} apart`
-    : ''
-  return `${label}, ${s.start_hour}–${s.end_hour}${s.timezone ? `, ${s.timezone.replace('_', ' ')} time` : ''}${gap}`
-}
-
-export function SchedulePanel({ campaign, onSaved }) {
-  const toast = useToast()
-  const saved = campaign.schedule
-  const [form, setForm] = useState(saved)
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState(null)
-  const [note, setNote] = useState('')
-
-  useEffect(() => { setForm(campaign.schedule) }, [campaign.schedule])
-
-  const browserZone = useMemo(() => {
-    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { return '' }
-  }, [])
-
-  const set = (patch) => setForm((f) => ({ ...f, ...patch }))
-  const toggleDay = (d, on) => set({
-    days: on ? [...new Set([...(form.days || []), d])].sort() : (form.days || []).filter((x) => x !== d),
-  })
-
-  const dirty = JSON.stringify(form) !== JSON.stringify(saved)
-
-  const save = async () => {
-    setBusy(true)
-    setErr(null)
-    try {
-      const res = await api.put(`/api/campaigns/${campaign.id}/schedule`, {
-        timezone: form.timezone || '',
-        days: form.days,
-        start_hour: form.start_hour,
-        end_hour: form.end_hour,
-        min_gap_minutes: Number(form.min_gap_minutes) || 0,
-      })
-      setNote(`Sending window saved — ${scheduleSentence(res.schedule)}`)
-      toast('Sending window saved')
-      await onSaved?.()
-    } catch (error) {
-      setErr(error)
-      toast(messageOf(error), 'error')
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <Panel
-      id="schedule"
-      title="Sending window"
-      note={
-        <>
-          {scheduleSentence(saved)}
-          {saved?.isDefault && <span className="ml-1 text-slate-600">— inherited from your workspace default</span>}
-        </>
-      }
-    >
-      <details className="group">
-        <summary className="cursor-pointer list-none text-sm text-accent-700 hover:underline">
-          <span className="group-open:hidden">Change the sending window</span>
-          <span className="hidden group-open:inline">Hide the sending window</span>
-        </summary>
-
-        <div className="mt-4 space-y-4">
-          <fieldset>
-            <legend className="text-xs font-medium text-slate-700">Days it may send</legend>
-            {errorFor(err, 'days') && <p className="mt-1 text-[11px] text-red-700" role="alert">{errorFor(err, 'days')}</p>}
-            <div className="mt-2 flex flex-wrap gap-2">
-              {FULL_DAYS.map((name, index) => {
-                const on = (form.days || []).includes(index)
-                return (
-                  <label
-                    key={name}
-                    className={`flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm ${
-                      on ? 'border-accent-500 bg-accent-500/10 text-accent-700' : 'border-slate-300 text-slate-600'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      className="accent-accent-500"
-                      checked={on}
-                      onChange={(e) => toggleDay(index, e.target.checked)}
-                    />
-                    <span aria-hidden>{DAY_NAMES[index]}</span>
-                    <span className="sr-only">{name}</span>
-                  </label>
-                )
-              })}
-            </div>
-          </fieldset>
-
-          <div className="flex flex-wrap gap-3">
-            <Field label="Earliest send (24-hour, HH:MM)" htmlFor="sc-start" error={errorFor(err, 'start_hour')}>
-              <input id="sc-start" type="time" className="input w-36" value={form.start_hour || ''}
-                onChange={(e) => set({ start_hour: e.target.value })} />
-            </Field>
-            <Field label="Latest send (24-hour, HH:MM)" htmlFor="sc-end" error={errorFor(err, 'end_hour')}>
-              <input id="sc-end" type="time" className="input w-36" value={form.end_hour || ''}
-                onChange={(e) => set({ end_hour: e.target.value })} />
-            </Field>
-            <Field
-              label="Minimum gap between emails"
-              htmlFor="sc-gap"
-              hint="Minutes. Zero lets the sending rhythm decide."
-              error={errorFor(err, 'min_gap_minutes')}
-            >
-              <input id="sc-gap" type="number" min="0" max="1440" className="input w-28"
-                value={form.min_gap_minutes ?? 0}
-                onChange={(e) => set({ min_gap_minutes: e.target.value === '' ? 0 : Number(e.target.value) })} />
-            </Field>
-          </div>
-
-          <Field
-            label="Timezone"
-            htmlFor="sc-tz"
-            hint={browserZone ? `Your browser says ${browserZone}. Leave it empty to follow the workspace default.` : 'An IANA zone such as Australia/Sydney.'}
-            error={errorFor(err, 'timezone')}
-          >
-            <input
-              id="sc-tz"
-              className="input"
-              list="campaign-timezones"
-              placeholder={browserZone || 'Australia/Sydney'}
-              value={form.timezone || ''}
-              onChange={(e) => set({ timezone: e.target.value })}
-            />
-            <datalist id="campaign-timezones">
-              {[browserZone, ...COMMON_ZONES].filter(Boolean).filter((z, i, a) => a.indexOf(z) === i)
-                .map((z) => <option key={z} value={z} />)}
-            </datalist>
-          </Field>
-
-          {campaign.state === 'START' && dirty && (
-            <p className="text-xs text-amber-700">This campaign is running — the new window applies from the next send onwards.</p>
-          )}
-          <p className="text-xs text-slate-500">
-            This window can only narrow your workspace hours, never widen them. If the two do not overlap,
-            nothing sends — and the campaign header says so rather than going quiet.
-          </p>
-          {err && !['days', 'start_hour', 'end_hour', 'min_gap_minutes', 'timezone'].includes(err?.payload?.field) && (
-            <p className="text-xs text-red-700" role="alert">{messageOf(err)}</p>
-          )}
-
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-slate-500">{scheduleSentence(form)}</span>
-            <div className="flex gap-2">
-              <button className="btn-ghost cursor-pointer" disabled={!dirty || busy} onClick={() => setForm(saved)}>Discard</button>
-              <button className="btn-primary cursor-pointer" disabled={!dirty || busy} onClick={save}>
-                {busy ? 'Saving…' : dirty ? 'Save window' : 'Saved'}
-              </button>
-            </div>
-          </div>
-          <LiveRegion message={note} />
-        </div>
-      </details>
-
-      <p className="mt-4 border-t border-slate-200 pt-4 text-xs text-slate-500">
-        See the block grid on the <strong className="font-medium text-slate-700">Schedule</strong> tab of this campaign.
-      </p>
     </Panel>
   )
 }

@@ -584,6 +584,60 @@ test('a forward needs an OK, builds its chain server-side and records recipients
   assert.equal(bad.body.field, 'to')
 })
 
+// Fix 7: a forward is held to full suppression (block list + unsubscribes +
+// bounces), the same as the reply route. Before the fix it checked the block
+// list only, so an unsubscribed recipient reached gmailSend and came back as a
+// SuppressedError — an HTTP 500 dressed up as a crash. It must be a clean 422.
+test('a forward to an unsubscribed or bounced address is a clean 422, per recipient field', async () => {
+  const gone = seedLead(db, owner.id, 'gone@acme.test')
+  db.prepare("UPDATE leads SET status = 'unsubscribed' WHERE id = ?").run(gone.id)
+  const bounced = seedLead(db, owner.id, 'nope@acme.test')
+  db.prepare("UPDATE leads SET status = 'bounced' WHERE id = ?").run(bounced.id)
+
+  const toUnsub = await client.post(`/api/threads/${threads[3].anchorId}/forward`, { to: 'gone@acme.test', confirm: true })
+  assert.equal(toUnsub.status, 422)
+  assert.equal(toUnsub.body.field, 'to')
+
+  const ccBounced = await client.post(`/api/threads/${threads[3].anchorId}/forward`, {
+    to: 'fine@elsewhere.test', cc: ['nope@acme.test'], confirm: true,
+  })
+  assert.equal(ccBounced.status, 422)
+  assert.equal(ccBounced.body.field, 'cc')
+
+  const bccUnsub = await client.post(`/api/threads/${threads[3].anchorId}/forward`, {
+    to: 'fine@elsewhere.test', bcc: ['gone@acme.test'], confirm: true,
+  })
+  assert.equal(bccUnsub.status, 422)
+  assert.equal(bccUnsub.body.field, 'bcc')
+
+  // Nothing was written for any of the refused forwards.
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM messages WHERE user_id = ? AND to_email IN ('gone@acme.test','fine@elsewhere.test')").get(owner.id).n, 0)
+})
+
+// Fix 9: a send stranded in 'sending' (process killed mid-send) used to be
+// uncancellable forever — DELETE only matched 'queued'. It becomes reclaimable
+// once it has sat in 'sending' past the stale threshold, but a fresh one (a real
+// send in flight) is still protected.
+test('a scheduled send stranded in "sending" is reclaimable only once it is stale', async () => {
+  const mk = (scheduledAt) => db.prepare(
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, thread_id, send_status, scheduled_at)
+     VALUES (?, ?, ?, ?, 'out', 'S', 'B', 'sender@example.com', 'lead4@acme.test', 'thread-4', 'sending', ?)`
+  ).run(owner.id, campaign.id, threads[3].lead.id, mailbox.id, scheduledAt).lastInsertRowid
+
+  // Fresh in 'sending' — a genuine send in flight — is refused, untouched.
+  const fresh = mk(new Date().toISOString())
+  const refused = await client.del(`/api/scheduled/${fresh}`)
+  assert.equal(refused.status, 422)
+  assert.equal(db.prepare('SELECT send_status FROM messages WHERE id = ?').get(fresh).send_status, 'sending')
+
+  // Stranded past the stale threshold — reclaimable to 'cancelled'.
+  const stale = mk(new Date(Date.now() - 30 * 60 * 1000).toISOString())
+  const ok = await client.del(`/api/scheduled/${stale}`)
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.reclaimed, true)
+  assert.equal(db.prepare('SELECT send_status FROM messages WHERE id = ?').get(stale).send_status, 'cancelled')
+})
+
 test('the sent list shows outbound messages with honest open data', async () => {
   const res = await client.get('/api/inbox/threads?state=sent')
   assert.equal(res.body.items[0].rowType, 'message')

@@ -44,9 +44,101 @@ export const WORKSPACE_DEFAULTS = {
   frequency: { personDays: 14, companyPerWeek: 3, oneChannelPerDay: true },
   brakes: { bounceRatePercent: 3, bounceSample: 50, bounceAbsolute: 2, stopOnComplaint: true },
   staleApprovalDays: 7,
+  // Preferences, not permission ceilings. Campaign values override global
+  // per-key via overlayDefaults; they do not narrow.
+  defaultDelays: { noReplyMs: 3 * 86400e3, afterMs: 2 * 86400e3 },
+  defaultMessageVariants: { emailSubject: '', smsPrefix: '' },
+  replyHandling: {
+    email: { noReplySwitchTo: 'sms', timeoutMs: 2 * 86400e3 },
+    sms: { noReplySwitchTo: 'email', timeoutMs: 2 * 86400e3 },
+  },
+  randomWindow: { enabled: false, from: '09:00', to: '11:00' },
 }
 
+// Preference keys merge with override-wins semantics (overlayDefaults), not
+// the narrowing used for windows/caps. Snapshot freezes this subset at launch.
+export const PREFERENCE_KEYS = [
+  'defaultDelays', 'defaultMessageVariants', 'replyHandling', 'randomWindow',
+]
+
+// Frozen onto a campaign at create/re-save. Changes to live workspace defaults
+// must not move already-running campaigns — see effectiveRules / snapshotDefaults.
+export const SNAPSHOT_KEYS = [
+  ...PREFERENCE_KEYS,
+  'timezone', 'windows', 'quietHours', 'blackouts', 'caps',
+]
+
+export const REQUIRED_DEFAULT_KEYS = [
+  'replyHandling.email.timeoutMs',
+  'replyHandling.sms.timeoutMs',
+]
+
+const REPLY_SWITCH = new Set(['none', 'sms', 'email'])
 const SCOPES = new Set(['workspace', 'campaign', 'mailbox'])
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v)
+
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+}
+
+function deepMerge(base, patch) {
+  if (!isPlainObject(base) || !isPlainObject(patch)) return patch
+  const out = { ...base }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue
+    out[key] = isPlainObject(out[key]) && isPlainObject(value)
+      ? deepMerge(out[key], value)
+      : value
+  }
+  return out
+}
+
+function readPath(obj, dotted) {
+  return dotted.split('.').reduce((cur, key) => (cur == null ? undefined : cur[key]), obj)
+}
+
+function pickKeys(source, keys) {
+  const out = {}
+  if (!source || typeof source !== 'object') return out
+  for (const key of keys) {
+    if (source[key] !== undefined) out[key] = cloneJson(source[key])
+  }
+  return out
+}
+
+// Deep-merge preference keys only. Patch wins per-key; absent keys inherit.
+// Used for Coral Marten global defaults vs campaign overrides — these are
+// launch preferences, not permission ceilings, so they must not go through narrow().
+export function overlayDefaults(base, patch) {
+  if (!base || typeof base !== 'object') base = {}
+  if (!patch || typeof patch !== 'object') return { ...base }
+  const out = { ...base }
+  for (const key of PREFERENCE_KEYS) {
+    if (patch[key] === undefined) continue
+    out[key] = isPlainObject(base[key]) && isPlainObject(patch[key])
+      ? deepMerge(base[key], patch[key])
+      : cloneJson(patch[key])
+  }
+  return out
+}
+
+function applySnapshotBase(liveRules, snapshot) {
+  const out = { ...liveRules }
+  for (const key of SNAPSHOT_KEYS) {
+    if (snapshot[key] !== undefined) out[key] = cloneJson(snapshot[key])
+  }
+  return out
+}
+
+function parseDefaultsSnapshot(raw) {
+  if (!raw) return null
+  const value = typeof raw === 'string' ? parse(raw) : raw
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return Object.keys(value).length ? value : null
+}
 
 // ---- narrowing --------------------------------------------------------------
 
@@ -159,28 +251,84 @@ export function workspaceRules(owner) {
       to: owner?.send_to || WORKSPACE_DEFAULTS.windows[0].to,
     }],
   }
-  const base = { ...WORKSPACE_DEFAULTS, ...legacy, quietHours: { ...QUIET_DEFAULT } }
+  // Clone nested defaults so stored overlays cannot mutate WORKSPACE_DEFAULTS.
+  const base = {
+    ...cloneJson(WORKSPACE_DEFAULTS),
+    ...legacy,
+    quietHours: { ...QUIET_DEFAULT },
+  }
   const stored = storedRules(owner.id, 'workspace', 0)
-  const merged = narrow(base, stored)
+  // Narrowing for permission ceilings; overlay for Coral Marten preferences.
+  const merged = overlayDefaults(narrow(base, stored), stored)
   merged.windows = clampWindows(merged.windows, merged.quietHours)
   merged.timezone = merged.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
   merged.paced = owner?.paced === undefined ? true : Boolean(owner.paced)
   return merged
 }
 
+// Preference subset frozen onto a campaign at create / re-save. Callers persist
+// the result as campaign.defaults_snapshot. Live workspace edits after that
+// must not move an already-running campaign — effectiveRules honours the
+// snapshot when present.
+export function snapshotDefaults(owner) {
+  const rules = workspaceRules(owner)
+  return pickKeys(rules, SNAPSHOT_KEYS)
+}
+
 // Workspace → campaign → mailbox, each one narrowing the last. The campaign's
 // own `schedule` column is folded in as well: it predates this file, it is what
 // the campaign Settings page has always written, and until now nothing enforced
 // it. Reading it here is what turns that setting from decoration into a rule.
+//
+// Snapshot semantics (Coral Marten): when campaign.defaults_snapshot is a
+// non-empty JSON object, that object is the workspace *preference* base for
+// SNAPSHOT_KEYS (delays, reply handling, random window, plus the windows /
+// quietHours / blackouts / caps / timezone summary) instead of live
+// workspaceRules. Campaign send_rules and schedule still narrow send windows
+// on top of that base as today. workspaceRules() itself always reads live
+// workspace settings for the settings UI.
 export function effectiveRules({ owner, campaign = null, mailbox = null }) {
   let rules = workspaceRules(owner)
+  const snapshot = parseDefaultsSnapshot(campaign?.defaults_snapshot)
+  if (snapshot) rules = applySnapshotBase(rules, snapshot)
+
   if (campaign) {
     rules = narrow(rules, legacyCampaignSchedule(campaign))
-    rules = narrow(rules, storedRules(owner.id, 'campaign', campaign.id))
+    const campaignStored = storedRules(owner.id, 'campaign', campaign.id)
+    rules = narrow(rules, campaignStored)
+    // Campaign preference overrides win per-key over the (snapshotted) workspace.
+    rules = overlayDefaults(rules, campaignStored)
   }
   if (mailbox) rules = narrow(rules, storedRules(owner.id, 'mailbox', mailbox.id))
   rules.windows = clampWindows(rules.windows, rules.quietHours)
   return rules
+}
+
+// Launch blockers when required Coral Marten defaults are absent and the
+// campaign does not override them. randomWindow.from/to are required only
+// when the window is enabled.
+//
+// Note: this does not fill from WORKSPACE_DEFAULTS — the snapshot (or campaign
+// override) must actually carry the required values. An empty/partial snapshot
+// is a launch-time gap, not a silent inherit.
+export function validateDefaultsForLaunch(snapshot, campaignOverrides = {}) {
+  const effective = overlayDefaults(snapshot || {}, campaignOverrides || {})
+  const blockers = []
+  for (const key of REQUIRED_DEFAULT_KEYS) {
+    const value = readPath(effective, key)
+    if (!Number.isFinite(Number(value)) || Number(value) <= 0) {
+      blockers.push(`Missing required default: ${key}`)
+    }
+  }
+  const rw = effective.randomWindow
+  if (rw?.enabled) {
+    if (!HHMM.test(String(rw.from || '')) || !HHMM.test(String(rw.to || ''))) {
+      blockers.push('randomWindow.from/to must be valid HH:MM when randomWindow is enabled')
+    } else if (toMinutes(rw.to) <= toMinutes(rw.from)) {
+      blockers.push('randomWindow.to must be after randomWindow.from when enabled')
+    }
+  }
+  return blockers
 }
 
 // `campaigns.schedule` as written by the existing Settings page:
@@ -234,9 +382,6 @@ export function copyCampaignSendRules(wsId, fromCampaignId, toCampaignId, update
 }
 
 // ---- validation -------------------------------------------------------------
-
-const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 export class RuleError extends Error {
   constructor(field, message) {
@@ -354,6 +499,68 @@ export function validate(patch = {}) {
     const n = Number(patch.staleApprovalDays)
     if (!Number.isInteger(n) || n < 1 || n > 90) throw new RuleError('staleApprovalDays', 'Approvals go stale after a whole number of days, 1 to 90')
     out.staleApprovalDays = n
+  }
+  if (patch.defaultDelays !== undefined) {
+    if (!isPlainObject(patch.defaultDelays)) {
+      throw new RuleError('defaultDelays', 'defaultDelays must be an object')
+    }
+    const num = (v, name) => {
+      const n = Number(v)
+      if (!Number.isFinite(n) || n < 0) throw new RuleError('defaultDelays', `${name} must be a non-negative number of milliseconds`)
+      return n
+    }
+    out.defaultDelays = {
+      noReplyMs: num(patch.defaultDelays.noReplyMs ?? WORKSPACE_DEFAULTS.defaultDelays.noReplyMs, 'noReplyMs'),
+      afterMs: num(patch.defaultDelays.afterMs ?? WORKSPACE_DEFAULTS.defaultDelays.afterMs, 'afterMs'),
+    }
+  }
+  if (patch.defaultMessageVariants !== undefined) {
+    if (!isPlainObject(patch.defaultMessageVariants)) {
+      throw new RuleError('defaultMessageVariants', 'defaultMessageVariants must be an object')
+    }
+    out.defaultMessageVariants = {
+      emailSubject: String(patch.defaultMessageVariants.emailSubject ?? '').slice(0, 200),
+      smsPrefix: String(patch.defaultMessageVariants.smsPrefix ?? '').slice(0, 80),
+    }
+  }
+  if (patch.replyHandling !== undefined) {
+    if (!isPlainObject(patch.replyHandling)) {
+      throw new RuleError('replyHandling', 'replyHandling must be an object')
+    }
+    const channel = (name, value, fallback) => {
+      const src = isPlainObject(value) ? value : {}
+      const switchTo = src.noReplySwitchTo === undefined
+        ? fallback.noReplySwitchTo
+        : String(src.noReplySwitchTo)
+      if (!REPLY_SWITCH.has(switchTo)) {
+        throw new RuleError('replyHandling', `${name}.noReplySwitchTo must be none, sms, or email`)
+      }
+      const timeoutMs = Number(src.timeoutMs ?? fallback.timeoutMs)
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        throw new RuleError('replyHandling', `${name}.timeoutMs must be a positive number of milliseconds`)
+      }
+      return { noReplySwitchTo: switchTo, timeoutMs }
+    }
+    out.replyHandling = {
+      email: channel('email', patch.replyHandling.email, WORKSPACE_DEFAULTS.replyHandling.email),
+      sms: channel('sms', patch.replyHandling.sms, WORKSPACE_DEFAULTS.replyHandling.sms),
+    }
+  }
+  if (patch.randomWindow !== undefined) {
+    if (!isPlainObject(patch.randomWindow)) {
+      throw new RuleError('randomWindow', 'randomWindow must be an object')
+    }
+    const enabled = Boolean(patch.randomWindow.enabled)
+    const from = String(patch.randomWindow.from ?? WORKSPACE_DEFAULTS.randomWindow.from)
+    const to = String(patch.randomWindow.to ?? WORKSPACE_DEFAULTS.randomWindow.to)
+    if (!HHMM.test(from) || !HHMM.test(to)) {
+      throw new RuleError('randomWindow', 'randomWindow needs from and to as HH:MM')
+    }
+    // Inclusive bounds: from and to are valid clock times and from < to.
+    if (toMinutes(to) <= toMinutes(from)) {
+      throw new RuleError('randomWindow', 'randomWindow.to must be after randomWindow.from')
+    }
+    out.randomWindow = { enabled, from, to }
   }
   return out
 }

@@ -29,10 +29,11 @@
 //     queued retries, and the history the summary reports survives.
 
 import crypto from 'node:crypto'
+import dns from 'node:dns'
 import { db, logEvent } from '../db.js'
 import { recordTelemetry } from '../telemetry.js'
 import {
-  HttpError, handler, invalid, notFound,
+  HttpError, handler, invalid, notFound, forbidden,
   str, bool, page, paged, tx, nowIso,
 } from './http.js'
 
@@ -149,13 +150,56 @@ export function setWebhookTransport(fn) {
 
 // ---- URL validation ---------------------------------------------------------
 
-// SSRF guard. Checked at save time and again immediately before every attempt,
-// so a DNS or config change cannot turn a registered endpoint inward.
+// SSRF guard. The string of a registered URL is checked at save time, but the
+// string is not the target: a name that resolved to a public address when it
+// was saved can resolve to an internal one by the time we send (DNS rebinding),
+// so the guard is re-run before every attempt AND the hostname is resolved and
+// every resolved address is validated immediately before the connection
+// (`resolvedAddressProblem` in `deliver`). Validating the string alone would
+// let a name turn a registered endpoint inward, which the earlier version of
+// this comment wrongly claimed was impossible.
 const PRIVATE_V4 = [
   /^0\./, /^10\./, /^127\./, /^169\.254\./, /^192\.168\./,
   /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
   /^192\.0\.0\./, /^198\.(1[89])\./, /^255\.255\.255\.255$/,
 ]
+
+// Pull the embedded IPv4 out of an IPv6 literal, in either form: the dotted
+// tail `::ffff:169.254.169.254`, or the hex form `new URL()` normalises it to
+// (`::ffff:a9fe:a9fe`). The hex form is exactly the bypass the earlier guard
+// missed — it sliced 7 chars off `::ffff:` and matched a dotted-quad regex that
+// hex never satisfies, so `[::ffff:169.254.169.254]` sailed through.
+function embeddedV4(host) {
+  const dotted = host.match(/(\d{1,3}(?:\.\d{1,3}){3})$/)
+  if (dotted) return dotted[1]
+  const hex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+  if (hex) {
+    const hi = parseInt(hex[1], 16)
+    const lo = parseInt(hex[2], 16)
+    return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`
+  }
+  return null
+}
+
+// Is this bare address (v4 or v6 literal, already lowercased and unbracketed)
+// one we must never connect to? Shared by the save-time string guard and the
+// send-time resolved-address guard so both judge an address the same way.
+function privateIpProblem(host) {
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::') return 'must not point at a private or loopback address'
+    if (/^f[cd][0-9a-f]{2}:/.test(host)) return 'must not point at a private or loopback address'   // fc00::/7 ULA
+    if (/^fe[89ab][0-9a-f]:/.test(host)) return 'must not point at a private or loopback address'    // fe80::/10 link-local
+    const v4 = embeddedV4(host)
+    if (v4 && PRIVATE_V4.some((re) => re.test(v4))) {
+      return 'must not point at a private, loopback or link-local address'
+    }
+    return ''
+  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) && PRIVATE_V4.some((re) => re.test(host))) {
+    return 'must not point at a private, loopback or link-local address'
+  }
+  return ''
+}
 
 export function webhookUrlProblem(value) {
   let url
@@ -168,12 +212,33 @@ export function webhookUrlProblem(value) {
     return 'must not point at a private network name'
   }
   if (!host.includes('.') && !host.includes(':')) return 'must name a fully qualified public host'
-  if (host === '::1' || host === '::' || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) {
-    return 'must not point at a private or loopback address'
-  }
-  const v4 = host.startsWith('::ffff:') ? host.slice(7) : host
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4) && PRIVATE_V4.some((re) => re.test(v4))) {
-    return 'must not point at a private, loopback or link-local address'
+  return privateIpProblem(host)
+}
+
+// Resolve the hostname and refuse if ANY address it answers with is one we may
+// not reach. `all: true` is deliberate: an attacker can return a public and an
+// internal address and hope the connection picks the internal one, so every
+// answer must clear. A resolution failure returns '' — there is nothing to
+// connect to, so the transport will fail on its own; the guard exists to catch
+// a name that DOES resolve, inward.
+//
+// The default resolver is skipped under NODE_ENV=test so the suite stays
+// offline; the send-time guard itself is exercised by injecting `resolveImpl`.
+async function realResolve(host) {
+  if (process.env.NODE_ENV === 'test') return []
+  if (!host || privateIpProblem(host) || /^\d/.test(host) || host.includes(':')) return []
+  try {
+    const answers = await dns.promises.lookup(host, { all: true })
+    return answers.map((a) => a.address)
+  } catch { return [] }
+}
+
+async function resolvedAddressProblem(host, resolver) {
+  let addresses = []
+  try { addresses = await resolver(host) } catch { return '' }
+  for (const addr of addresses) {
+    const problem = privateIpProblem(String(addr || '').toLowerCase().replace(/^\[|\]$/g, ''))
+    if (problem) return `resolves to an address that ${problem.replace(/^must not point at /, 'is ')}`
   }
   return ''
 }
@@ -286,9 +351,10 @@ function present(row, extra = {}) {
 // failures ending at the most recent attempt.
 function pausedState(row) {
   if (row.is_active !== 0) return null
-  const recent = db.prepare(
-    'SELECT status_code, error, created_at, ok FROM webhook_deliveries WHERE webhook_id = ? ORDER BY id DESC LIMIT ?'
-  ).all(row.id, AUTOPAUSE_AFTER)
+  // Counted in events, not attempts, so the reason string matches the rule that
+  // actually paused the endpoint (`maybeAutoPause`): five failing events, not
+  // five failing attempts.
+  const recent = recentEventOutcomes(row.id, AUTOPAUSE_AFTER)
   const run = []
   for (const d of recent) {
     if (d.ok === 1) break
@@ -345,6 +411,18 @@ function ownedCampaign(req, field = 'id') {
   return row
 }
 
+// Creating, editing or deleting an endpoint is a privileged action. A 'reply'
+// subscription carries inbound email content to an external URL, so a plain
+// member subscribing one is silent reply-content exfiltration — the gate is on
+// every mutation, not only reply-subscribed ones, because the event set is
+// editable after the fact. Owner or manager only, matching how routes.js gates
+// other privileged actions (invites, member removal).
+function requireWebhookAdmin(req) {
+  if (req.wsRole !== 'owner' && req.wsRole !== 'manager') {
+    throw forbidden('Only a workspace owner or manager can create, edit or delete webhooks')
+  }
+}
+
 // ---- signing ----------------------------------------------------------------
 
 export function signPayload(secret, body) {
@@ -398,9 +476,19 @@ async function attemptOnce(hook, body, eventType, eventId, attempt, fetchImpl, t
         'X-Harry-Signature': signPayload(hook.secret, body),
       },
       body,
+      // Never follow a redirect: 'follow' would let a receiver bounce us into
+      // the internal network after the SSRF guard has already cleared the
+      // registered URL. A 3xx is a delivery outcome, recorded and left alone.
+      redirect: 'manual',
       signal: controller.signal,
     })
     const status = Number(res?.status ?? 0) || 0
+    // A 3xx is a refusal to deliver, not a hop to chase. Its body is never read:
+    // it would be the receiver's redirect response, and echoing it into
+    // webhook_deliveries.error is one more surface to leak through, for no gain.
+    if (status >= 300 && status < 400) {
+      return { status, ok: false, error: `HTTP ${status} (redirect not followed)` }
+    }
     const ok = typeof res?.ok === 'boolean' ? res.ok : status >= 200 && status < 300
     let detail = ''
     if (!ok) {
@@ -414,13 +502,29 @@ async function attemptOnce(hook, body, eventType, eventId, attempt, fetchImpl, t
   }
 }
 
-// An endpoint that has failed its last few attempts is rested rather than
-// hammered. A save (PATCH, or the campaign upsert) brings it back.
+// The terminal outcome of each recent EVENT, most recent first — one row per
+// event, not one per attempt. `recordAttempt` writes up to MAX_ATTEMPTS rows
+// per event (all sharing the event's payload_hash), so counting rows made ~2
+// failing events look like 5+ and tripped a pause meant for 5 failing events.
+// The terminal row of an event is the highest-id row for its payload_hash; the
+// payload carries a per-event UUID, so a hash identifies exactly one event.
+function recentEventOutcomes(hookId, limit) {
+  return db.prepare(
+    `SELECT d.ok AS ok, d.error AS error, d.created_at AS created_at
+       FROM webhook_deliveries d
+      WHERE d.webhook_id = ?
+        AND d.id = (SELECT MAX(d2.id) FROM webhook_deliveries d2
+                     WHERE d2.webhook_id = d.webhook_id AND d2.payload_hash = d.payload_hash)
+      ORDER BY d.id DESC
+      LIMIT ?`
+  ).all(hookId, limit)
+}
+
+// An endpoint whose last few EVENTS all failed is rested rather than hammered.
+// A save (PATCH, or the campaign upsert) brings it back.
 function maybeAutoPause(hookId) {
   try {
-    const recent = db.prepare(
-      'SELECT ok FROM webhook_deliveries WHERE webhook_id = ? ORDER BY id DESC LIMIT ?'
-    ).all(hookId, AUTOPAUSE_AFTER)
+    const recent = recentEventOutcomes(hookId, AUTOPAUSE_AFTER)
     if (recent.length < AUTOPAUSE_AFTER || recent.some((r) => r.ok === 1)) return
     const hook = liveWebhook(hookId)
     if (!hook || hook.is_active !== 1) return
@@ -435,7 +539,7 @@ function maybeAutoPause(hookId) {
 
 // One event to one endpoint, with bounded backoff. Records every attempt.
 async function deliver(hook, { eventType, body, payloadHash, eventId }, opts) {
-  const { fetchImpl, maxAttempts, backoffMs, timeoutMs } = opts
+  const { fetchImpl, resolveImpl, maxAttempts, backoffMs, timeoutMs } = opts
   let attempts = 0
   let last = null
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -448,6 +552,18 @@ async function deliver(hook, { eventType, body, payloadHash, eventId }, opts) {
       attempts = attempt
       recordAttempt(live, { eventType, body, payloadHash, attempt, status: 0, ok: false, error: `refused: url ${problem}` })
       return { webhook_id: hook.id, ok: false, attempts, error: `url ${problem}` }
+    }
+
+    // The string cleared; now the name it points at must clear too. Resolve and
+    // reject if any address is internal — this is what closes DNS rebinding,
+    // where a name public at save time answers inward at send time.
+    let hostname = ''
+    try { hostname = new URL(live.url).hostname.toLowerCase().replace(/^\[|\]$/g, '') } catch { hostname = '' }
+    const dnsProblem = await resolvedAddressProblem(hostname, resolveImpl)
+    if (dnsProblem) {
+      attempts = attempt
+      recordAttempt(live, { eventType, body, payloadHash, attempt, status: 0, ok: false, error: `refused: host ${dnsProblem}` })
+      return { webhook_id: hook.id, ok: false, attempts, error: `host ${dnsProblem}` }
     }
 
     const t0 = Date.now()
@@ -474,6 +590,9 @@ async function deliver(hook, { eventType, body, payloadHash, eventId }, opts) {
 function deliveryOptions(options = {}) {
   return {
     fetchImpl: options.fetchImpl || ((...args) => transport(...args)),
+    // Injectable so a test can drive the send-time DNS guard without touching a
+    // resolver; production uses the real one (skipped under NODE_ENV=test).
+    resolveImpl: typeof options.resolveImpl === 'function' ? options.resolveImpl : realResolve,
     maxAttempts: Math.max(1, Math.min(Number(options.maxAttempts) || MAX_ATTEMPTS, 10)),
     backoffMs: options.backoffMs === undefined ? BASE_BACKOFF_MS : Math.max(0, Number(options.backoffMs) || 0),
     timeoutMs: Math.max(100, Number(options.timeoutMs) || TIMEOUT_MS),
@@ -627,6 +746,7 @@ export function register(api) {
   // ------------------------------------------------------------- create -----
   // Docs/webhooks/create.md §5.
   api.post('/webhooks', handler(async (req) => {
+    requireWebhookAdmin(req)
     const body = req.body || {}
     const name = str(body, 'name', { required: true, max: 200 })
     const url = requireUrl(body, body.webhook_url !== undefined ? 'webhook_url' : 'url')
@@ -718,6 +838,7 @@ export function register(api) {
   // -------------------------------------------------------------- update ----
   // Docs/webhooks/update.md §5. Partial merge; the secret is never touched.
   api.patch('/webhooks/:id', handler(async (req) => {
+    requireWebhookAdmin(req)
     const existing = findWebhook(req.params.id, req.wsId)
     const body = req.body || {}
     const changed = []
@@ -775,6 +896,7 @@ export function register(api) {
   // Docs/webhooks/delete.md §5. A tombstone, not a hard delete — see the file
   // header: the delivery history is the audit trail and must outlive the row.
   api.delete('/webhooks/:id', handler(async (req) => {
+    requireWebhookAdmin(req)
     const row = findWebhook(req.params.id, req.wsId)
     tx(() => {
       db.prepare("UPDATE webhooks SET is_active = -1, updated_at = datetime('now') WHERE id = ? AND workspace_id = ?")
@@ -825,6 +947,7 @@ export function register(api) {
   // ------------------------------------------ campaign-scoped: upsert -------
   // Docs/campaigns/save-webhooks.md §5 — one route for create and update.
   api.post('/campaigns/:id/webhooks', handler(async (req) => {
+    requireWebhookAdmin(req)
     const campaign = ownedCampaign(req)
     const body = req.body || {}
     const name = str(body, 'name', { required: true, max: 200 })
@@ -873,6 +996,7 @@ export function register(api) {
   // Docs/campaigns/delete-webhook.md §5 — pair-verified, so a valid webhook id
   // under the wrong campaign is a 404 rather than a silent success.
   api.delete('/campaigns/:id/webhooks/:webhookId', handler(async (req) => {
+    requireWebhookAdmin(req)
     const campaign = ownedCampaign(req)
     const webhookId = pathId(req.params.webhookId, 'webhook_id')
     const row = db.prepare(

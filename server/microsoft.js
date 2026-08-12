@@ -38,14 +38,27 @@ export async function freshAccessToken(mailbox) {
   })
   if (!res.ok) {
     const detail = await res.text()
-    db.prepare("UPDATE mailboxes SET status = 'error', last_error = ? WHERE id = ?")
-      .run(`Token refresh failed: ${detail.slice(0, 300)}`, mailbox.id)
-    throw new Error(`outlook token refresh failed for ${mailbox.email}`)
+    // Same classification as Gmail: only a revoked grant disables the mailbox and
+    // asks for a reconnect. A transient 5xx/429 from the token endpoint leaves it
+    // connected so the next tick retries rather than parking a healthy account.
+    const permanent = /invalid_grant|invalid_client/i.test(detail)
+    if (permanent) {
+      db.prepare("UPDATE mailboxes SET status = 'error', needs_reconnect = 1, last_error = ? WHERE id = ?")
+        .run(`Reconnect required: ${detail.slice(0, 300)}`, mailbox.id)
+      const err = new Error(`outlook token refresh revoked for ${mailbox.email} — reconnect required`)
+      err.permanent = true
+      throw err
+    }
+    db.prepare("UPDATE mailboxes SET last_error = ? WHERE id = ?")
+      .run(`Token refresh failed (transient ${res.status}): ${detail.slice(0, 260)}`, mailbox.id)
+    const err = new Error(`outlook token refresh failed for ${mailbox.email} (transient ${res.status})`)
+    err.transient = true
+    throw err
   }
   const tokens = await res.json()
   const expiry = Date.now() + (tokens.expires_in || 3600) * 1000
   db.prepare(
-    "UPDATE mailboxes SET access_token = ?, token_expiry = ?, status = 'connected', last_error = '' WHERE id = ?"
+    "UPDATE mailboxes SET access_token = ?, token_expiry = ?, status = 'connected', last_error = '', needs_reconnect = 0 WHERE id = ?"
   ).run(tokens.access_token, expiry, mailbox.id)
   if (tokens.refresh_token) {
     db.prepare('UPDATE mailboxes SET refresh_token = ? WHERE id = ?').run(tokens.refresh_token, mailbox.id)
@@ -133,27 +146,34 @@ export async function outlookThread(mailbox, conversationId) {
   })
 }
 
-export async function outlookRecentInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
-  const since = new Date(Date.now() - withinDays * 86_400_000).toISOString()
+export async function outlookRecentInbound(mailbox, { withinDays = 2, max = 25, sinceMs = 0 } = {}) {
+  // A persisted watermark (`sinceMs`) fetches everything received after it and
+  // pages through @odata.nextLink, so a mailbox offline for days or flooded with
+  // mail never skips a reply. No watermark yet falls back to the day window.
+  const since = sinceMs ? new Date(sinceMs).toISOString() : new Date(Date.now() - withinDays * 86_400_000).toISOString()
+  const hardCap = sinceMs ? Math.max(max, 250) : Math.max(1, max)
   const filter = encodeURIComponent(`receivedDateTime ge ${since}`)
-  const data = await graphFetch(
-    mailbox,
-    `/me/mailFolders/inbox/messages?$filter=${filter}&$top=${Math.max(1, max)}&$orderby=receivedDateTime desc`
-  )
+  let url = `/me/mailFolders/inbox/messages?$filter=${filter}&$top=${Math.min(100, hardCap)}&$orderby=receivedDateTime desc`
   const out = []
-  for (const msg of data?.value || []) {
-    const fromEmail = (msg.from?.emailAddress?.address || '').toLowerCase()
-    if (!fromEmail || fromEmail === mailbox.email.toLowerCase()) continue
-    out.push({
-      providerMessageId: msg.id,
-      threadId: msg.conversationId || '',
-      messageIdHeader: msg.internetMessageId || '',
-      fromEmail,
-      toEmail: (msg.toRecipients || []).map((r) => r.emailAddress?.address).filter(Boolean).join(', '),
-      subject: msg.subject || '',
-      body: stripHtml(msg.body?.content) || msg.bodyPreview || '',
-      receivedAt: msg.receivedDateTime || '',
-    })
+  for (let page = 0; page < 20 && out.length < hardCap && url; page++) {
+    const data = await graphFetch(mailbox, url)
+    for (const msg of data?.value || []) {
+      const fromEmail = (msg.from?.emailAddress?.address || '').toLowerCase()
+      if (!fromEmail || fromEmail === mailbox.email.toLowerCase()) continue
+      out.push({
+        providerMessageId: msg.id,
+        threadId: msg.conversationId || '',
+        messageIdHeader: msg.internetMessageId || '',
+        fromEmail,
+        toEmail: (msg.toRecipients || []).map((r) => r.emailAddress?.address).filter(Boolean).join(', '),
+        subject: msg.subject || '',
+        body: stripHtml(msg.body?.content) || msg.bodyPreview || '',
+        internalDate: Date.parse(msg.receivedDateTime || '') || 0,
+        receivedAt: msg.receivedDateTime || '',
+      })
+    }
+    const next = data?.['@odata.nextLink'] || ''
+    url = next ? next.replace(GRAPH, '') : ''
   }
   return out
 }

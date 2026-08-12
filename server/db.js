@@ -310,6 +310,33 @@ CREATE TABLE IF NOT EXISTS touches (
 CREATE INDEX IF NOT EXISTS idx_touches_person ON touches(workspace_id, lead_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_touches_company ON touches(workspace_id, company_domain, sent_at);
 CREATE INDEX IF NOT EXISTS idx_touches_campaign ON touches(workspace_id, campaign_id, sent_at);
+
+-- Per-step randomised send slot. Chosen once per (campaign, lead, node) so a
+-- retry or re-tick never re-rolls the clock inside a window.
+CREATE TABLE IF NOT EXISTS step_send_slots (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL,
+  lead_id INTEGER NOT NULL,
+  node_id TEXT NOT NULL,
+  chosen_at INTEGER NOT NULL,
+  window_from TEXT NOT NULL DEFAULT '',
+  window_to TEXT NOT NULL DEFAULT '',
+  timezone TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'campaign',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(campaign_id, lead_id, node_id)
+);
+
+-- Audit trail when a playbook step's channel is changed after launch.
+CREATE TABLE IF NOT EXISTS campaign_channel_changes (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL,
+  node_id TEXT NOT NULL DEFAULT '',
+  from_channel TEXT NOT NULL DEFAULT '',
+  to_channel TEXT NOT NULL DEFAULT '',
+  changed_by TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `)
 
 // The SmartLead-parity backlog's tables and column additions. Applied after the
@@ -395,6 +422,27 @@ for (const stmt of [
   "ALTER TABLE users ADD COLUMN billing_status TEXT DEFAULT 'trial'",
   "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT DEFAULT ''",
   "ALTER TABLE users ADD COLUMN billing_updated_at TEXT DEFAULT ''",
+  // Exact-time / window-window send scheduling (server/step-timing.js).
+  "ALTER TABLE campaigns ADD COLUMN email_subject TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE campaigns ADD COLUMN defaults_snapshot TEXT NOT NULL DEFAULT '{}'",
+  "ALTER TABLE campaigns ADD COLUMN launched_at TEXT DEFAULT ''",
+  // Retry with backoff for TRANSIENT per-lead send failures (server/engine.js).
+  // A transient Gmail 5xx/429 or Twilio blip used to strand a lead in state
+  // 'error', which the tick never re-selects. These keep the lead selectable and
+  // delayed until the backoff has passed; only after MAX_LEAD_RETRIES does a
+  // transient failure become the terminal 'error' state.
+  'ALTER TABLE campaign_leads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0',
+  "ALTER TABLE campaign_leads ADD COLUMN next_retry_at TEXT DEFAULT ''",
+  // Refresh-token classification (server/google.js, server/microsoft.js): a
+  // genuine invalid_grant/invalid_client sets status='error' AND this flag so the
+  // reconnect banner can tell "revoked, reconnect me" from a transient 5xx that
+  // left the mailbox connected and simply retries next tick.
+  'ALTER TABLE mailboxes ADD COLUMN needs_reconnect INTEGER NOT NULL DEFAULT 0',
+  // Per-mailbox inbound watermark (last-seen internalDate in unix ms, as text).
+  // The recent-inbound sweep fetches everything AFTER this and pages through, so
+  // a mailbox offline for a week or flooded with mail never skips a reply
+  // (server/google.js gmailRecentInbound, server/upkeep.js syncMailboxInbound).
+  "ALTER TABLE mailboxes ADD COLUMN inbound_watermark TEXT DEFAULT ''",
 ]) {
   try { db.exec(stmt) } catch { /* column already exists */ }
 }
@@ -407,25 +455,38 @@ for (const stmt of [
 // Inbound only: outbound rows may carry non-unique ids legitimately (two
 // forwards stamped in the same millisecond), and the race this index closes is
 // two sync paths pulling the same *inbound* Gmail message.
+//
+// Scoped by workspace, not global. Two workspaces can each connect the SAME
+// Gmail address (an agency and its client, say). A global unique on
+// provider_message_id let the FIRST workspace to ingest a message win and made
+// every INSERT OR IGNORE from the second a silent no-op — so the second
+// workspace lost every reply the first had already seen. Keying the uniqueness
+// on (user_id, provider_message_id) — and (workspace_id, provider_message_id)
+// for the untracked queue — means a message is deduped within a workspace and
+// still delivered to each workspace that holds the mailbox. The pre-index
+// collapse and the runtime checks (server/upkeep.js, server/mailer.js) use the
+// same composite key.
 try {
   db.exec(`
     DROP INDEX IF EXISTS idx_messages_provider_id;
+    DROP INDEX IF EXISTS idx_messages_inbound_provider_id;
     DELETE FROM messages WHERE direction = 'in' AND COALESCE(provider_message_id, '') != ''
       AND id NOT IN (
         SELECT MIN(id) FROM messages
         WHERE direction = 'in' AND COALESCE(provider_message_id, '') != ''
-        GROUP BY provider_message_id
+        GROUP BY user_id, provider_message_id
       );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_inbound_provider_id
-      ON messages(provider_message_id) WHERE direction = 'in' AND COALESCE(provider_message_id, '') != '';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_inbound_ws_provider_id
+      ON messages(user_id, provider_message_id) WHERE direction = 'in' AND COALESCE(provider_message_id, '') != '';
+    DROP INDEX IF EXISTS idx_unmatched_provider_id;
     DELETE FROM unmatched_messages WHERE COALESCE(provider_message_id, '') != ''
       AND id NOT IN (
         SELECT MIN(id) FROM unmatched_messages
         WHERE COALESCE(provider_message_id, '') != ''
-        GROUP BY provider_message_id
+        GROUP BY workspace_id, provider_message_id
       );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_unmatched_provider_id
-      ON unmatched_messages(provider_message_id) WHERE COALESCE(provider_message_id, '') != '';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_unmatched_ws_provider_id
+      ON unmatched_messages(workspace_id, provider_message_id) WHERE COALESCE(provider_message_id, '') != '';
   `)
 } catch (err) {
   console.warn('[db] inbound dedupe indexes not created:', String(err.message || err))

@@ -492,9 +492,40 @@ function connectionCheck(m) {
   } else {
     checks.push({ leg: 'sandbox', ok: true, checked: true, detail: 'Sandbox mailboxes deliver locally' })
   }
-  checks.push({ leg: 'send', ok: h.isSmtpSuccess, checked: true, detail: h.smtpFailureError || 'Ready to send' })
-  checks.push({ leg: 'read', ok: h.isImapSuccess, checked: true, detail: h.imapFailureError || 'Ready to read replies' })
-  return { ok: checks.every((c) => c.ok || !c.checked), checks, ...h }
+  // The send and read legs describe Harry's STORED connection status — no SMTP
+  // or IMAP round trip happens here. Reporting them as `checked: true` with
+  // "Ready to send" claimed a verification that never ran. So a past success is
+  // labelled honestly as unverified (`checked: false`); only a recorded FAILURE
+  // is real negative evidence and counts. `verified: false` says plainly that no
+  // live probe backs either leg.
+  const smtpFailed = !h.isSmtpSuccess
+  const imapFailed = !h.isImapSuccess
+  checks.push({
+    leg: 'send',
+    ok: Boolean(h.isSmtpSuccess),
+    checked: smtpFailed,
+    verified: false,
+    detail: smtpFailed
+      ? (h.smtpFailureError || 'Mailbox is disconnected')
+      : 'Based on stored status — not verified with a live send',
+  })
+  checks.push({
+    leg: 'read',
+    ok: Boolean(h.isImapSuccess),
+    checked: imapFailed,
+    verified: false,
+    detail: imapFailed
+      ? (h.imapFailureError || 'Cannot read replies')
+      : 'Based on stored status — not verified with a live read',
+  })
+  // An UNCHECKED leg is not a pass. The verdict rests only on legs actually
+  // checked — OAuth configuration and token state, sandbox delivery, and
+  // recorded failures — and with nothing checkable the honest answer is "not
+  // ok", never a green tick resting on stored status. A Gmail mailbox with no
+  // OAuth configured, or an absent/expired token, therefore cannot answer
+  // ok:true "Ready to send".
+  const checkedLegs = checks.filter((c) => c.checked)
+  return { ok: checkedLegs.length > 0 && checkedLegs.every((c) => c.ok), checks, ...h }
 }
 
 // Campaigns this mailbox is the last working sender for. A campaign that goes

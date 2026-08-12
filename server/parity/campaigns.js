@@ -40,7 +40,7 @@ function untracked(r, on, reason) {
     ? { ...r, tracked: true, reason: '' }
     : { ...r, value: null, tracked: false, reason }
 }
-import { parsePlaybook, nodeIntents } from '../playbook.js'
+import { parsePlaybook, nodeIntents, collectTimingIssues } from '../playbook.js'
 import { leadStages } from '../stages.js'
 import { dailyCap, remainingToday, isWarmingUp } from '../pacing.js'
 // One reputation formula for the whole app. The mailbox page and this campaign
@@ -62,6 +62,7 @@ import { resolveSend } from '../gates.js'
 import {
   saveRules, storedRules, legacyScheduleToStoredRules, copyCampaignSendRules,
 } from '../send-rules.js'
+import * as sendRules from '../send-rules.js'
 import {
   HttpError, handler, invalid, notFound,
   str, int, bool, oneOf, idList, isoDate, email as emailField,
@@ -144,6 +145,21 @@ function touchCampaign(id) {
   db.prepare("UPDATE campaigns SET updated_at = datetime('now') WHERE id = ?").run(id)
 }
 
+// Intent columns/tables may land via a parallel schema agent. Prefer matching
+// SQL when present; fall back when a column is still missing.
+let _campaignColCache = null
+function campaignHasColumn(name) {
+  if (!_campaignColCache) {
+    _campaignColCache = new Set(db.prepare('PRAGMA table_info(campaigns)').all().map((r) => r.name))
+  }
+  return _campaignColCache.has(name)
+}
+function channelChangesTableExists() {
+  return Boolean(
+    db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'campaign_channel_changes'").get()
+  )
+}
+
 // The standing rule, in one place. A send route without an explicit OK is a 422
 // on the `confirm` field rather than a silent send.
 function requireConfirmation(body, what) {
@@ -192,8 +208,88 @@ const OOO_KEYS = ['ignoreOOOasReply', 'autoReactivateOOO', 'reactivateOOOwithDel
 const SETTINGS_KEYS = [
   'name', 'track_settings', 'stop_lead_settings', 'send_as_plain_text',
   'force_plain_text', 'unsubscribe_text', 'follow_up_percentage',
-  'out_of_office_detection_settings',
+  'out_of_office_detection_settings', 'email_subject', 'reply_handling',
 ]
+
+function validateEmailSubject(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s) return { ok: true, value: '' } // empty = use fallback
+  if (s.length > 200) return { ok: false, message: 'Subject must be at most 200 characters' }
+  if (/[\r\n]/.test(s)) return { ok: false, message: 'Subject cannot contain line breaks' }
+  return { ok: true, value: s }
+}
+
+function replyHandlingOf(stored) {
+  const rh = stored?.reply_handling && typeof stored.reply_handling === 'object' && !Array.isArray(stored.reply_handling)
+    ? stored.reply_handling : {}
+  const side = (key) => {
+    const s = rh[key] && typeof rh[key] === 'object' && !Array.isArray(rh[key]) ? rh[key] : {}
+    const timeoutRaw = s.timeoutMs
+    const timeoutMs = timeoutRaw === null || timeoutRaw === undefined || timeoutRaw === ''
+      ? null
+      : Number(timeoutRaw)
+    return {
+      noReplySwitchTo: s.noReplySwitchTo == null || s.noReplySwitchTo === '' ? null : String(s.noReplySwitchTo),
+      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : null,
+    }
+  }
+  return { email: side('email'), sms: side('sms') }
+}
+
+function parseReplyHandling(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw invalid('reply_handling', 'reply_handling must be an object')
+  }
+  for (const key of Object.keys(raw)) {
+    if (key !== 'email' && key !== 'sms') {
+      throw invalid('reply_handling', `reply_handling only accepts email and sms keys`)
+    }
+  }
+  const parseSide = (key) => {
+    if (raw[key] === undefined) return undefined
+    const s = raw[key]
+    if (!s || typeof s !== 'object' || Array.isArray(s)) {
+      throw invalid('reply_handling', `reply_handling.${key} must be an object`)
+    }
+    for (const field of Object.keys(s)) {
+      if (field !== 'noReplySwitchTo' && field !== 'timeoutMs') {
+        throw invalid('reply_handling', `reply_handling.${key}.${field} is not allowed`)
+      }
+    }
+    // Only fields the caller actually SENT are materialised. An omitted field is
+    // left ABSENT rather than filled with null: paired with the engine's shallow
+    // merge, a null here silently cleared a stored switch target on a partial
+    // PUT, disabling channel switching that nobody asked to turn off. A caller
+    // that genuinely wants to clear a field sends it explicitly as null/''.
+    const out = {}
+    if ('timeoutMs' in s) {
+      const timeoutRaw = s.timeoutMs
+      if (timeoutRaw === null || timeoutRaw === '') {
+        out.timeoutMs = null
+      } else {
+        const timeoutMs = Number(timeoutRaw)
+        if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+          throw invalid('reply_handling', `reply_handling.${key}.timeoutMs must be a non-negative number`)
+        }
+        out.timeoutMs = timeoutMs
+      }
+    }
+    if ('noReplySwitchTo' in s) {
+      out.noReplySwitchTo = s.noReplySwitchTo == null || s.noReplySwitchTo === ''
+        ? null
+        : String(s.noReplySwitchTo).slice(0, 80)
+    }
+    return out
+  }
+  const email = parseSide('email')
+  const sms = parseSide('sms')
+  // An omitted side is absent, not a pair of nulls, for the same reason: the
+  // caller who PUTs only `email` must not blank the stored `sms` switch target.
+  const result = {}
+  if (email !== undefined) result.email = email
+  if (sms !== undefined) result.sms = sms
+  return result
+}
 
 function settingsOf(campaign) {
   const stored = jsonOf(campaign.settings)
@@ -210,6 +306,9 @@ function settingsOf(campaign) {
       reactivateOOOwithDelay: Number(stored.out_of_office_detection_settings?.reactivateOOOwithDelay) || 0,
       autoCategorizeOOO: stored.out_of_office_detection_settings?.autoCategorizeOOO !== false,
     },
+    reply_handling: replyHandlingOf(stored),
+    // Column-backed subject (Coral Heron) — empty means compose-time fallback.
+    email_subject: campaign.email_subject || '',
     // Read-time projection of the columns the mailer and engine actually read,
     // so a client never has to reconcile the JSON with the columns.
     track_opens: Boolean(campaign.track_opens),
@@ -218,6 +317,30 @@ function settingsOf(campaign) {
     tracking_domain: campaign.tracking_domain || '',
     reply_to: campaign.reply_to || '',
   }
+}
+
+// Snapshot workspace send defaults onto a draft that has never launched, so a
+// later settings/schedule edit is "re-saved after the change". Launched
+// campaigns keep the snapshot they started with.
+function maybeRefreshDefaultsSnapshot(campaign, owner) {
+  if (campaign.status !== 'draft' || (campaign.launched_at && String(campaign.launched_at).trim())) return
+  if (!campaignHasColumn('defaults_snapshot')) return
+  if (typeof sendRules.snapshotDefaults !== 'function') return
+  try {
+    const snap = sendRules.snapshotDefaults(owner)
+    db.prepare('UPDATE campaigns SET defaults_snapshot = ? WHERE id = ?')
+      .run(JSON.stringify(snap ?? {}), campaign.id)
+  } catch { /* leave prior snapshot if snapshotDefaults is unavailable/broken */ }
+}
+
+// Send-node id → channel for freeze / audit comparisons.
+function sendChannelMap(graph) {
+  const map = new Map()
+  for (const node of Object.values(graph.nodes || {})) {
+    if (node.type !== 'send') continue
+    map.set(node.id, String(node.channel || 'email').toLowerCase())
+  }
+  return map
 }
 
 // Workspace defaults are applied at read time rather than copied at creation,
@@ -303,6 +426,8 @@ function campaignRow(c) {
     parentCampaignId: c.parent_campaign_id || null,
     mailboxId: c.mailbox_id || null,
     channelMode: channelModeOf(c),
+    emailSubject: c.email_subject || '',
+    launchedAt: c.launched_at || null,
     trackOpens: Boolean(c.track_opens),
     trackClicks: Boolean(c.track_clicks),
     stopOnReply: Boolean(c.stop_on_reply),
@@ -336,6 +461,10 @@ function statusLabel(c) {
 }
 
 // Every unmet launch condition, together, rather than the first one found.
+//
+// Skip-on-undeliverable at send time is engine-owned; this API only validates
+// cohort fitness and channel fit at launch (START). Soft failures mid-run are
+// not re-checked here.
 function launchBlockers(campaign) {
   const blockers = []
   const mode = channelModeOf(campaign)
@@ -343,6 +472,26 @@ function launchBlockers(campaign) {
   if (!graph.valid) {
     blockers.push({ field: 'playbook', message: 'Fix the playbook before starting', errors: graph.errors })
   }
+  const sendNodes = graph.valid
+    ? Object.values(graph.nodes).filter((n) => n.type === 'send')
+    : []
+  const hasEmailSend = sendNodes.some((n) => String(n.channel || 'email').toLowerCase() === 'email')
+  const hasSmsSend = sendNodes.some((n) => String(n.channel || '').toLowerCase() === 'sms')
+
+  // Playbook channel vs campaign mode (Cedar Pike).
+  if (graph.valid && mode === 'email' && hasSmsSend) {
+    blockers.push({
+      field: 'playbook',
+      message: 'Email-mode campaigns cannot include SMS send steps — switch to multi or remove SMS steps',
+    })
+  }
+  if (graph.valid && mode === 'sms' && hasEmailSend) {
+    blockers.push({
+      field: 'playbook',
+      message: 'SMS-mode campaigns cannot include email send steps — switch to multi or remove email steps',
+    })
+  }
+
   if (mode === 'email' || mode === 'multi') {
     const mailboxes = db.prepare('SELECT COUNT(*) n FROM campaign_mailboxes WHERE campaign_id = ?').get(campaign.id).n
     if (!mailboxes && !campaign.mailbox_id) {
@@ -359,6 +508,67 @@ function launchBlockers(campaign) {
   }
   const leads = db.prepare('SELECT COUNT(*) n FROM campaign_leads WHERE campaign_id = ?').get(campaign.id).n
   if (!leads) blockers.push({ field: 'leads', message: 'Attach at least one lead before starting' })
+
+  // Cohort fitness: every attached lead must be deliverable on the channels the
+  // playbook will use. Soft check via COUNT — API launch gate only.
+  if (leads && hasEmailSend) {
+    const missingEmail = db.prepare(
+      `SELECT COUNT(*) n FROM campaign_leads cl
+         JOIN leads l ON l.id = cl.lead_id
+        WHERE cl.campaign_id = ? AND TRIM(COALESCE(l.email, '')) = ''`
+    ).get(campaign.id).n
+    if (missingEmail) {
+      blockers.push({
+        field: 'cohort',
+        message: `${missingEmail} attached lead${missingEmail === 1 ? '' : 's'} missing an email required by this campaign's email steps`,
+      })
+    }
+  }
+  if (leads && hasSmsSend) {
+    const missingPhone = db.prepare(
+      `SELECT COUNT(*) n FROM campaign_leads cl
+         JOIN leads l ON l.id = cl.lead_id
+        WHERE cl.campaign_id = ? AND TRIM(COALESCE(l.phone, '')) = ''`
+    ).get(campaign.id).n
+    if (missingPhone) {
+      blockers.push({
+        field: 'cohort',
+        message: `${missingPhone} attached lead${missingPhone === 1 ? '' : 's'} missing a phone number required by this campaign's SMS steps`,
+      })
+    }
+  }
+
+  if (campaign.email_subject) {
+    const subject = validateEmailSubject(campaign.email_subject)
+    if (!subject.ok) {
+      blockers.push({ field: 'email_subject', message: subject.message })
+    }
+  }
+
+  // Only enforce Coral Marten defaults when a snapshot was actually written
+  // (API create / draft re-save). Pre-snapshot campaigns keep prior START rules.
+  const defaultsSnapshot = jsonOf(campaign.defaults_snapshot)
+  if (
+    typeof sendRules.validateDefaultsForLaunch === 'function'
+    && defaultsSnapshot
+    && Object.keys(defaultsSnapshot).length > 0
+  ) {
+    try {
+      // Second arg is campaign preference overrides (send_rules), not the row.
+      const campaignOverrides = storedRules(campaign.user_id, 'campaign', campaign.id) || {}
+      const extra = sendRules.validateDefaultsForLaunch(defaultsSnapshot, campaignOverrides)
+      if (Array.isArray(extra)) {
+        for (const item of extra) {
+          if (typeof item === 'string') {
+            blockers.push({ field: 'defaults', message: item })
+          } else if (item && typeof item === 'object') {
+            blockers.push(item)
+          }
+        }
+      }
+    } catch { /* parallel agent may still be landing the export */ }
+  }
+
   return blockers
 }
 
@@ -399,9 +609,20 @@ function csvCell(value) {
 const TEST_SENDS = new Map()
 const TEST_SEND_LIMIT = 20
 
+const TEST_SEND_WINDOW_MS = 3600e3
+
 function throttleTestSend(email) {
   const now = Date.now()
-  const recent = (TEST_SENDS.get(email) || []).filter((t) => now - t < 3600e3)
+  // Evict addresses whose whole window has aged out, so a map keyed by every
+  // email that ever test-sent does not grow for the life of the process. The
+  // sweep is cheap (one array filter per stored address) and keeps only the
+  // addresses that still have a live send inside the window.
+  for (const [addr, times] of TEST_SENDS) {
+    const live = times.filter((t) => now - t < TEST_SEND_WINDOW_MS)
+    if (live.length) TEST_SENDS.set(addr, live)
+    else TEST_SENDS.delete(addr)
+  }
+  const recent = (TEST_SENDS.get(email) || []).filter((t) => now - t < TEST_SEND_WINDOW_MS)
   if (recent.length >= TEST_SEND_LIMIT) {
     throw new HttpError(429, { error: 'rate_limited', message: `At most ${TEST_SEND_LIMIT} test sends an hour` })
   }
@@ -597,11 +818,25 @@ export function register(api) {
     if (twin) return { ...campaignRow(twin), deduplicated: true }
 
     const mermaid = STARTER_MERMAID[channelMode] || ''
+    const owner = ownerOf(req.wsId)
+    let defaultsSnapshot = '{}'
+    if (typeof sendRules.snapshotDefaults === 'function') {
+      try { defaultsSnapshot = JSON.stringify(sendRules.snapshotDefaults(owner) ?? {}) }
+      catch { defaultsSnapshot = '{}' }
+    }
     const created = tx(() => {
-      const info = db.prepare(
-        `INSERT INTO campaigns (user_id, name, status, mermaid, owner_email, client_id, status_at, channel_mode)
-         VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)`
-      ).run(req.wsId, name, mermaid, req.user.email, clientId || null, nowIso(), channelMode)
+      let info
+      if (campaignHasColumn('defaults_snapshot')) {
+        info = db.prepare(
+          `INSERT INTO campaigns (user_id, name, status, mermaid, owner_email, client_id, status_at, channel_mode, defaults_snapshot)
+           VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?)`
+        ).run(req.wsId, name, mermaid, req.user.email, clientId || null, nowIso(), channelMode, defaultsSnapshot)
+      } else {
+        info = db.prepare(
+          `INSERT INTO campaigns (user_id, name, status, mermaid, owner_email, client_id, status_at, channel_mode)
+           VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)`
+        ).run(req.wsId, name, mermaid, req.user.email, clientId || null, nowIso(), channelMode)
+      }
       if (goalId) db.prepare('UPDATE goals SET campaign_id = ? WHERE id = ? AND user_id = ?').run(info.lastInsertRowid, goalId, req.wsId)
       return db.prepare('SELECT * FROM campaigns WHERE id = ?').get(info.lastInsertRowid)
     })
@@ -676,8 +911,19 @@ export function register(api) {
     const target = STATUS_ACTIONS[raw]
     const before = statusLabel(c)
     tx(() => {
-      db.prepare("UPDATE campaigns SET status = ?, status_reason = ?, status_at = ?, updated_at = datetime('now') WHERE id = ?")
-        .run(target.status, target.reason, nowIso(), c.id)
+      if (raw === 'START' && campaignHasColumn('launched_at')) {
+        // First successful START stamps launched_at; channel freeze keys off it.
+        // NULLIF so an empty-string default still counts as "not yet launched".
+        db.prepare(
+          `UPDATE campaigns SET status = ?, status_reason = ?, status_at = ?,
+             launched_at = COALESCE(NULLIF(launched_at, ''), datetime('now')),
+             updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(target.status, target.reason, nowIso(), c.id)
+      } else {
+        db.prepare("UPDATE campaigns SET status = ?, status_reason = ?, status_at = ?, updated_at = datetime('now') WHERE id = ?")
+          .run(target.status, target.reason, nowIso(), c.id)
+      }
       // Pausing holds approved-but-unsent drafts rather than discarding them:
       // the row stays `approved` and the engine's status check is what stops it.
       if (raw === 'STOPPED') {
@@ -734,6 +980,30 @@ export function register(api) {
         autoCategorizeOOO: bool(ooo, 'autoCategorizeOOO', current.out_of_office_detection_settings.autoCategorizeOOO),
       }
     }
+    if (body.reply_handling !== undefined) {
+      // parseReplyHandling now returns ONLY the sides/fields the caller sent.
+      // Merge them onto the stored settings so a partial PUT updates what it
+      // names and leaves the rest untouched — the same "fall back to current"
+      // idiom the out-of-office block above uses, and what stops a partial
+      // update from clearing a channel-switch target it never mentioned.
+      const parsed = parseReplyHandling(body.reply_handling)
+      const mergeSide = (cur, upd) => upd === undefined ? cur : {
+        noReplySwitchTo: 'noReplySwitchTo' in upd ? upd.noReplySwitchTo : cur.noReplySwitchTo,
+        timeoutMs: 'timeoutMs' in upd ? upd.timeoutMs : cur.timeoutMs,
+      }
+      next.reply_handling = {
+        email: mergeSide(current.reply_handling.email, parsed.email),
+        sms: mergeSide(current.reply_handling.sms, parsed.sms),
+      }
+    }
+
+    let emailSubject = c.email_subject || ''
+    if (body.email_subject !== undefined) {
+      const subject = validateEmailSubject(body.email_subject)
+      if (!subject.ok) throw invalid('email_subject', subject.message)
+      emailSubject = subject.value
+      next.email_subject = emailSubject
+    }
 
     const trackOpens = next.track_settings.includes('DONT_TRACK_EMAIL_OPEN') ? 0 : 1
     const trackClicks = next.track_settings.includes('DONT_TRACK_LINK_CLICK') ? 0 : 1
@@ -744,16 +1014,33 @@ export function register(api) {
     const stored = { ...next }
     delete stored.track_opens; delete stored.track_clicks; delete stored.stop_on_reply
     delete stored.tracking_domain; delete stored.reply_to; delete stored.name
+    delete stored.email_subject
 
     tx(() => {
-      db.prepare(
-        `UPDATE campaigns SET name = ?, settings = ?, track_opens = ?, track_clicks = ?,
-           stop_on_reply = ?, updated_at = datetime('now') WHERE id = ?`
-      ).run(next.name || c.name, JSON.stringify(stored), trackOpens, trackClicks, stopOnReply, c.id)
+      if (campaignHasColumn('email_subject')) {
+        db.prepare(
+          `UPDATE campaigns SET name = ?, settings = ?, track_opens = ?, track_clicks = ?,
+             stop_on_reply = ?, email_subject = ?, updated_at = datetime('now') WHERE id = ?`
+        ).run(next.name || c.name, JSON.stringify(stored), trackOpens, trackClicks, stopOnReply, emailSubject, c.id)
+      } else {
+        db.prepare(
+          `UPDATE campaigns SET name = ?, settings = ?, track_opens = ?, track_clicks = ?,
+             stop_on_reply = ?, updated_at = datetime('now') WHERE id = ?`
+        ).run(next.name || c.name, JSON.stringify(stored), trackOpens, trackClicks, stopOnReply, c.id)
+      }
+      // Reply-handling changes refresh the defaults snapshot while still draft.
+      if (body.reply_handling !== undefined) {
+        maybeRefreshDefaultsSnapshot({ ...c, status: c.status, launched_at: c.launched_at }, ownerOf(req.wsId))
+      }
     })
     audit(req, { campaignId: c.id, type: 'campaign_settings', detail: `changed: ${changed.join(', ') || 'nothing'}` })
     const after = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(c.id)
-    return { success: true, data: { message: 'Settings updated successfully' }, settings: settingsOf(after) }
+    return {
+      success: true,
+      data: { message: 'Settings updated successfully' },
+      settings: settingsOf(after),
+      campaign: campaignRow(after),
+    }
   }))
 
   // ---------------------------------------------------------- update-schedule
@@ -796,6 +1083,9 @@ export function register(api) {
     // Settings → Sending and Campaign → Sending window cannot disagree.
     const priorRules = storedRules(req.wsId, 'campaign', c.id)
     saveRules(req.wsId, 'campaign', c.id, { ...priorRules, ...legacyScheduleToStoredRules(schedule) }, req.user?.email || '')
+    // Schedule save re-snapshots defaults while the campaign is still a never-
+    // launched draft ("re-saved after the change").
+    maybeRefreshDefaultsSnapshot(c, owner)
     audit(req, {
       campaignId: c.id, type: 'campaign_schedule',
       detail: `${existing.start_hour}-${existing.end_hour} -> ${startHour}-${endHour} (${days.join(',')})`,
@@ -897,6 +1187,7 @@ export function register(api) {
         type: node.type,
         label: node.label,
         instruction: node.instruction || '',
+        channel: node.channel || null,
         waitMs: node.ms ?? null,
         outcome: node.outcome || null,
         branches: out.map((e) => ({ to: e.to, label: e.label, condition: e.cond })),
@@ -957,6 +1248,28 @@ export function register(api) {
         warnings: graph.warnings,
       })
     }
+
+    // Channel freeze after launch (Cedar Pike): once launched_at is set (or the
+    // campaign is running), send-node channels cannot change on existing node
+    // ids. Duplicate the campaign for a new version instead. Draft never-
+    // launched campaigns may change channels freely.
+    const prevChannels = sendChannelMap(graphOf(c))
+    const nextChannels = sendChannelMap(graph)
+    const channelChanges = []
+    for (const [nodeId, channel] of nextChannels) {
+      if (!prevChannels.has(nodeId)) continue
+      const from = prevChannels.get(nodeId)
+      if (from === channel) continue
+      channelChanges.push({ nodeId, from, to: channel })
+    }
+    const channelFrozen = Boolean(c.launched_at && String(c.launched_at).trim()) || c.status === 'running'
+    if (channelFrozen && channelChanges.length) {
+      throw new HttpError(409, {
+        error: 'channel_immutable',
+        message: 'Send-step channels are frozen after launch. Duplicate the campaign to create a new version with different channels.',
+      })
+    }
+
     // Merge variables must resolve against real lead fields.
     const leadFields = ['first_name', 'last_name', 'email', 'company', 'title', 'phone', 'website', 'linkedin', 'location']
     const custom = new Set()
@@ -968,6 +1281,13 @@ export function register(api) {
       if (!leadFields.includes(field) && !custom.has(field)) {
         throw invalid('mermaid', `Merge variable {{${field}}} is not a lead field`)
       }
+    }
+
+    // Randomized windows must be valid before save (Cobalt Pike) — fail fast
+    // rather than scheduling out-of-window sends at launch.
+    const timingIssues = collectTimingIssues(graph)
+    if (timingIssues.length) {
+      throw invalid('mermaid', timingIssues[0].message)
     }
 
     // "A delay must be between 0 and 365 days" — the source models a delay as a
@@ -1052,12 +1372,29 @@ export function register(api) {
       for (const row of stale) {
         db.prepare('DELETE FROM node_examples WHERE campaign_id = ? AND node_id = ?').run(c.id, row.node_id)
       }
-      return { remapped, droppedCopy: stale.length }
+      // Draft channel changes are audited (table + event) for Coral/Cedar trail.
+      if (channelChangesTableExists()) {
+        for (const change of channelChanges) {
+          db.prepare(
+            `INSERT INTO campaign_channel_changes
+               (campaign_id, node_id, from_channel, to_channel, changed_by)
+             VALUES (?, ?, ?, ?, ?)`
+          ).run(c.id, change.nodeId, change.from, change.to, req.user.email)
+        }
+      }
+      return { remapped, droppedCopy: stale.length, channelChanges: channelChanges.length }
     })
     audit(req, {
       campaignId: c.id, type: 'campaign_sequence',
       detail: `${Object.keys(graph.nodes).length} steps, ${result.remapped} leads remapped`,
     })
+    for (const change of channelChanges) {
+      audit(req, {
+        campaignId: c.id,
+        type: 'campaign_channel_change',
+        detail: `node ${change.nodeId}: ${change.from} -> ${change.to} by ${req.user.email}`,
+      })
+    }
     meter('campaigns.sequence', Date.now() - t0, true, `steps=${steps.length} remapped=${result.remapped}`)
     return {
       ok: true,
@@ -1329,7 +1666,15 @@ export function register(api) {
     ownedAll('mailboxes', ids, req.wsId, 'mailbox')
     const pool = db.prepare('SELECT mailbox_id FROM campaign_mailboxes WHERE campaign_id = ?').all(c.id).map((r) => r.mailbox_id)
     const remaining = pool.filter((id) => !ids.includes(id))
-    if (c.status === 'running' && pool.length && remaining.length === 0) {
+    // The guard used to read the pool alone, but a running campaign can send
+    // from the legacy single `campaigns.mailbox_id` with an empty pool. Reading
+    // only the pool waved that detach through and then nulled the campaign's one
+    // sender below. The senders a campaign actually has are the pool UNION the
+    // legacy pin, and it is that set which must not be emptied while running.
+    const senders = new Set(pool)
+    if (c.mailbox_id) senders.add(c.mailbox_id)
+    const sendersLeft = [...senders].filter((id) => !ids.includes(id))
+    if (c.status === 'running' && senders.size && sendersLeft.length === 0) {
       throw new HttpError(409, {
         error: 'last_mailbox',
         message: 'This would leave a running campaign with no way to send. Pause it first, or attach a replacement.',
@@ -2522,7 +2867,14 @@ export function register(api) {
       mailbox, user: { id: req.wsId }, campaign: c, lead,
       nodeId: 'manual', subject, body: outgoing, cc, bcc,
     })
-    db.prepare("UPDATE messages SET manual_reply = 1 WHERE provider_message_id = ?").run(sent.providerMessageId)
+    // Scoped to this workspace and guarded against an empty provider id: an
+    // unscoped update would flag a sibling workspace's row that happened to share
+    // a provider id, and a blank binding would flag every row whose
+    // provider_message_id is '' (the column's default for not-yet-sent rows).
+    if (sent.providerMessageId) {
+      db.prepare("UPDATE messages SET manual_reply = 1 WHERE provider_message_id = ? AND user_id = ?")
+        .run(sent.providerMessageId, req.wsId)
+    }
     audit(req, {
       campaignId: c.id, leadId: lead.id, type: 'manual_reply',
       detail: `${req.user.email}${cc.length ? `, cc ${cc.join(', ')}` : ''}${bcc.length ? `, bcc ${bcc.length}` : ''}`,

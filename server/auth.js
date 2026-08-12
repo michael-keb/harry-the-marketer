@@ -63,6 +63,16 @@ export function currentUser(req) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(payload.uid) || null
 }
 
+// The verified session's user id, or null. Used to key rate limiters on a
+// caller we can actually attribute: a forged or rotating cookie fails the HMAC
+// check and yields null, so the limiter falls back to the caller's address
+// rather than minting a fresh bucket per request. Does not touch the database —
+// cheap enough to run on every request.
+export function sessionUid(req) {
+  const payload = verify(req.cookies?.[COOKIE])
+  return payload ? payload.uid : null
+}
+
 // Middleware for API routes: 401 JSON when not signed in.
 export function requireUser(req, res, next) {
   const user = currentUser(req)
@@ -237,6 +247,11 @@ authRouter.post(
   rateLimit({ windowMs: 15 * 60_000, max: 20, key: 'dev-login', message: 'Too many sign-in attempts — wait a few minutes' }),
   express.json(),
   (req, res) => {
+    // In production this route must not exist. Signing anyone in as any email is
+    // a total account takeover; a soft warning gated on PRODUCTION_STRICT was not
+    // enough, so refuse outright — as if the route were never registered —
+    // regardless of PRODUCTION_STRICT or DEV_LOGIN.
+    if (isProduction()) return res.status(404).json({ error: 'Unknown endpoint' })
     if (!devLoginEnabled()) return res.status(403).json({ error: 'dev_login_disabled' })
     const email = String(req.body?.email || '').trim().toLowerCase()
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address' })

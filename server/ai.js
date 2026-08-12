@@ -138,7 +138,7 @@ const HONESTY_RULES =
 // its angle and voice and only moves what has to move for this recipient.
 // `refine` is a one-off note ("shorter, lead with the ROI number") from someone
 // rewriting a sample by hand, and outranks the instruction where they collide.
-export async function composeEmail({ instruction, lead, businessContext, thread, senderName, meetingLink, consentLink, example, refine }) {
+export async function composeEmail({ instruction, lead, businessContext, thread, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject }) {
   try {
     const text = await callModel({
       system:
@@ -180,21 +180,49 @@ export async function composeEmail({ instruction, lead, businessContext, thread,
       },
     })
     const parsed = JSON.parse(text)
-    if (parsed.subject && parsed.body) return { ...parsed, via: 'ai' }
+    if (parsed.subject && parsed.body) {
+      const forced = resolveComposeSubjectLocal({
+        exampleSubject: example?.subject,
+        campaignSubject,
+        defaultSubject,
+        threadSubject: thread?.length ? thread[thread.length - 1].subject : '',
+      })
+      return { ...parsed, subject: forced || parsed.subject, via: 'ai' }
+    }
     throw new Error('missing fields in AI response')
   } catch (err) {
     lastError = String(err.message || err)
     console.warn('[ai] compose fell back to template:', lastError)
-    return { ...templateCompose({ instruction, lead, thread, senderName, consentLink }), via: 'template' }
+    return { ...templateCompose({ instruction, lead, thread, senderName, consentLink, example, campaignSubject, defaultSubject }), via: 'template' }
   }
 }
 
-function templateCompose({ instruction, lead, thread, senderName, consentLink }) {
+// New-thread subject precedence: example → campaign → default variant → null.
+function resolveComposeSubjectLocal({ exampleSubject, campaignSubject, defaultSubject, threadSubject } = {}) {
+  const prev = String(threadSubject || '').trim()
+  if (prev) return prev.startsWith('Re:') ? prev : `Re: ${prev}`
+  const example = String(exampleSubject || '').trim()
+  if (example) return example
+  const campaign = String(campaignSubject || '').trim()
+  if (campaign) return campaign
+  const fallback = String(defaultSubject || '').trim()
+  if (fallback) return fallback
+  return null
+}
+
+function templateCompose({ instruction, lead, thread, senderName, consentLink, example, campaignSubject, defaultSubject }) {
   const firstName = lead.first_name || 'there'
   const prevSubject = thread?.length ? thread[thread.length - 1].subject : ''
-  const subject = prevSubject
-    ? (prevSubject.startsWith('Re:') ? prevSubject : `Re: ${prevSubject}`)
-    : mergeFields(instruction, lead).slice(0, 78) || `Quick question, ${firstName}`
+  const forced = resolveComposeSubjectLocal({
+    exampleSubject: example?.subject,
+    campaignSubject,
+    defaultSubject,
+    threadSubject: prevSubject,
+  })
+  const subject = forced
+    || (prevSubject
+      ? (prevSubject.startsWith('Re:') ? prevSubject : `Re: ${prevSubject}`)
+      : mergeFields(instruction, lead).slice(0, 78) || `Quick question, ${firstName}`)
   const body =
     `Hi ${firstName},\n\n${mergeFields(instruction, lead)}\n\n` +
     (consentLink ? `When you have a moment, this link confirms what you're agreeing to — it takes seconds:\n${consentLink}\n\n` : '') +

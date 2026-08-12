@@ -28,7 +28,7 @@ import { notify } from './alerts.js'
 import { gmailRecentInbound } from './google.js'
 import { dailyBackup } from './backup.js'
 import { outlookRecentInbound } from './microsoft.js'
-import { sendEmail, SuppressedError } from './mailer.js'
+import { sendEmail, SuppressedError, classifyBounce, markBounce } from './mailer.js'
 import { canSendNow } from './pacing.js'
 import { openDueRuns, dispatchSeedSends } from './deliverability-runs.js'
 
@@ -55,7 +55,22 @@ async function job(name, fn) {
 
 // A manual reply or forward the user chose to send later. It was composed by a
 // person and confirmed by a person; the only thing outstanding is the clock.
+const SENDING_STALE_MS = 15 * 60e3
+
 async function dispatchScheduled() {
+  // Reclaim scheduled sends orphaned in 'sending' by a process that died between
+  // the claim (below) and the result. A real send flips out of 'sending' within
+  // one tick, so anything still 'sending' well past its due time is a crash
+  // remnant — requeue it rather than let it strand forever (never sent, never
+  // failed, never cancellable). The 15-minute grace matches the user-facing
+  // reclaim on DELETE /api/scheduled/:id, and the single-flight tick guarantees
+  // no live send is in flight here to race.
+  db.prepare(
+    `UPDATE messages SET send_status = 'queued'
+      WHERE direction = 'out' AND send_status = 'sending'
+        AND scheduled_at != '' AND scheduled_at <= ?`
+  ).run(new Date(Date.now() - SENDING_STALE_MS).toISOString())
+
   const due = db.prepare(
     `SELECT * FROM messages
       WHERE direction = 'out' AND send_status = 'queued'
@@ -406,11 +421,34 @@ function storeInboundReply({ mailbox, msg, campaignId, leadId, cl }) {
 export function ingestRecentInbound(mailbox, msg) {
   if (!msg?.providerMessageId) return null
 
-  const known = db.prepare('SELECT 1 FROM messages WHERE provider_message_id = ?').get(msg.providerMessageId)
+  // Dedupe scoped by workspace: the same Gmail account may be connected to two
+  // workspaces, and a global check let the first to ingest a message silently
+  // swallow it for the second.
+  const known = db.prepare('SELECT 1 FROM messages WHERE user_id = ? AND provider_message_id = ?')
+    .get(mailbox.user_id, msg.providerMessageId)
   if (known) return 'known'
 
-  const seen = db.prepare('SELECT 1 FROM unmatched_messages WHERE provider_message_id = ?').get(msg.providerMessageId)
+  const seen = db.prepare('SELECT 1 FROM unmatched_messages WHERE workspace_id = ? AND provider_message_id = ?')
+    .get(mailbox.user_id, msg.providerMessageId)
   if (seen) return 'seen'
+
+  // A delivery-failure notice is a bounce, not a reply: mark the addressed lead
+  // and its last outbound bounced (feeds the brake) and record the DSN in the
+  // untracked queue so the dedupe above skips it next sweep.
+  const bounce = classifyBounce(msg)
+  if (bounce?.failed) {
+    markBounce({ wsId: mailbox.user_id, mailboxId: mailbox.id, failedEmail: bounce.failed })
+    db.prepare(
+      `INSERT OR IGNORE INTO unmatched_messages
+         (workspace_id, mailbox_id, from_email, subject, body, thread_id, provider_message_id, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      mailbox.user_id, mailbox.id, msg.fromEmail || '',
+      msg.subject || 'Delivery failure', String(msg.body || '').slice(0, 20000),
+      msg.threadId || '', msg.providerMessageId, msg.receivedAt || isoNow()
+    )
+    return 'bounce'
+  }
 
   const from = String(msg.fromEmail || '').toLowerCase().trim()
   const lead = from
@@ -507,19 +545,33 @@ export function ingestRecentInbound(mailbox, msg) {
 }
 
 async function syncMailboxInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
-  let inbound = []
-  inbound = mailbox.provider === 'outlook'
-    ? await outlookRecentInbound(mailbox, { withinDays, max })
-    : await gmailRecentInbound(mailbox, { withinDays, max })
+  // Resume from the persisted watermark (last-seen internalDate in ms). Fetching
+  // everything AFTER it — and paging in the providers — is what makes a mailbox
+  // that was offline for a week, or flooded with mail, never skip a reply.
+  const watermark = Number(mailbox.inbound_watermark || 0) || 0
+  const opts = { withinDays, max, sinceMs: watermark || undefined }
+  const inbound = mailbox.provider === 'outlook'
+    ? await outlookRecentInbound(mailbox, opts)
+    : await gmailRecentInbound(mailbox, opts)
 
   let attached = 0
   let untracked = 0
+  let newest = watermark
   for (const msg of inbound) {
     const result = ingestRecentInbound(mailbox, msg)
     if (result === 'attached') attached++
     else if (result === 'untracked') untracked++
+    const ms = Number(msg.internalDate) || Date.parse(msg.receivedAt || '') || 0
+    if (ms > newest) newest = ms
   }
-  db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now'), last_error = '' WHERE id = ?").run(mailbox.id)
+  // Advance the watermark only forward, and only after a successful sweep, so a
+  // failed fetch never skips the window it did not actually read.
+  if (newest > watermark) {
+    db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now'), last_error = '', inbound_watermark = ? WHERE id = ?")
+      .run(String(newest), mailbox.id)
+  } else {
+    db.prepare("UPDATE mailboxes SET last_sync_at = datetime('now'), last_error = '' WHERE id = ?").run(mailbox.id)
+  }
   return { attached, untracked, scanned: inbound.length }
 }
 

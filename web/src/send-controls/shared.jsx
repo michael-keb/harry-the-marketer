@@ -403,10 +403,15 @@ export function VolumeGroup({ rules, set, save, cancel, busy, variant = 'workspa
 
 export function BrakesGroup({ rules, set, save, cancel, busy }) {
   const b = rules.brakes || {}
-  const [health, setHealth] = useState([])
+  const [health, setHealth] = useState(null)
+  const [healthError, setHealthError] = useState(false)
 
   useEffect(() => {
-    api.get('/api/send-health').then(setHealth).catch(() => {})
+    // A failed load must read differently from "no bounces" — otherwise an
+    // outage looks like a clean bill of health.
+    api.get('/api/send-health')
+      .then((rows) => { setHealth(rows || []); setHealthError(false) })
+      .catch(() => { setHealth(null); setHealthError(true) })
   }, [])
 
   return (
@@ -433,7 +438,11 @@ export function BrakesGroup({ rules, set, save, cancel, busy }) {
             onChange={(e) => set({ brakes: { ...b, bounceRatePercent: e.target.value } })} />
         </Field>
       </div>
-      {health.length > 0 && (
+      {healthError ? (
+        <p className="border-t border-slate-200 pt-3 text-xs text-amber-700">
+          Couldn&apos;t load bounce health — this list may be out of date. Reopen this section to try again.
+        </p>
+      ) : health?.length > 0 ? (
         <ul className="space-y-1 border-t border-slate-200 pt-3">
           {health.map((m) => (
             <li key={m.id} className="text-xs text-slate-500">
@@ -441,7 +450,155 @@ export function BrakesGroup({ rules, set, save, cancel, busy }) {
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
+    </Group>
+  )
+}
+
+const MS_DAY = 86400e3
+const MS_HOUR = 3600e3
+
+function timeoutParts(ms) {
+  const n = Number(ms) || 0
+  if (n > 0 && n % MS_DAY === 0) return { amount: n / MS_DAY, unit: 'days' }
+  if (n > 0 && n % MS_HOUR === 0) return { amount: n / MS_HOUR, unit: 'hours' }
+  return { amount: Math.max(0, Math.round(n / MS_DAY)) || 2, unit: 'days' }
+}
+
+function timeoutMs(amount, unit) {
+  const n = Math.max(0, Number(amount) || 0)
+  return Math.round(n * (unit === 'hours' ? MS_HOUR : MS_DAY))
+}
+
+// Workspace defaults for no-reply channel switching and randomized send windows.
+// Campaigns snapshot these at create/re-save so later workspace edits do not
+// silently move live automation (Coral Marten / Cobalt Pike).
+export function AutomationDefaultsGroup({ rules, set, save, cancel, busy }) {
+  const rh = rules.replyHandling || {}
+  const email = rh.email || {}
+  const sms = rh.sms || {}
+  const rw = rules.randomWindow || {}
+  const emailT = timeoutParts(email.timeoutMs ?? 2 * MS_DAY)
+  const smsT = timeoutParts(sms.timeoutMs ?? 2 * MS_DAY)
+
+  const setSide = (side, patch) => set({
+    replyHandling: {
+      ...rh,
+      [side]: { ...(rh[side] || {}), ...patch },
+    },
+  })
+
+  return (
+    <Group
+      id="send-automation-defaults"
+      title="Campaign automation defaults"
+      summary="No-reply channel switching and randomized send windows new campaigns inherit."
+      note="Already-running campaigns keep the defaults they launched with until they are re-saved."
+      busy={busy}
+      onCancel={cancel}
+      onSave={() => save({
+        replyHandling: {
+          email: {
+            noReplySwitchTo: email.noReplySwitchTo || 'sms',
+            timeoutMs: timeoutMs(emailT.amount, emailT.unit),
+          },
+          sms: {
+            noReplySwitchTo: sms.noReplySwitchTo || 'email',
+            timeoutMs: timeoutMs(smsT.amount, smsT.unit),
+          },
+        },
+        randomWindow: {
+          enabled: Boolean(rw.enabled),
+          from: rw.from || '09:00',
+          to: rw.to || '11:00',
+        },
+      }, 'Automation defaults saved')}
+    >
+      <fieldset className="space-y-3">
+        <legend className="text-xs font-medium text-slate-700">When nobody replies</legend>
+        {[
+          { side: 'email', label: 'After an email', parts: emailT, cfg: email, options: [
+            { value: 'sms', label: 'Switch to SMS' },
+            { value: 'none', label: "Don't switch" },
+            { value: 'email', label: 'Follow up by email' },
+          ] },
+          { side: 'sms', label: 'After an SMS', parts: smsT, cfg: sms, options: [
+            { value: 'email', label: 'Switch to email' },
+            { value: 'none', label: "Don't switch" },
+            { value: 'sms', label: 'Follow up by SMS' },
+          ] },
+        ].map(({ side, label, parts, cfg, options }) => (
+          <div key={side} className="flex flex-wrap items-end gap-3">
+            <Field id={`def-switch-${side}`} label={label}>
+              <select
+                id={`def-switch-${side}`}
+                className="input w-auto"
+                value={cfg.noReplySwitchTo || options[0].value}
+                onChange={(e) => setSide(side, { noReplySwitchTo: e.target.value })}
+              >
+                {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </Field>
+            <Field id={`def-wait-${side}`} label="Wait">
+              <div className="flex items-center gap-2">
+                <input
+                  id={`def-wait-${side}`}
+                  type="number"
+                  min="0"
+                  className="input w-20"
+                  value={parts.amount}
+                  onChange={(e) => setSide(side, {
+                    timeoutMs: timeoutMs(e.target.value, parts.unit),
+                  })}
+                />
+                <select
+                  className="input w-auto"
+                  value={parts.unit}
+                  aria-label={`${label} wait unit`}
+                  onChange={(e) => setSide(side, {
+                    timeoutMs: timeoutMs(parts.amount, e.target.value),
+                  })}
+                >
+                  <option value="days">days</option>
+                  <option value="hours">hours</option>
+                </select>
+              </div>
+            </Field>
+          </div>
+        ))}
+      </fieldset>
+
+      <fieldset className="space-y-3 border-t border-slate-200 pt-3">
+        <legend className="text-xs font-medium text-slate-700">Randomized send window</legend>
+        <Toggle
+          on={Boolean(rw.enabled)}
+          onChange={(on) => set({ randomWindow: { ...rw, enabled: on } })}
+          label="Pick a random time inside a window"
+          hint="Chosen once per recipient and step, then reused on retry. Inclusive at both ends."
+        />
+        <div className="flex flex-wrap gap-3">
+          <Field id="def-rw-from" label="From (HH:MM)">
+            <input
+              id="def-rw-from"
+              type="time"
+              className="input w-36"
+              value={rw.from || '09:00'}
+              disabled={!rw.enabled}
+              onChange={(e) => set({ randomWindow: { ...rw, from: e.target.value } })}
+            />
+          </Field>
+          <Field id="def-rw-to" label="To (HH:MM)">
+            <input
+              id="def-rw-to"
+              type="time"
+              className="input w-36"
+              value={rw.to || '11:00'}
+              disabled={!rw.enabled}
+              onChange={(e) => set({ randomWindow: { ...rw, to: e.target.value } })}
+            />
+          </Field>
+        </div>
+      </fieldset>
     </Group>
   )
 }

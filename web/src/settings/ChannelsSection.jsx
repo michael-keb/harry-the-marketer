@@ -22,7 +22,9 @@ export default function ChannelsSection() {
   const [error, setError] = useState(null)
   const [form, setForm] = useState(emptyForm)
   const [busy, setBusy] = useState(false)
-  const [testTo, setTestTo] = useState('')
+  // Keyed by account id: each row's test-send input is its own, so typing in
+  // one no longer fills every row (and a Test send always uses that row's value).
+  const [testTo, setTestTo] = useState({})
 
   const load = useCallback(() => {
     setError(null)
@@ -53,14 +55,15 @@ export default function ChannelsSection() {
   }
 
   async function testSend(id) {
-    if (!testTo.trim()) {
+    const to = (testTo[id] || '').trim()
+    if (!to) {
       toast?.('Enter a phone number to test', 'error')
       return
     }
     setBusy(true)
     try {
       await api.post(`/api/channel-accounts/${id}/test-send`, {
-        to: testTo.trim(),
+        to,
         confirm: true,
         body: 'Harry SMS test — reply STOP to opt out.',
       })
@@ -121,8 +124,8 @@ export default function ChannelsSection() {
                 <input
                   className="input max-w-xs text-sm"
                   placeholder="+61…"
-                  value={testTo}
-                  onChange={(e) => setTestTo(e.target.value)}
+                  value={testTo[a.id] || ''}
+                  onChange={(e) => setTestTo((t) => ({ ...t, [a.id]: e.target.value }))}
                 />
                 <button type="button" className="btn-secondary text-sm" disabled={busy} onClick={() => testSend(a.id)}>
                   Test send

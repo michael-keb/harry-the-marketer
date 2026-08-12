@@ -34,6 +34,7 @@ import {
   str, int, bool, oneOf, page, tx, audit, meter, nowIso,
 } from './http.js'
 import { configured, call, unconfigured } from './providers.js'
+import { suppressionFor } from '../suppression.js'
 
 const ENV_VARS = ['PROSPECT_API_URL', 'PROSPECT_API_KEY']
 const BASE = '/api/v1/search-email-leads'
@@ -624,6 +625,10 @@ function upsertLead(wsId, contact, email, source) {
   const existing = db.prepare('SELECT * FROM leads WHERE user_id = ? AND email = ?').get(wsId, email)
   const verification = String(contact.verificationStatus || contact.status || '')
   if (existing) {
+    // `status` is deliberately NOT touched here. A person a human unsubscribed,
+    // or one that hard-bounced, must never be re-activated by a fetch importing
+    // the same address back in — suppression is unconditional, and re-fetching
+    // is not consent.
     db.prepare(
       `UPDATE leads SET
          first_name = CASE WHEN first_name = '' THEN ? ELSE first_name END,
@@ -639,14 +644,21 @@ function upsertLead(wsId, contact, email, source) {
       String(contact.company?.name || ''), String(contact.title || ''),
       verification, source, existing.id
     )
-    return { id: existing.id, created: false }
+    return { id: existing.id, created: false, suppressed: existing.status !== 'active' }
   }
+  // A fetched contact on the never-contact list (blocked domain/address) is
+  // written as `unsubscribed`, never as an active, contactable lead — the same
+  // rule lists.js, campaigns.js and routes.js apply on import. It is imported
+  // rather than dropped so the Contacts view still shows why it is unavailable,
+  // and the send path re-checks suppression regardless.
+  const suppressed = Boolean(suppressionFor(wsId, { address: email }))
   const info = db.prepare(
-    `INSERT INTO leads (user_id, email, first_name, last_name, company, title, email_verification_status, email_source)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO leads (user_id, email, first_name, last_name, company, title, email_verification_status, email_source, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(wsId, email, String(contact.firstName || ''), String(contact.lastName || ''),
-    String(contact.company?.name || ''), String(contact.title || ''), verification, source)
-  return { id: Number(info.lastInsertRowid), created: true }
+    String(contact.company?.name || ''), String(contact.title || ''), verification, source,
+    suppressed ? 'unsubscribed' : 'active')
+  return { id: Number(info.lastInsertRowid), created: true, suppressed }
 }
 
 // ---- caches with a lifetime ---------------------------------------------------
@@ -713,6 +725,23 @@ export function inconsistentTrend(block) {
 // first result rather than paying twice.
 const fetchIdempotency = new Map()
 const IDEMPOTENCY_TTL_MS = 60_000
+
+// Two concurrent identical POSTs both miss the settled cache above (the value is
+// only written after the upstream call) and both charge. The key is therefore
+// RESERVED before the call with an in-flight promise the second request awaits,
+// so a double-submit charges once — the in-process analogue of the
+// UNIQUE(workspace_id, idempotency_key) index senders.js reserves in SQLite.
+const fetchInFlight = new Map()
+
+// Neither map may grow for the life of the process. `fetchInFlight` self-clears
+// in its own finally block; the settled cache is swept of expired entries on
+// every fetch, the same TTL sweep the `cursors` map runs above.
+function sweepIdempotency() {
+  const now = Date.now()
+  for (const [k, v] of fetchIdempotency) {
+    if (now - v.at > IDEMPOTENCY_TTL_MS) fetchIdempotency.delete(k)
+  }
+}
 
 // Reviews are coalesced per (workspace, search) so a double click issues one
 // upstream PATCH rather than two.
@@ -1422,11 +1451,18 @@ export function register(api) {
     // Idempotency: the same request inside the window returns the first result
     // rather than charging again, which is what makes a double click safe.
     const key = `${req.wsId}:${searchRow.id}:${mode}:${count}:${adaptIds.join(',')}`
+    sweepIdempotency()
     const prior = fetchIdempotency.get(key)
     if (prior && Date.now() - prior.at < IDEMPOTENCY_TTL_MS) {
       return { ...prior.value, idempotent: true }
     }
+    // Reserve BEFORE the charge, not after. A second identical request that
+    // arrives while the first is still calling upstream awaits the first's
+    // result rather than issuing its own fetch — so a double-click charges once.
+    const reserved = fetchInFlight.get(key)
+    if (reserved) return { ...(await reserved), idempotent: true }
 
+    const runFetch = (async () => {
     const requested = hasCount ? count : adaptIds.length
     const fetchId = tx(() => Number(db.prepare(
       `INSERT INTO prospect_fetches (workspace_id, search_id, provider_filter_id, name, requested, status)
@@ -1553,6 +1589,11 @@ export function register(api) {
     }
     fetchIdempotency.set(key, { at: Date.now(), value: out })
     return out
+    })()
+    // The reservation lives only for the duration of the call; the settled cache
+    // above carries idempotency for the rest of the TTL window.
+    fetchInFlight.set(key, runFetch)
+    try { return await runFetch } finally { fetchInFlight.delete(key) }
   }))
 
   // PUT /api/prospects/searches/:id/name — rename only.
@@ -1722,7 +1763,13 @@ export function register(api) {
     const id = idParam(req.params, 'id')
     const name = str(req.body, 'name', { required: true, max: MAX_NAME })
     const row = ownedFetch(id, req.wsId)
-    if (req.wsRole === 'viewer') throw forbidden('You do not have permission to rename this list')
+    // The workspace roles are owner / manager / member (server/db.js) — there is
+    // no 'viewer', so the old guard could never fire and every member could
+    // rename. Renaming a shared list is an owner/manager action, the same bar
+    // webhooks.js applies; a member is refused with the documented 403.
+    if (req.wsRole !== 'owner' && req.wsRole !== 'manager') {
+      throw forbidden('You do not have permission to rename this list')
+    }
     const previous = row.name
 
     // The provider's fetched-list id is a DIFFERENT id from the search's

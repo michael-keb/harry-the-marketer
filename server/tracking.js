@@ -64,8 +64,22 @@ export const unsubscribeUrl = (token, domain = '') => `${trackingBase(domain)}/t
 // The plain-text part needs its own way out — a recipient reading in a
 // text-only client should never have to hunt for one, and CAN-SPAM/CASL both
 // require an opt-out in the message itself, not just in an HTML alternative.
-export function withOptOutFooter(body, token, domain = '') {
-  return `${String(body).trimEnd()}\n\n--\nDon't want these? Unsubscribe here: ${unsubscribeUrl(token, domain)}`
+//
+// `text` is the campaign's own opt-out wording (Settings → unsubscribe_text),
+// threaded through by the mailer so the sentence the sender previewed is the one
+// that ships. The URL is always appended regardless of wording — a text-only
+// client cannot follow a link that is not written out, so the way out has to be
+// literal even when the custom copy says "reply STOP".
+export function withOptOutFooter(body, token, domain = '', text = '') {
+  const lead = String(text || '').trim() || "Don't want these? Unsubscribe here:"
+  return `${String(body).trimEnd()}\n\n--\n${lead} ${unsubscribeUrl(token, domain)}`
+}
+
+// Minimal HTML escape for user-authored footer wording.
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
 }
 
 // Build the HTML alternative for a plain-text body: escaped text, optionally
@@ -86,7 +100,7 @@ export function withOptOutFooter(body, token, domain = '') {
 // `sanitizeSignature()` in server/parity/mailboxes.js. It goes in raw, below
 // the body and ABOVE the unsubscribe line, because Docs/email-accounts/update.md
 // AC 7 is explicit that a signature must not displace the opt-out.
-export function buildHtmlBody({ body, token, trackOpens = true, trackClicks = true, trackingDomain = '', signature = '' }) {
+export function buildHtmlBody({ body, token, trackOpens = true, trackClicks = true, trackingDomain = '', signature = '', unsubscribeText = '' }) {
   const escaped = String(body)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const linked = trackClicks
@@ -108,7 +122,9 @@ export function buildHtmlBody({ body, token, trackOpens = true, trackClicks = tr
     `<div>${linked.replace(/\n/g, '<br>')}</div>` +
     (sig ? `<div class="harry-signature">${sig}</div>` : '') +
     `<br><div style="font-size:11px;color:#999">` +
-    `<a href="${unsubscribeUrl(token, trackingDomain)}" style="color:#999">Unsubscribe</a></div>` +
+    // The campaign's own wording becomes the visible opt-out label, so the
+    // previewed sentence ships; the href stays the real unsubscribe URL.
+    `<a href="${unsubscribeUrl(token, trackingDomain)}" style="color:#999">${escapeHtml(String(unsubscribeText || '').trim()) || 'Unsubscribe'}</a></div>` +
     (trackOpens ? `<img src="${pixelUrl(token, trackingDomain)}" width="1" height="1" alt="" style="display:none">` : '') +
     `</body></html>`
   )

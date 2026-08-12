@@ -83,6 +83,9 @@ test('unsubscribe reply parks the lead for a person — the machine never opts o
 
 test('no-reply timeout follows the 3d edge to the follow-up', async () => {
   db.prepare("UPDATE messages SET created_at = datetime('now', '-4 days') WHERE lead_id = 3").run()
+  // Cobalt Falcon freezes wait_until on first timeout compute; clear it so the
+  // backdated outbound is re-evaluated (same pattern as subsequence-handoff).
+  db.prepare("UPDATE campaign_leads SET wait_until = '' WHERE campaign_id = 1 AND lead_id = 3").run()
   await tick()
   assert.equal(cl(3).node_id, 'F')
   assert.equal(cl(3).state, 'waiting')

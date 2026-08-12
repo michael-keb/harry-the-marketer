@@ -172,6 +172,10 @@ test('engine sends an SMS step when opt-in and sandbox account exist', async () 
     'INSERT INTO campaign_channel_accounts (campaign_id, channel_account_id) VALUES (?, ?)'
   ).run(campaign.id, account.id)
   db.prepare('INSERT INTO campaign_leads (campaign_id, lead_id) VALUES (?, ?)').run(campaign.id, lead.id)
+  // A 24/7 window so the test asserts the SMS-send behaviour, not the wall clock:
+  // SMS now correctly honours the sending window (a real fix — night-time SMS
+  // breaches quiet-hours rules), so without this the run flakes outside 08:30–17:30.
+  db.prepare("UPDATE users SET send_from = '00:00', send_to = '23:59', send_days = 'everyday', send_timezone = 'UTC' WHERE id = ?").run(owner.id)
 
   await tick()
 

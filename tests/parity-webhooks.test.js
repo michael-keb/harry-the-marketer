@@ -6,6 +6,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import express from 'express'
 import { setup, seedUser, seedCampaign, mount } from './helpers/parity-harness.js'
 
 setup('webhooks')                  // MUST precede any ../server import
@@ -52,6 +53,43 @@ function stub(script = [{ status: 200 }]) {
 
 function createWebhook(body) {
   return client.post('/api/webhooks', body)
+}
+
+// The shared harness always mounts as the workspace owner; the role gate needs
+// a member and a manager acting in the SAME workspace, so this mounts `register`
+// with a chosen `wsRole` while keeping wsId on the owner's workspace.
+async function mountAs(role) {
+  const app = express()
+  const api = express.Router()
+  api.use(express.json({ limit: '5mb' }))
+  api.use((req, _res, next) => {
+    req.user = owner
+    req.wsId = owner.id
+    req.wsRole = role
+    req.wsOwnerEmail = owner.email
+    next()
+  })
+  register(api)
+  app.use('/api', api)
+  const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+  const base = `http://127.0.0.1:${server.address().port}`
+  const send = async (method, url, body) => {
+    const res = await fetch(base + url, {
+      method,
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const text = await res.text()
+    let parsed = null
+    try { parsed = text ? JSON.parse(text) : null } catch { parsed = { raw: text } }
+    return { status: res.status, body: parsed }
+  }
+  return {
+    post: (u, b = {}) => send('POST', u, b),
+    patch: (u, b = {}) => send('PATCH', u, b),
+    del: (u, b) => send('DELETE', u, b),
+    close: () => new Promise((r) => server.close(r)),
+  }
 }
 
 function deliveriesFor(webhookId) {
@@ -779,4 +817,130 @@ test('list: pages, and never exposes a secret', async () => {
   assert.ok(next.body.data.every((w) => w.id > first.body.nextCursor))
 
   for (const id of ids) await client.del(`/api/webhooks/${id}`)
+})
+
+// ------------------------------------------------------------------ SSRF (audit)
+
+// Fix 1: an IPv4-mapped IPv6 literal that `new URL()` normalises to hex
+// (`[::ffff:a9fe:a9fe]`) used to bypass the dotted-quad regex and be allowed.
+test('create: IPv4-mapped and raw internal IPv6 literals are all refused', async () => {
+  const bad = [
+    'https://[::ffff:169.254.169.254]/latest/meta-data',
+    'https://[::ffff:127.0.0.1]/x',
+    'https://[::ffff:10.0.0.5]/x',
+    'https://[::1]/x',
+    'https://[fe80::1]/x',
+    'https://[fc00::1]/x',
+  ]
+  for (const url of bad) {
+    const res = await createWebhook({ name: 'V6SSRF', webhook_url: url, event_types: ['EMAIL_REPLY'] })
+    assert.equal(res.status, 422, `expected 422 for ${url}`)
+    assert.equal(res.body.field, 'webhook_url', `expected webhook_url named for ${url}`)
+  }
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM webhooks WHERE name = ?').get('V6SSRF').n, 0)
+
+  // A genuinely public IPv6 literal is still allowed.
+  const ok = await createWebhook({ name: 'V6OK', webhook_url: 'https://[2606:4700::1111]/hook', event_types: ['EMAIL_REPLY'] })
+  assert.equal(ok.status, 200)
+  await client.del(`/api/webhooks/${ok.body.id}`)
+})
+
+// Fix 2: a 3xx is a delivery outcome, never followed into the internal network,
+// and its body is never echoed into the recorded error.
+test('delivery: a 3xx is recorded once, not followed, with redirect:manual', async () => {
+  const created = await createWebhook({
+    name: 'Redirector', webhook_url: 'https://hooks.example.test/redir',
+    association_type: 'campaign', email_campaign_id: ownerCampaign.id, event_types: ['EMAIL_SENT'],
+  })
+  const id = created.body.id
+  const transport = stub([{ status: 302, text: 'Location: http://169.254.169.254/' }])
+  const [result] = await fireWebhooks(owner.id, 'sent', { campaign_id: ownerCampaign.id }, { fetchImpl: transport, backoffMs: 0 })
+  assert.equal(result.ok, false)
+  assert.equal(transport.calls.length, 1)                   // not followed, not retried
+  assert.equal(transport.calls[0].init.redirect, 'manual')
+  const rows = deliveriesFor(id)
+  assert.equal(rows.length, 1)
+  assert.match(rows[0].error, /redirect not followed/)
+  assert.ok(!rows[0].error.includes('169.254'), 'the redirect target is never leaked into the error')
+  await client.del(`/api/webhooks/${id}`)
+})
+
+// Fix 3: the hostname is resolved before every attempt and refused if it answers
+// with an internal address — DNS rebinding cannot turn a saved endpoint inward.
+test('delivery: a hostname resolving to an internal address is refused, a public one delivers', async () => {
+  const created = await createWebhook({
+    name: 'Rebind', webhook_url: 'https://hooks.example.test/rebind',
+    association_type: 'campaign', email_campaign_id: ownerCampaign.id, event_types: ['EMAIL_SENT'],
+  })
+  const id = created.body.id
+
+  for (const internal of ['169.254.169.254', '127.0.0.1', '10.0.0.5', '::1', 'fd00::1']) {
+    const transport = stub([{ status: 200 }])
+    const [result] = await fireWebhooks(owner.id, 'sent', { campaign_id: ownerCampaign.id },
+      { fetchImpl: transport, resolveImpl: async () => [internal], backoffMs: 0 })
+    assert.equal(result.ok, false, `expected refusal when resolving to ${internal}`)
+    assert.equal(transport.calls.length, 0, `must not connect when resolving to ${internal}`)
+    assert.match(result.error, /host/)
+  }
+
+  // A public resolution delivers as normal.
+  const okTransport = stub([{ status: 200 }])
+  const [ok] = await fireWebhooks(owner.id, 'sent', { campaign_id: ownerCampaign.id },
+    { fetchImpl: okTransport, resolveImpl: async () => ['93.184.216.34'], backoffMs: 0 })
+  assert.equal(ok.ok, true)
+  assert.equal(okTransport.calls.length, 1)
+  await client.del(`/api/webhooks/${id}`)
+})
+
+// Fix 4: auto-pause counts failing EVENTS, not per-attempt rows. Each failing
+// event writes MAX_ATTEMPTS (3) rows; the old per-row count paused after ~2
+// events. Four failing events must stay live; the fifth pauses.
+test('auto-pause: counts failing events (5), not attempts', async () => {
+  const created = await createWebhook({
+    name: 'FailStreak', webhook_url: 'https://hooks.example.test/failstreak',
+    association_type: 'campaign', email_campaign_id: ownerCampaign.id, event_types: ['EMAIL_SENT'],
+  })
+  const id = created.body.id
+  const isActive = () => db.prepare('SELECT is_active FROM webhooks WHERE id = ?').get(id).is_active
+  const fireOne = () => fireWebhooks(owner.id, 'sent', { campaign_id: ownerCampaign.id },
+    { fetchImpl: stub([{ status: 500, text: 'boom' }]), backoffMs: 0 })
+
+  for (let i = 0; i < 4; i++) await fireOne()
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM webhook_deliveries WHERE webhook_id = ?').get(id).n, 12)
+  assert.equal(isActive(), 1, 'four failing events (12 attempt rows) is below the 5-event threshold')
+
+  await fireOne()
+  assert.equal(isActive(), 0, 'the fifth consecutive failing event pauses the endpoint')
+})
+
+// Fix 5: a plain member cannot create, edit or delete a webhook — a reply
+// subscription would exfiltrate inbound email to an external URL.
+test('CRUD role gate: a member is refused, a manager and owner are allowed', async () => {
+  const member = await mountAs('member')
+  const manager = await mountAs('manager')
+  try {
+    const denied = await member.post('/api/webhooks', {
+      name: 'Sneaky', webhook_url: 'https://hooks.example.test/exfil', event_types: ['EMAIL_REPLY'],
+    })
+    assert.equal(denied.status, 403)
+    assert.equal(denied.body.error, 'forbidden')
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM webhooks WHERE name = ?').get('Sneaky').n, 0)
+
+    // A manager may create; the member still cannot edit or delete it.
+    const made = await manager.post('/api/webhooks', {
+      name: 'Manager made', webhook_url: 'https://hooks.example.test/mgr', event_types: ['EMAIL_REPLY'],
+    })
+    assert.equal(made.status, 200)
+    assert.equal((await member.patch(`/api/webhooks/${made.body.id}`, { name: 'x' })).status, 403)
+    assert.equal((await member.del(`/api/webhooks/${made.body.id}`)).status, 403)
+    // The campaign-scoped mutations are gated too.
+    assert.equal((await member.post(`/api/campaigns/${ownerCampaign.id}/webhooks`, {
+      name: 'x', webhook_url: 'https://hooks.example.test/m2', event_types: ['EMAIL_SENT'],
+    })).status, 403)
+
+    await client.del(`/api/webhooks/${made.body.id}`)
+  } finally {
+    await member.close()
+    await manager.close()
+  }
 })

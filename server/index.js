@@ -2,7 +2,7 @@ import express from 'express'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { env, ROOT, auth0Configured, googleConfigured, twilioEnvConfigured, devLoginEnabled, isProduction } from './env.js'
-import { authRouter } from './auth.js'
+import { authRouter, sessionUid } from './auth.js'
 import { billingRouter, handleBillingWebhook } from './billingRoutes.js'
 import { billingConfigured } from './billing.js'
 import { googleRouter } from './google.js'
@@ -71,7 +71,12 @@ app.use(microsoftRouter)
 app.use('/api/hooks/twilio', rateLimit({ windowMs: 60_000, max: 120, key: 'twilio' }), twilioRouter)
 // Public and hit by every recipient's mail client — capped so a scanner loop
 // or a scripted sweep cannot hammer SQLite through unauthenticated endpoints.
-app.use(rateLimit({ windowMs: 60_000, max: 300, key: 'track' }), trackingRouter) // public: open pixel, click redirects, unsubscribe
+// The limiter is scoped to the tracking prefix, not mounted app-wide: mounted
+// without a path it counted EVERY request (API, SPA, static asset) into the
+// 300/min 'track' bucket, so an office behind one NAT tripped a limit meant
+// only for the open pixel and click/unsubscribe endpoints.
+app.use('/t', rateLimit({ windowMs: 60_000, max: 300, key: 'track' }))
+app.use(trackingRouter) // public: open pixel, click redirects, unsubscribe (all under /t/)
 // public: the agreement page recipients sign — server-rendered, no JS needed
 app.use('/agree', rateLimit({ windowMs: 60_000, max: 60, key: 'consent' }), consentRouter)
 // Every one of the 210 endpoint specs in Docs/ carries a rate-limit test case,
@@ -84,11 +89,16 @@ app.use('/agree', rateLimit({ windowMs: 60_000, max: 60, key: 'consent' }), cons
 // still fall back to the address. The ceiling is deliberately generous — this
 // is a brake on runaway loops and scraping, not on ordinary use, and the
 // engine does not pass through here at all.
+//
+// The key is the VERIFIED session identity, not the raw htm_session cookie: a
+// forged or rotating cookie fails HMAC verification and falls through to the
+// caller's address, so it cannot mint a fresh 600/min bucket per request and
+// defeat the ceiling (nor grow the bucket Map without bound).
 app.use('/api', rateLimit({
   windowMs: 60_000,
   max: 600,
   key: 'api',
-  by: (req) => req.cookies?.htm_session || null,
+  by: (req) => sessionUid(req),
   message: 'Too many requests — please wait a moment and try again',
 }), api)
 
@@ -215,6 +225,19 @@ const server = app.listen(env.PORT, () => {
   console.log(`[server] API listening on http://localhost:${env.PORT}`)
   console.log(`[server] auth0=${auth0Configured() ? 'configured' : 'NOT configured (dev login active)'} google=${googleConfigured() ? 'configured' : 'NOT configured (sandbox mailboxes only)'}`)
   startEngine()
+})
+
+// On Node 22 an unhandled promise rejection (or uncaught exception) terminates
+// the process by default. A single fire-and-forget path that rejects — an
+// outbound webhook, an alert ping, a stray await — would take the whole server
+// down with it. Convert the crash into a diagnosable log line instead: log with
+// enough detail to find the culprit, and keep serving. Genuine fatal signals
+// still shut down cleanly below.
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[server] unhandledRejection (logged, not fatal):', reason instanceof Error ? reason.stack || reason.message : reason, promise)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[server] uncaughtException (logged, not fatal):', err?.stack || err)
 })
 
 // Finish in-flight requests and stop the engine cleanly on a deploy signal.

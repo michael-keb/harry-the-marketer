@@ -4,3 +4,5 @@ web/dist/
 .env
 .DS_Store
 *.log
+tmp/
+.cursor/

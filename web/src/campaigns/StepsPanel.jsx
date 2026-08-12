@@ -89,6 +89,11 @@ function StepCard({ step, selected, onSelect, onTestSend }) {
               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px] font-medium ring-1 ring-inset ${kind.pill}`}>
                 {kind.label}
               </span>
+              {step.type === 'send' && (
+                <span className="inline-flex items-center rounded-full bg-slate-50 px-2 py-0.5 text-[11.5px] font-medium text-slate-700 ring-1 ring-inset ring-slate-200">
+                  {String(step.channel || 'email').toLowerCase() === 'sms' ? 'SMS' : 'Email'}
+                </span>
+              )}
               <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] font-medium text-accent-700">
                 {step.nodeId}
               </span>

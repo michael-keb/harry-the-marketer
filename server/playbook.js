@@ -14,6 +14,16 @@
 // Supports `A -->|label| B` and `A -- label --> B`, comments (%%), and quoted labels.
 
 const DUR_RE = /^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$/i
+const CLOCK_RE = /^(\d{1,2}):(\d{2})$/
+
+function normalizeClock(hhmm) {
+  const m = CLOCK_RE.exec(String(hhmm || '').trim())
+  if (!m) return null
+  const h = Number(m[1])
+  const min = Number(m[2])
+  if (h > 23 || min > 59) return null
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`
+}
 
 export function parseDuration(text) {
   const m = String(text).trim().match(DUR_RE)
@@ -22,6 +32,41 @@ export function parseDuration(text) {
   const unit = m[2][0].toLowerCase()
   const ms = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 }[unit]
   return ms ? Math.round(n * ms) : null
+}
+
+// Pull optional `at HH:MM` / `window HH:MM-HH:MM` off a duration clause so
+// `no reply 3d at 09:30` and `after 2h window 09:00-11:00` share one path.
+function splitTiming(rest) {
+  let s = String(rest || '').trim()
+  let exactTime = null
+  let randomWindow = null
+  let bad = false
+
+  const atMatch = s.match(/\bat\s+(\d{1,2}:\d{2})\b/i)
+  if (atMatch) {
+    exactTime = normalizeClock(atMatch[1])
+    if (!exactTime) bad = true
+    s = `${s.slice(0, atMatch.index)} ${s.slice(atMatch.index + atMatch[0].length)}`.trim()
+  }
+
+  const winMatch = s.match(/\bwindow\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\b/i)
+  if (winMatch) {
+    const from = normalizeClock(winMatch[1])
+    const to = normalizeClock(winMatch[2])
+    if (!from || !to) bad = true
+    else randomWindow = { from, to }
+    s = `${s.slice(0, winMatch.index)} ${s.slice(winMatch.index + winMatch[0].length)}`.trim()
+  }
+
+  const ms = parseDuration(s.replace(/\s+/g, ' ').trim())
+  if (bad) return { ms: null, exactTime: null, randomWindow: null }
+  return { ms, exactTime, randomWindow }
+}
+
+function withTiming(base, timing) {
+  if (timing.exactTime) base.exactTime = timing.exactTime
+  if (timing.randomWindow) base.randomWindow = timing.randomWindow
+  return base
 }
 
 export function parseCondition(label) {
@@ -33,17 +78,21 @@ export function parseCondition(label) {
   if (replyMatch) return { kind: 'reply', intent: replyMatch[1].trim() }
   const noReply = lower.match(/^no\s*reply\s*[:=]?\s*(.+)$/)
   if (noReply) {
-    const ms = parseDuration(noReply[1])
-    return ms ? { kind: 'no_reply', ms, raw: text } : { kind: 'invalid', raw: text }
+    const timing = splitTiming(noReply[1])
+    return timing.ms
+      ? withTiming({ kind: 'no_reply', ms: timing.ms, raw: text }, timing)
+      : { kind: 'invalid', raw: text }
   }
   const after = lower.match(/^(?:after|wait)\s*[:=]?\s*(.+)$/)
   if (after) {
-    const ms = parseDuration(after[1])
-    return ms ? { kind: 'after', ms, raw: text } : { kind: 'invalid', raw: text }
+    const timing = splitTiming(after[1])
+    return timing.ms
+      ? withTiming({ kind: 'after', ms: timing.ms, raw: text }, timing)
+      : { kind: 'invalid', raw: text }
   }
-  // Bare durations on edges count as "after".
-  const bare = parseDuration(lower)
-  if (bare) return { kind: 'after', ms: bare, raw: text }
+  // Bare durations on edges count as "after" (optional at/window suffixes).
+  const bare = splitTiming(lower)
+  if (bare.ms) return withTiming({ kind: 'after', ms: bare.ms, raw: text }, bare)
   return { kind: 'invalid', raw: text }
 }
 
@@ -66,18 +115,33 @@ function classifyNode(id, shape, label) {
   const send = text.match(/^send(?:\s+(email|sms|whatsapp|telegram))?\s*[:=]?\s*(.*)$/i)
   if (send) {
     const channel = (send[1] || 'email').toLowerCase()
-    return {
+    let instruction = (send[2] || '').trim()
+    let randomWindow = null
+    // Trailing `; window HH:MM-HH:MM` is step-level send jitter, not copy.
+    const win = instruction.match(/;\s*window\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$/i)
+    if (win) {
+      const from = normalizeClock(win[1])
+      const to = normalizeClock(win[2])
+      if (from && to) randomWindow = { from, to }
+      instruction = instruction.slice(0, win.index).trim()
+    }
+    const node = {
       id,
       type: 'send',
       label: text,
       channel,
-      instruction: (send[2] || '').trim(),
+      instruction,
     }
+    if (randomWindow) node.randomWindow = randomWindow
+    return node
   }
   const wait = text.match(/^wait\s*[:=]?\s*(.*)$/i)
   if (wait) {
-    const ms = parseDuration(wait[1])
-    return { id, type: 'wait', label: text, ms: ms ?? null }
+    const timing = splitTiming(wait[1])
+    const node = { id, type: 'wait', label: text, ms: timing.ms ?? null }
+    if (timing.exactTime) node.exactTime = timing.exactTime
+    if (timing.randomWindow) node.randomWindow = timing.randomWindow
+    return node
   }
   return { id, type: 'unknown', label: text }
 }
@@ -311,6 +375,34 @@ export function nodeIntents(graph, nodeId) {
   return graph.edges
     .filter((e) => e.from === nodeId && e.cond.kind === 'reply' && e.cond.intent)
     .map((e) => e.cond.intent)
+}
+
+// Surface invalid randomised windows without importing step-timing (keeps the
+// parser free of a database open). Same rules as validateRandomWindow.
+function windowOk(window) {
+  if (!window) return { ok: true }
+  const from = normalizeClock(window.from)
+  const to = normalizeClock(window.to)
+  if (!from || !to) return { ok: false, error: 'window needs HH:MM–HH:MM clocks' }
+  const fromMin = Number(from.slice(0, 2)) * 60 + Number(from.slice(3))
+  const toMin = Number(to.slice(0, 2)) * 60 + Number(to.slice(3))
+  if (toMin < fromMin) return { ok: false, error: 'window end must be at or after start' }
+  return { ok: true }
+}
+
+export function collectTimingIssues(graph) {
+  const issues = []
+  for (const n of Object.values(graph?.nodes || {})) {
+    if (!n.randomWindow) continue
+    const v = windowOk(n.randomWindow)
+    if (!v.ok) issues.push({ message: `Node "${n.id}": ${v.error}` })
+  }
+  for (const e of graph?.edges || []) {
+    if (!e.cond?.randomWindow) continue
+    const v = windowOk(e.cond.randomWindow)
+    if (!v.ok) issues.push({ message: `Edge ${e.from}→${e.to}: ${v.error}` })
+  }
+  return issues
 }
 
 export const DEFAULT_PLAYBOOK = `flowchart TD

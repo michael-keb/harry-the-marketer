@@ -20,11 +20,197 @@ import { notify } from './alerts.js'
 import { runUpkeep } from './upkeep.js'
 import { syncSheetsQuietly } from './sheets.js'
 import { env } from './env.js'
+import { scheduleStepTime, getOrCreateStepSlot } from './step-timing.js'
+
+// getOrCreateStepSlot is available for step-level random windows; scheduleStepTime
+// wraps it when an edge/node carries randomWindow + lead identity.
+void getOrCreateStepSlot
 
 const MAX_HOPS_PER_TICK = 10
 
+// Soft undeliverable: data problem — skip the step and continue. Hard stops
+// (opt-out, unsubscribe, hard bounce, block list) still finish the lead.
+const SOFT_SMS_SKIP = new Set(['no_phone'])
+const HARD_SUPPRESSION = new Set(['unsubscribed', 'opted_out', 'bounced', 'blocked'])
+
 const nowMs = () => Date.now()
 const parseDbTime = (text) => (text ? Date.parse(text.replace(' ', 'T') + 'Z') : 0)
+
+// After a soft skip, prefer an unconditional edge; else the soonest timeout /
+// no-reply edge; else null (caller finishes as completed).
+export function nextAfterSkip(graph, nodeId) {
+  const out = (graph?.edges || []).filter((e) => e.from === nodeId)
+  const always = out.find((e) => e.cond?.kind === 'always')
+  if (always) return always.to
+  const timeouts = out
+    .filter((e) => e.cond?.kind === 'no_reply' || e.cond?.kind === 'after')
+    .sort((a, b) => (a.cond.ms || 0) - (b.cond.ms || 0))
+  if (timeouts[0]) return timeouts[0].to
+  return null
+}
+
+// Subject for a brand-new thread. Replies keep Re: / existing thread subject.
+// Precedence: example → campaign → workspace/default variant → null (AI/template).
+export function resolveComposeSubject({
+  exampleSubject, campaignSubject, defaultSubject, threadSubject,
+} = {}) {
+  const prev = String(threadSubject || '').trim()
+  if (prev) return prev.startsWith('Re:') ? prev : `Re: ${prev}`
+  const example = String(exampleSubject || '').trim()
+  if (example) return example
+  const campaign = String(campaignSubject || '').trim()
+  if (campaign) return campaign
+  const fallback = String(defaultSubject || '').trim()
+  if (fallback) return fallback
+  return null
+}
+
+function replyHandlingOf(campaign) {
+  try {
+    const settings = JSON.parse(campaign?.settings || '{}')
+    const snap = JSON.parse(campaign?.defaults_snapshot || '{}')
+    // Campaign settings override the frozen snapshot; snapshot overrides builtins.
+    const base = snap.replyHandling || {
+      email: { noReplySwitchTo: 'sms', timeoutMs: 2 * 86400e3 },
+      sms: { noReplySwitchTo: 'email', timeoutMs: 2 * 86400e3 },
+    }
+    const patch = settings.reply_handling
+    if (!patch || typeof patch !== 'object') return base
+    // Skip null/undefined values when merging. A partial reply_handling PUT
+    // serialises the untouched side as { noReplySwitchTo: null, timeoutMs: null };
+    // a shallow spread let those nulls overwrite the built-in 'sms'/'email'
+    // switch targets and silently disabled channel switching. Only a value the
+    // caller actually set may replace a builtin.
+    const mergeDefined = (baseSide, patchSide) => {
+      const out = { ...baseSide }
+      for (const [k, v] of Object.entries(patchSide || {})) if (v != null) out[k] = v
+      return out
+    }
+    return {
+      email: mergeDefined(base.email, patch.email),
+      sms: mergeDefined(base.sms, patch.sms),
+    }
+  } catch {
+    return {
+      email: { noReplySwitchTo: 'sms', timeoutMs: 2 * 86400e3 },
+      sms: { noReplySwitchTo: 'email', timeoutMs: 2 * 86400e3 },
+    }
+  }
+}
+
+function defaultVariantSubject(campaign, rules) {
+  try {
+    const snap = JSON.parse(campaign?.defaults_snapshot || '{}')
+    const fromSnap = snap.defaultMessageVariants?.emailSubject
+    if (String(fromSnap || '').trim()) return String(fromSnap).trim()
+  } catch { /* ignore */ }
+  return String(rules?.defaultMessageVariants?.emailSubject || '').trim()
+}
+
+// Campaign/workspace random window when the step itself did not declare one.
+function effectiveRandomWindow(rules, stepWindow) {
+  if (stepWindow?.from && stepWindow?.to) return stepWindow
+  const rw = rules?.randomWindow
+  if (rw?.enabled && rw.from && rw.to) return { from: rw.from, to: rw.to }
+  return stepWindow || null
+}
+
+function oooSettingsOf(campaign) {
+  try {
+    const settings = JSON.parse(campaign?.settings || '{}')
+    return settings.out_of_office_detection_settings || {}
+  } catch {
+    return {}
+  }
+}
+
+function channelOfNode(node) {
+  if (!node || node.type !== 'send') return null
+  return (node.channel || 'email').toLowerCase()
+}
+
+function explicitReplyTimeoutMs(campaign, channel) {
+  // Only campaign.settings counts as an override of the playbook edge duration.
+  // Snapshot/global defaults stay as inheritance for new playbooks / UI, not as
+  // a silent rewrite of an authored `no reply 3d` label.
+  try {
+    const settings = JSON.parse(campaign?.settings || '{}')
+    const t = settings?.reply_handling?.[channel]?.timeoutMs
+    return Number.isFinite(Number(t)) && Number(t) > 0 ? Number(t) : null
+  } catch {
+    return null
+  }
+}
+
+function switchTargetChannel(campaign, fromChannel) {
+  const switchTo = replyHandlingOf(campaign)?.[fromChannel]?.noReplySwitchTo
+  if (!switchTo || switchTo === 'none' || switchTo === fromChannel) return null
+  return switchTo
+}
+
+// When a no_reply edge lands on a send of the configured switch channel, tag
+// the branch so the trail shows the channel switch was intentional.
+function noReplySwitchNote(ctx, fromNodeId, edge) {
+  const fromCh = channelOfNode(ctx.graph.nodes[fromNodeId]) || 'email'
+  const switchTo = switchTargetChannel(ctx.campaign, fromCh)
+  if (!switchTo) return ''
+  const targetCh = channelOfNode(ctx.graph.nodes[edge.to])
+  if (targetCh && targetCh === switchTo) return ' channel_switched'
+  return ''
+}
+
+// Prefer a no_reply edge whose target is the configured opposite channel so the
+// productized switch wins over a same-channel follow-up when both exist.
+//
+// The channel-switch preference may only choose among edges that are ACTUALLY
+// DUE. `scheduled` carries each edge's own authored due-instant (`at`), so with
+// `no reply 3d -> email` and `no reply 7d -> SMS` the 7d SMS edge must not fire
+// at day 3 just because it happens to be the switch channel — its own 7 days
+// have not elapsed. Filter to edges whose due-time has passed first, then apply
+// the switch preference within that set. `scheduled` is sorted by `at`, so the
+// filtered list stays soonest-first and `pool[0]` is the earliest due edge.
+function pickNoReplyEdge(ctx, fromNodeId, scheduled, now = nowMs()) {
+  const due = scheduled.filter((s) => s.at <= now)
+  const pool = due.length ? due : scheduled
+  const fromCh = channelOfNode(ctx.graph.nodes[fromNodeId]) || 'email'
+  const switchTo = switchTargetChannel(ctx.campaign, fromCh)
+  if (!switchTo || !pool.length) return pool[0]
+  const match = pool.find((s) => channelOfNode(ctx.graph.nodes[s.edge.to]) === switchTo)
+  return match || pool[0]
+}
+
+function scheduleFrom(ctx, cl, nodeId, { delayMs = 0, exactTime = null, randomWindow = null, fromMs }) {
+  const rules = ctx.rules || {}
+  return scheduleStepTime({
+    delayMs: delayMs || 0,
+    exactTime: exactTime || null,
+    randomWindow: effectiveRandomWindow(rules, randomWindow),
+    timezone: rules.timezone || 'UTC',
+    fromMs: fromMs ?? nowMs(),
+    blackouts: rules.blackouts || [],
+    windows: rules.windows || [],
+    quietHours: rules.quietHours || null,
+    campaignId: cl.campaign_id,
+    leadId: cl.lead_id,
+    nodeId,
+  })
+}
+
+async function skipUndeliverable(ctx, cl, nodeId, detail) {
+  logEvent(ctx.user.id, {
+    campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'step_skipped', detail,
+  })
+  const next = nextAfterSkip(ctx.graph, nodeId)
+  if (!next) {
+    finishLead(ctx, cl, 'completed', detail || 'no next step after skip')
+    return false
+  }
+  logEvent(ctx.user.id, {
+    campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched',
+    detail: `${nodeId} --[skip]--> ${next}`,
+  })
+  return enterNode(ctx, cl, next)
+}
 
 function setLead(cl, fields) {
   const cols = Object.keys(fields)
@@ -120,6 +306,84 @@ function finishLead(ctx, cl, outcome, reason = '') {
 
   setLead(cl, { state: 'finished', outcome, error: '' })
   logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'finished', detail: `${outcome}${reason ? ` — ${reason}` : ''}` })
+}
+
+// ---- lifetime ceiling & loop guard ------------------------------------------
+
+// MAX_HOPS_PER_TICK stops a same-tick `always` cycle, but a `no reply -> send`
+// cycle emails forever ACROSS ticks: each tick is one lawful hop, so the hop
+// budget never trips. A lifetime ceiling is the guard that spans ticks — once a
+// lead has been sent to enough times, or has been in the campaign long enough,
+// it is finished no matter how the graph loops. Both bounds are read from the
+// campaign settings when present and otherwise fall back to these defaults, so a
+// looping playbook stops on its own instead of running up a mail bill all night.
+const MAX_LIFETIME_SENDS = 25
+const MAX_LIFETIME_DAYS = 120
+
+function lifetimeCeiling(ctx, cl) {
+  let maxSends = MAX_LIFETIME_SENDS
+  let maxDays = MAX_LIFETIME_DAYS
+  try {
+    const s = JSON.parse(ctx.campaign?.settings || '{}')
+    if (Number(s.max_sends) > 0) maxSends = Number(s.max_sends)
+    if (Number(s.max_days) > 0) maxDays = Number(s.max_days)
+  } catch { /* defaults */ }
+  const sent = db.prepare(
+    "SELECT COUNT(*) n FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'out'"
+  ).get(cl.campaign_id, cl.lead_id).n
+  if (sent >= maxSends) return `reached the ${maxSends}-message ceiling for one lead`
+  const first = db.prepare(
+    "SELECT created_at FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'out' ORDER BY id LIMIT 1"
+  ).get(cl.campaign_id, cl.lead_id)
+  if (first) {
+    const ageMs = nowMs() - parseDbTime(first.created_at)
+    if (ageMs > maxDays * 86400e3) return `has been in this campaign longer than ${maxDays} days`
+  }
+  return null
+}
+
+// Behaviour → "Stop the lead when they OPEN an email / CLICK a link". Stored in
+// campaign.settings.stop_lead_settings ('OPEN_AN_EMAIL' | 'CLICK_ON_A_LINK' |
+// 'REPLY_TO_AN_EMAIL'); only the reply case had a reader (the stop_on_reply
+// column), so open/click were configured and never enforced. Before sending the
+// next step, if the lead already has the configured engagement on any prior
+// message in this campaign, finish it instead of sending again.
+function stopOnEngagementReason(ctx, cl) {
+  let setting = ''
+  try { setting = JSON.parse(ctx.campaign?.settings || '{}').stop_lead_settings || '' } catch { setting = '' }
+  if (setting !== 'OPEN_AN_EMAIL' && setting !== 'CLICK_ON_A_LINK') return null
+  const col = setting === 'CLICK_ON_A_LINK' ? 'clicked_at' : 'opened_at'
+  const hit = db.prepare(
+    `SELECT 1 FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'out'
+       AND COALESCE(${col}, '') != '' LIMIT 1`
+  ).get(cl.campaign_id, cl.lead_id)
+  if (!hit) return null
+  return setting === 'CLICK_ON_A_LINK'
+    ? 'they clicked a link — campaign is set to stop the lead on a click'
+    : 'they opened an email — campaign is set to stop the lead on an open'
+}
+
+// Transient vs permanent send failure (server/engine.js per-lead catch).
+// Transient: 5xx / 429 / network / timeout / an upstream refresh blip — worth a
+// backed-off retry. Permanent: suppression, revoked auth, anything tagged
+// `.permanent`, or an unrecognised error (retrying a genuine bug forever helps
+// nobody). Errors classified as suppression are handled before the catch, so
+// this only sees thrown transport failures.
+function isTransientError(err) {
+  if (!err) return false
+  if (err.suppressed || err.permanent) return false
+  if (err.transient) return true
+  const msg = String(err.message || err).toLowerCase()
+  if (/invalid_grant|invalid_client|unauthor|revoked|forbidden|suppress/.test(msg)) return false
+  if (Number(err.status) >= 500 || Number(err.status) === 429) return true
+  if (/\b(429|500|502|503|504)\b/.test(msg)) return true
+  if (/timeout|timed out|econn|network|socket|fetch failed|rate limit|temporar/.test(msg)) return true
+  return false
+}
+const MAX_LEAD_RETRIES = 6
+function retryBackoffMs(retryCount) {
+  // 1m, 2m, 4m, 8m, 16m, capped at 30m.
+  return Math.min(30 * 60_000, 60_000 * 2 ** Math.max(0, retryCount - 1))
 }
 
 // ---- subsequences ------------------------------------------------------------
@@ -428,12 +692,23 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
 
   const eligible = smsEligibility(ctx.user.id, lead)
   if (!eligible.ok) {
+    // Soft: missing phone — skip this step and continue the playbook.
+    // Hard: opt-out / unsubscribe / block / no opt-in — finish as today.
+    if (SOFT_SMS_SKIP.has(eligible.reason)) {
+      return skipUndeliverable(ctx, cl, nodeId, eligible.message || 'no phone — skipped SMS step')
+    }
     logEvent(ctx.user.id, {
       campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'suppressed', detail: eligible.message,
     })
     finishLead(ctx, cl, eligible.reason === 'opted_out' || eligible.reason === 'unsubscribed' ? 'unsubscribed' : 'stopped', eligible.message)
     return false
   }
+
+  // Behaviour stop-on-open/click and the lifetime ceiling apply to every channel.
+  const stopEngage = stopOnEngagementReason(ctx, cl)
+  if (stopEngage) { finishLead(ctx, cl, 'completed', stopEngage); return false }
+  const ceiling = lifetimeCeiling(ctx, cl)
+  if (ceiling) { finishLead(ctx, cl, 'completed', ceiling); return false }
 
   const gated = approvalRequired(ctx.user)
   let draft = openDraft(cl.campaign_id, cl.lead_id)
@@ -446,8 +721,38 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
     return false
   }
 
+  // Gate on the SMS account's OWN daily quota, not the email mailbox's. Cap
+  // exhaustion is a transient defer — the lead retakes its turn in the next
+  // window rather than being stranded in a terminal 'error' state.
+  const smsQuotaLeft = (acct) => {
+    const today = new Date().toISOString().slice(0, 10)
+    const used = acct.sent_today_date === today ? (acct.sent_today || 0) : 0
+    return Math.max(0, (acct.daily_limit || 0) - used)
+  }
+  if (smsQuotaLeft(account) <= 0) {
+    noteGate(ctx, {
+      ok: false, gate: 'sms_daily_cap',
+      reason: `${account.phone_number || account.display_name || 'SMS'} has sent its ${account.daily_limit} for today`,
+      until: null,
+    })
+    setLead(cl, { state: 'active' })
+    return false
+  }
+
   let body = draft?.body
   if (!draft) {
+    // Gate BEFORE composing for the ungated path — SMS is gated by its own
+    // account quota (checked above) plus the workspace rhythm below; a blocked
+    // slot must not pay for a compose every tick. `mailbox: null` keeps the email
+    // mailbox's cap and spacing out of the SMS decision while quiet hours, the
+    // working window, frequency caps and workspace/campaign caps still apply.
+    if (!gated) {
+      const preslot = resolveSend({
+        owner: ctx.user, campaign: ctx.campaign, mailbox: null, lead,
+        draft: null, rules: ctx.rules, holds: ctx.holds, channel: 'sms',
+      })
+      if (!preslot.ok) { noteGate(ctx, preslot); setLead(cl, { state: 'active' }); return false }
+    }
     const approved = db.prepare(
       'SELECT subject, body FROM node_examples WHERE campaign_id = ? AND node_id = ?'
     ).get(cl.campaign_id, nodeId)
@@ -475,10 +780,12 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
     }
   }
 
-  // One-channel-per-day and workspace rhythm still apply; mailbox pacing uses
-  // the campaign mailbox as the schedule anchor (SMS account has its own daily cap).
+  // One-channel-per-day and workspace rhythm still apply. `mailbox: null` so the
+  // EMAIL mailbox's daily cap and spacing never gate an SMS — the SMS account has
+  // its own quota (checked above). Quiet hours, the working window, blackouts,
+  // start/end dates, frequency caps and workspace/campaign caps still apply.
   const slot = resolveSend({
-    owner: ctx.user, campaign: ctx.campaign, mailbox: ctx.mailbox, lead,
+    owner: ctx.user, campaign: ctx.campaign, mailbox: null, lead,
     draft: draft && draft.status === 'approved' ? draft : null,
     rules: ctx.rules, holds: ctx.holds,
     channel: 'sms',
@@ -505,6 +812,9 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
   } catch (err) {
     if (err?.suppressed) {
       if (draft) discardStaleDraft(draft)
+      if (SOFT_SMS_SKIP.has(err.reason)) {
+        return skipUndeliverable(ctx, cl, nodeId, err.message || 'SMS undeliverable — skipped')
+      }
       logEvent(ctx.user.id, {
         campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'suppressed', detail: err.message,
       })
@@ -514,6 +824,7 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
     throw err
   }
   if (draft) markDraftSent(draft.id)
+  if (cl.retry_count || cl.next_retry_at) setLead(cl, { retry_count: 0, next_retry_at: '' })
   if (!cl.thread_id) setLead(cl, { thread_id: threadId })
 
   if (out.length === 0) { finishLead(ctx, cl, 'completed', 'no next step after send'); return false }
@@ -558,8 +869,16 @@ async function enterNode(ctx, cl, nodeId) {
       finishLead(ctx, cl, node.outcome)
       return false
     case 'wait': {
-      const until = new Date(nowMs() + node.ms).toISOString()
-      setLead(cl, { state: 'waiting', wait_until: until })
+      // Freeze wait_until on enter so later edits to the mermaid delay cannot
+      // move a lead that is already waiting. exactTime / randomWindow on the
+      // node go through scheduleStepTime when present.
+      const scheduled = scheduleFrom(ctx, cl, nodeId, {
+        delayMs: node.ms || 0,
+        exactTime: node.exactTime || null,
+        randomWindow: node.randomWindow || null,
+        fromMs: nowMs(),
+      })
+      setLead(cl, { state: 'waiting', wait_until: new Date(scheduled.at).toISOString() })
       return false
     }
     case 'decision':
@@ -592,6 +911,17 @@ async function enterNode(ctx, cl, nodeId) {
         finishLead(ctx, cl, lead?.status === 'unsubscribed' ? 'unsubscribed' : 'completed', 'lead not active')
         return false
       }
+      // Missing address is a data problem, not a consent refusal — skip and continue.
+      if (!String(lead.email || '').trim()) {
+        return skipUndeliverable(ctx, cl, nodeId, 'no email address — skipped email step')
+      }
+      // Behaviour: stop the lead on an open / a click. Enforced before the send,
+      // so a lead already engaged never receives the next step.
+      const stopEngage = stopOnEngagementReason(ctx, cl)
+      if (stopEngage) { finishLead(ctx, cl, 'completed', stopEngage); return false }
+      // Lifetime ceiling / cross-tick loop guard — finish rather than send again.
+      const ceiling = lifetimeCeiling(ctx, cl)
+      if (ceiling) { finishLead(ctx, cl, 'completed', ceiling); return false }
       // The standing rule: nothing sends without a human OK. A pending draft
       // means the agent has already done its work and is waiting on you.
       // An existing draft is always used, even if approvals were switched off
@@ -611,6 +941,23 @@ async function enterNode(ctx, cl, nodeId) {
       let subject = draft?.subject
       let body = draft?.body
       if (!draft) {
+        // Check the send gate BEFORE composing when there is no draft to persist.
+        // An ungated workspace holds nothing between ticks, so a blocked slot used
+        // to discard and re-compose the AI email every 20s — a paid model call per
+        // blocked lead all night. A gated workspace instead parks a draft the
+        // first time and returns at the pending-draft check above on later ticks,
+        // so it composes once; only the ungated path needs this guard.
+        if (!gated) {
+          const preslot = resolveSend({
+            owner: ctx.user, campaign: ctx.campaign, mailbox, lead,
+            draft: null, rules, holds: ctx.holds, channel: 'email',
+          })
+          if (!preslot.ok) {
+            noteGate(ctx, preslot)
+            setLead(cl, { state: 'active' }) // re-checked every tick until the gate opens
+            return false
+          }
+        }
         // Research agent: build a knowledge profile before the first email (AI only;
         // failures fall through silently — the templates still work without it).
         if (!lead.research && !threadMessages(cl).length) {
@@ -634,17 +981,27 @@ async function enterNode(ctx, cl, nodeId) {
         const approved = db.prepare(
           'SELECT subject, body FROM node_examples WHERE campaign_id = ? AND node_id = ?'
         ).get(cl.campaign_id, nodeId)
+        const thread = threadMessages(cl)
+        const defaultSubject = defaultVariantSubject(ctx.campaign, ctx.rules)
         const composed = await composeEmail({
           instruction: node.instruction || node.label,
           lead,
           businessContext: ctx.user.business_context,
-          thread: threadMessages(cl),
+          thread,
           senderName: mailbox.display_name || ctx.user.name || mailbox.email,
           meetingLink: ctx.user.meeting_link,
           consentLink,
           example: approved || null,
+          campaignSubject: ctx.campaign.email_subject || '',
+          defaultSubject,
         })
-        subject = composed.subject
+        const forced = resolveComposeSubject({
+          exampleSubject: approved?.subject,
+          campaignSubject: ctx.campaign.email_subject,
+          defaultSubject,
+          threadSubject: thread?.length ? thread[thread.length - 1].subject : '',
+        })
+        subject = forced || composed.subject
         body = composed.body
 
         if (gated) {
@@ -701,12 +1058,17 @@ async function enterNode(ctx, cl, nodeId) {
         }))
       } catch (err) {
         // Suppression is a refusal, not a failure: retrying next tick cannot
-        // help, because an unsubscribe does not expire. The lead is finished
-        // here rather than left to be re-attempted every twenty seconds, and
-        // any draft still waiting for a human is withdrawn — approving an email
-        // for someone who has opted out must not be possible.
+        // help, because an unsubscribe does not expire. Soft undeliverable
+        // (missing data) skips the step instead of finishing the lead.
+        // Hard stops (unsubscribe / hard bounce / block) finish here rather
+        // than leaving the lead to be re-attempted every twenty seconds, and
+        // any draft still waiting for a human is withdrawn.
         if (err?.suppressed) {
           if (draft) discardStaleDraft(draft)
+          const soft = err.reason === 'no_email' || err.reason === 'missing_email' || SOFT_SMS_SKIP.has(err.reason)
+          if (soft && !HARD_SUPPRESSION.has(err.reason)) {
+            return skipUndeliverable(ctx, cl, nodeId, err.message || 'email undeliverable — skipped')
+          }
           logEvent(ctx.user.id, {
             campaignId: cl.campaign_id, leadId: cl.lead_id,
             type: 'suppressed', detail: err.message,
@@ -717,6 +1079,7 @@ async function enterNode(ctx, cl, nodeId) {
         throw err
       }
       if (draft) markDraftSent(draft.id)
+      if (cl.retry_count || cl.next_retry_at) setLead(cl, { retry_count: 0, next_retry_at: '' })
       if (!cl.thread_id) setLead(cl, { thread_id: threadId })
       // Close this mailbox's slot for a randomised gap so the next email in the
       // batch does not follow a second behind. Recorded for every provider —
@@ -816,7 +1179,12 @@ export async function routeReply(ctx, cl, intent, message, { setBy = '' } = {}) 
 
   if (!edge) {
     if (intent === 'unsubscribe') { finishLead(ctx, cl, 'unsubscribed', 'no explicit unsubscribe edge'); return true }
-    if (intent === 'out of office') return false // keep waiting; timeout edges still apply
+    // ignoreOOOasReply (campaign.settings.out_of_office_detection_settings):
+    //   true  → OOO is not a meaningful reply; keep waiting so no_reply still fires.
+    //   false → treat OOO like any other unmatched intent (branch / needs_attention).
+    if (intent === 'out of office' && oooSettingsOf(ctx.campaign).ignoreOOOasReply) {
+      return false
+    }
     setLead(cl, { state: 'needs_attention' })
     logEvent(ctx.user.id, {
       campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'needs_attention',
@@ -895,32 +1263,84 @@ async function processWaiting(ctx, cl) {
     return
   }
 
-  // 3. Timeout edges (no reply Xd / after Xd) measured from the last outbound
-  //    email, with "no reply" waits tuned by how this lead has actually behaved.
+  // 3. Timeout edges (no reply Xd / after Xd). The due instant is frozen onto
+  //    campaign_leads.wait_until the first time we compute it, so later edits to
+  //    mermaid delays cannot move a lead that is already waiting. Adaptive
+  //    follow-up timing and jitter apply only at freeze time.
   const timeoutEdges = ctx.graph.edges
     .filter((e) => e.from === cl.node_id && (e.cond.kind === 'no_reply' || e.cond.kind === 'after'))
     .sort((a, b) => a.cond.ms - b.cond.ms)
-  if (timeoutEdges.length) {
-    const outbound = lastOutbound(cl)
-    const since = parseDbTime(outbound?.created_at)
-    const timing = followUpTiming({
-      lastOutbound: outbound,
-      intent: cl.intent,
-      openTrackingWorks: openTrackingWorks(cl.campaign_id),
+  if (!timeoutEdges.length) return
+
+  const outbound = lastOutbound(cl)
+  const since = parseDbTime(outbound?.created_at)
+  if (!since) return
+
+  const branchTimeout = async (due, tuned = '') => {
+    const switchNote = due.cond.kind === 'no_reply' ? noReplySwitchNote(ctx, cl.node_id, due) : ''
+    logEvent(ctx.user.id, {
+      campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched',
+      detail: `${cl.node_id} --[${due.label}]--> ${due.to}${tuned}${switchNote}`,
     })
-    // A fixed "after Xd" wait is a schedule the author chose; only "no reply"
-    // follow-ups are adaptive — and they carry a per-lead offset so a hundred
-    // leads do not all get chased at the same minute three days later.
-    const jitter = followUpJitter(cl.lead_id, cl.node_id)
-    const waitFor = (edge) =>
-      edge.cond.kind === 'no_reply' ? Math.round(edge.cond.ms * timing.factor * jitter) : edge.cond.ms
-    const due = timeoutEdges.find((e) => since && since + waitFor(e) <= nowMs())
-    if (due) {
-      const tuned = due.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
-      logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched', detail: `${cl.node_id} --[${due.label}]--> ${due.to}${tuned}` })
-      await enterNode(ctx, cl, due.to)
-    }
+    setLead(cl, { wait_until: '' })
+    await enterNode(ctx, cl, due.to)
   }
+
+  // Frozen clock: do nothing until it elapses. Edge choice is resolved only when due.
+  if (cl.wait_until) {
+    const until = Date.parse(cl.wait_until)
+    if (!Number.isFinite(until) || until > nowMs()) return
+  }
+
+  const timing = followUpTiming({
+    lastOutbound: outbound,
+    intent: cl.intent,
+    openTrackingWorks: openTrackingWorks(cl.campaign_id),
+  })
+  const jitter = followUpJitter(cl.lead_id, cl.node_id)
+  const fromCh = channelOfNode(node) || 'email'
+  const explicitTimeout = explicitReplyTimeoutMs(ctx.campaign, fromCh)
+  const defaultNoReplyMs = Number(ctx.rules?.defaultDelays?.noReplyMs) || 0
+  const waitFor = (edge) => {
+    if (edge.cond.kind !== 'no_reply') return edge.cond.ms
+    // Campaign Behaviour timeout overrides the edge label when set; otherwise
+    // the playbook duration wins; snapshot defaultDelays is last resort.
+    const base = explicitTimeout
+      ?? (Number.isFinite(edge.cond.ms) ? edge.cond.ms : null)
+      ?? defaultNoReplyMs
+      ?? edge.cond.ms
+    return Math.round(base * timing.factor * jitter)
+  }
+
+  const scheduled = timeoutEdges.map((edge) => {
+    const { at } = scheduleFrom(ctx, cl, `${cl.node_id}>${edge.to}`, {
+      delayMs: waitFor(edge),
+      exactTime: edge.cond.exactTime || null,
+      randomWindow: edge.cond.randomWindow || null,
+      fromMs: since,
+    })
+    return { edge, at }
+  }).sort((a, b) => a.at - b.at)
+
+  if (cl.wait_until) {
+    // Frozen wait is due — prefer the configured channel-switch edge when one
+    // exists so Teal Lynx terminates the original branch on the opposite channel.
+    const chosen = pickNoReplyEdge(ctx, cl.node_id, scheduled)
+    const due = chosen.edge
+    const tuned = due.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
+    await branchTimeout(due, tuned)
+    return
+  }
+
+  // First compute: freeze wait_until to the soonest scheduled edge (clock),
+  // but remember channel-switch preference is applied when the freeze elapses.
+  const soonest = scheduled[0]
+  setLead(cl, { wait_until: new Date(soonest.at).toISOString() })
+  if (soonest.at > nowMs()) return
+
+  const chosen = pickNoReplyEdge(ctx, cl.node_id, scheduled)
+  const tuned = chosen.edge.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
+  await branchTimeout(chosen.edge, tuned)
 }
 
 export async function processCampaign(campaign) {
@@ -990,6 +1410,7 @@ export async function processCampaign(campaign) {
     `SELECT * FROM campaign_leads
       WHERE campaign_id = ? AND state IN ('queued','active','waiting')
         AND COALESCE(completed_at,'') = ''
+        AND (COALESCE(next_retry_at,'') = '' OR datetime(next_retry_at) <= datetime('now'))
         AND (COALESCE(paused_at,'') = ''
              OR (COALESCE(resume_at,'') != '' AND datetime(resume_at) <= datetime('now')))`
   ).all(campaign.id)
@@ -1006,8 +1427,26 @@ export async function processCampaign(campaign) {
       }
     } catch (err) {
       console.error('[engine] lead processing failed', cl.id, err)
-      setLead(cl, { state: 'error', error: String(err.message || err).slice(0, 300) })
-      logEvent(user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'error', detail: String(err.message || err).slice(0, 200) })
+      const detail = String(err.message || err)
+      // A transient failure (Gmail 5xx/429, a Twilio blip, a network timeout) is
+      // not a reason to strand the lead in 'error' — a state the tick never
+      // re-selects. Back off and keep it selectable until it either succeeds or
+      // exhausts its retries; only then is the error terminal. A permanent
+      // failure (revoked auth, an unrecognised bug) goes terminal at once.
+      const retryCount = (cl.retry_count || 0) + 1
+      if (isTransientError(err) && retryCount <= MAX_LEAD_RETRIES) {
+        const nextRetryAt = new Date(nowMs() + retryBackoffMs(retryCount)).toISOString()
+        // Keep a selectable state; 'queued' was already promoted to 'active' above.
+        const state = cl.state === 'waiting' ? 'waiting' : 'active'
+        setLead(cl, { state, retry_count: retryCount, next_retry_at: nextRetryAt, error: '' })
+        logEvent(user.id, {
+          campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'retry_scheduled',
+          detail: `transient failure (attempt ${retryCount}/${MAX_LEAD_RETRIES}) — retrying after ${nextRetryAt.slice(0, 16).replace('T', ' ')}: ${detail.slice(0, 160)}`,
+        })
+      } else {
+        setLead(cl, { state: 'error', next_retry_at: '', error: detail.slice(0, 300) })
+        logEvent(user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'error', detail: detail.slice(0, 200) })
+      }
     }
   }
   touch('campaigns', campaign.id)

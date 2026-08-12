@@ -42,13 +42,29 @@ export async function freshAccessToken(mailbox) {
   })
   if (!res.ok) {
     const detail = await res.text()
-    db.prepare("UPDATE mailboxes SET status = 'error', last_error = ? WHERE id = ?")
-      .run(`Token refresh failed: ${detail.slice(0, 300)}`, mailbox.id)
-    throw new Error(`gmail token refresh failed for ${mailbox.email}`)
+    // Only a genuinely revoked grant (invalid_grant / invalid_client) is a
+    // reason to disable the mailbox and ask for a reconnect. A transient 5xx or
+    // 429 from Google's token endpoint used to set status='error' too, which
+    // pulled the mailbox out of ALL polling until a human reconnected an account
+    // that was never actually broken. Classify: permanent → terminal, needs
+    // reconnect; transient → leave it connected and let the next tick retry.
+    const permanent = /invalid_grant|invalid_client/i.test(detail)
+    if (permanent) {
+      db.prepare("UPDATE mailboxes SET status = 'error', needs_reconnect = 1, last_error = ? WHERE id = ?")
+        .run(`Reconnect required: ${detail.slice(0, 300)}`, mailbox.id)
+      const err = new Error(`gmail token refresh revoked for ${mailbox.email} — reconnect required`)
+      err.permanent = true
+      throw err
+    }
+    db.prepare("UPDATE mailboxes SET last_error = ? WHERE id = ?")
+      .run(`Token refresh failed (transient ${res.status}): ${detail.slice(0, 260)}`, mailbox.id)
+    const err = new Error(`gmail token refresh failed for ${mailbox.email} (transient ${res.status})`)
+    err.transient = true
+    throw err
   }
   const tokens = await res.json()
   const expiry = Date.now() + (tokens.expires_in || 3600) * 1000
-  db.prepare("UPDATE mailboxes SET access_token = ?, token_expiry = ?, status = 'connected', last_error = '' WHERE id = ?")
+  db.prepare("UPDATE mailboxes SET access_token = ?, token_expiry = ?, status = 'connected', last_error = '', needs_reconnect = 0 WHERE id = ?")
     .run(tokens.access_token, expiry, mailbox.id)
   mailbox.access_token = tokens.access_token
   mailbox.token_expiry = expiry
@@ -219,19 +235,39 @@ async function mapPool(items, concurrency, fn) {
   return out
 }
 
-export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } = {}) {
+export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25, sinceMs = 0 } = {}) {
   // Include spam — a mis-filtered reply is still a reply. Curly-brace OR is the
   // Gmail-search form; `(in:inbox OR in:spam)` is rejected by the API.
-  const query = encodeURIComponent(
-    `-from:me newer_than:${Math.max(1, withinDays)}d {in:inbox in:spam}`
-  )
-  const list = await gmailFetch(mailbox, `messages?q=${query}&maxResults=${Math.max(1, max)}`)
-  const ids = (list.messages || []).map((m) => m.id)
-  if (!ids.length) return []
+  //
+  // With a persisted watermark (`sinceMs`, the last-seen internalDate) fetch
+  // everything AFTER it via `after:` and PAGE through nextPageToken. The old
+  // fixed `newer_than:3d, maxResults:20` lost replies whenever a mailbox was
+  // offline for more than three days or received more than twenty messages
+  // between sweeps; the watermark closes both gaps. With no watermark yet (a
+  // mailbox's first sweep) it falls back to the day window, but still pages.
+  const base = sinceMs
+    ? `-from:me after:${Math.floor(sinceMs / 1000)} {in:inbox in:spam}`
+    : `-from:me newer_than:${Math.max(1, withinDays)}d {in:inbox in:spam}`
+  const query = encodeURIComponent(base)
+  // A watermark sweep may need to catch up on a large backlog, so raise the cap;
+  // a first sweep stays bounded by `max`.
+  const hardCap = sinceMs ? Math.max(max, 250) : Math.max(1, max)
+
+  const ids = []
+  let pageToken = ''
+  for (let page = 0; page < 20 && ids.length < hardCap; page++) {
+    const path = `messages?q=${query}&maxResults=${Math.min(100, hardCap)}${pageToken ? `&pageToken=${pageToken}` : ''}`
+    const list = await gmailFetch(mailbox, path)
+    for (const m of list.messages || []) ids.push(m.id)
+    pageToken = list.nextPageToken || ''
+    if (!pageToken) break
+  }
+  const capped = ids.slice(0, hardCap)
+  if (!capped.length) return []
 
   // Full fetches in parallel — sequential was hanging Sync replies for minutes
   // on a busy inbox (and stacking with the Inbox 10s poll).
-  const rows = await mapPool(ids, 5, async (id) => {
+  const rows = await mapPool(capped, 5, async (id) => {
     try {
       const msg = await gmailFetch(mailbox, `messages/${id}?format=full`)
       const from = header(msg, 'From')
@@ -245,6 +281,8 @@ export async function gmailRecentInbound(mailbox, { withinDays = 2, max = 25 } =
         toEmail: header(msg, 'To'),
         subject: header(msg, 'Subject'),
         body: decodePart(msg.payload) || msg.snippet || '',
+        // Unix ms — the caller advances the per-mailbox watermark to the newest.
+        internalDate: Number(msg.internalDate || 0),
         receivedAt: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : '',
       }
     } catch {

@@ -41,7 +41,7 @@ Run `npm run smoke:prod` after each deploy. Use `SMOKE_STRICT=1` on production.
 | `TRUST_PROXY` | `1` | render.yaml ✓ |
 | `DATA_DIR` | `/var/data` | render.yaml ✓ |
 | `DEV_LOGIN` | `0` | render.yaml ✓ |
-| `PRODUCTION_STRICT` | `1` (recommended after secrets set) | optional |
+| `PRODUCTION_STRICT` | `1` | render.yaml ✓ (already set — server exits on unsafe boot) |
 | Auth0, Google, OpenAI/Anthropic | Render dashboard only | sync: false ✓ |
 
 **Boot check:** server warns (or exits with `PRODUCTION_STRICT=1`) if misconfigured.
@@ -74,8 +74,12 @@ See [GOOGLE-OAUTH-VERIFICATION.md](./GOOGLE-OAUTH-VERIFICATION.md) for consent s
 |---|---|
 | SQLite survives redeploy | Render disk `harry-data` at `/var/data` (render.yaml ✓) |
 | Restore/backup runbook exists | [BACKUP-RUNBOOK.md](./BACKUP-RUNBOOK.md) ✓ |
+| Daily backups run in-app | `server/backup.js` online backup, gated once/day after 04:00 UTC ✓ |
+| Restore actually rehearsed | ☐ **not yet done** — do this before sign-off |
 
-**Backup command:** `DATA_DIR=/var/data npm run backup:db`
+**Backups:** taken automatically in-process (better-sqlite3 online backup) to
+`/var/data/backups/<timestamp>/`, newest 14 kept. The `npm run backup:db` script is for
+**offline** (stopped-server) snapshots only. Backups sit on the same disk — no off-site copy yet.
 
 ---
 
