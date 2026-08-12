@@ -101,3 +101,40 @@ test('logout bumps session_epoch and invalidates the stolen cookie', async () =>
   void setSession
   await new Promise((r) => server.close(r))
 })
+
+test('sealLegacyTokens seals plaintext mailbox and channel tokens', async () => {
+  const { sealLegacyTokens, isSealed, openSecret } = await import('../server/secrets.js')
+  const owner = db.prepare(
+    "INSERT INTO users (sub, email, name) VALUES ('dev:seal@test.local', 'seal@test.local', 'Seal')"
+  ).run()
+  const wsId = Number(owner.lastInsertRowid)
+  const mb = db.prepare(
+    `INSERT INTO mailboxes (user_id, provider, email, access_token, refresh_token, status)
+     VALUES (?, 'sandbox', 'seal-mb@test.local', 'plain-access', 'plain-refresh', 'connected')`
+  ).run(wsId)
+  const ch = db.prepare(
+    `INSERT INTO channel_accounts (workspace_id, channel, provider, display_name, auth_token, status)
+     VALUES (?, 'sms', 'sandbox', 'Seal SMS', 'plain-twilio', 'connected')`
+  ).run(wsId)
+
+  const result = sealLegacyTokens()
+  assert.ok(result.mailboxes >= 1)
+  assert.ok(result.channels >= 1)
+
+  const mailbox = db.prepare('SELECT access_token, refresh_token FROM mailboxes WHERE id = ?')
+    .get(Number(mb.lastInsertRowid))
+  assert.equal(isSealed(mailbox.access_token), true)
+  assert.equal(isSealed(mailbox.refresh_token), true)
+  assert.equal(openSecret(mailbox.access_token), 'plain-access')
+  assert.equal(openSecret(mailbox.refresh_token), 'plain-refresh')
+
+  const account = db.prepare('SELECT auth_token FROM channel_accounts WHERE id = ?')
+    .get(Number(ch.lastInsertRowid))
+  assert.equal(isSealed(account.auth_token), true)
+  assert.equal(openSecret(account.auth_token), 'plain-twilio')
+
+  // Idempotent — second sweep changes nothing.
+  const again = sealLegacyTokens()
+  assert.equal(again.mailboxes, 0)
+  assert.equal(again.channels, 0)
+})

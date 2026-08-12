@@ -131,6 +131,16 @@ Use sandbox first on production; Gmail after Google OAuth is unblocked.
 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (Outlook); `ANTHROPIC_API_KEY` (optional Claude);
 `TOKENS_ENCRYPTION_KEY` (optional — otherwise derived from the session secret).
 
+**AI spend plan ids:** Stripe webhook must write `plan_id` as exactly `starter` /
+`growth` / `scale` — those are the keys in `server/ai-spend.js` `ALLOWANCE_CENTS`.
+Any other value silently gets the $5 trial ceiling.
+
+**Token encryption key:** set `TOKENS_ENCRYPTION_KEY` in Render *before* connecting
+the first mailbox (or leave it unset forever and rely on the session secret).
+**Never change it afterwards** — a late key change used to zero every token; the
+boot sweep now tries the fallback key and re-seals, but restoring the original
+key is still the only safe recovery if both candidates fail.
+
 ---
 
 ## 11. Paid signup provisions a workspace

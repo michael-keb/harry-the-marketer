@@ -16,6 +16,7 @@ import { securityHeaders, compression, staticGzip, rateLimit } from './security.
 import { api } from './routes.js'
 import { startEngine, stopEngine } from './engine.js'
 import { onEvent, db } from './db.js'
+import { sealLegacyTokens } from './secrets.js'
 import { fireWebhooks, normalizeEventType } from './parity/webhooks.js'
 import { notify } from './alerts.js'
 
@@ -224,6 +225,11 @@ if (isProduction()) {
 const server = app.listen(env.PORT, () => {
   console.log(`[server] API listening on http://localhost:${env.PORT}`)
   console.log(`[server] auth0=${auth0Configured() ? 'configured' : 'NOT configured (dev login active)'} google=${googleConfigured() ? 'configured' : 'NOT configured (sandbox mailboxes only)'}`)
+  // Seal any plaintext OAuth/Twilio tokens left from before at-rest encryption,
+  // and re-seal any that only open under a fallback key after a key rotation.
+  try { sealLegacyTokens() } catch (err) {
+    console.error('[server] sealLegacyTokens failed:', err?.message || err)
+  }
   startEngine()
 })
 
