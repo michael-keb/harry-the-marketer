@@ -79,7 +79,14 @@ const TRACKING = [
 const NAMED_FIELDS = [
   'name', 'track_settings', 'stop_lead_settings', 'unsubscribe_text',
   'follow_up_percentage', 'out_of_office_detection_settings',
-  'email_subject', 'reply_handling',
+  'email_subject', 'reply_handling', 'purpose',
+]
+
+const PURPOSE_OPTIONS = [
+  { value: 'commercial', label: 'Commercial — selling or promoting a service' },
+  { value: 'assessment', label: 'Assessment — study their operations for a course' },
+  { value: 'experience', label: 'Experience — ask for a placement' },
+  { value: 'role', label: 'Role — ask about a job' },
 ]
 
 export function BehaviourPanel({ campaign, onSaved }) {
@@ -118,7 +125,7 @@ export function BehaviourPanel({ campaign, onSaved }) {
     const out = {}
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
     if (form.name !== undefined && form.name !== campaign.name) out.name = form.name
-    for (const key of ['stop_lead_settings', 'send_as_plain_text', 'force_plain_text', 'unsubscribe_text', 'follow_up_percentage', 'email_subject']) {
+    for (const key of ['stop_lead_settings', 'send_as_plain_text', 'force_plain_text', 'unsubscribe_text', 'follow_up_percentage', 'email_subject', 'purpose']) {
       if (!same(form[key], saved[key])) out[key] = form[key]
     }
     if (!same([...(form.track_settings || [])].sort(), [...(saved.track_settings || [])].sort())) {
@@ -172,6 +179,24 @@ export function BehaviourPanel({ campaign, onSaved }) {
               value={form.name ?? campaign.name}
               onChange={(e) => set({ name: e.target.value })}
             />
+          </Field>
+
+          <Field
+            label="What is this plan asking for?"
+            htmlFor="cs-purpose"
+            hint="Under assessment, experience or role, Harry blocks copy that offers, prices or promotes a service — so a training ask cannot accidentally become a pitch."
+            error={errorFor(err, 'purpose')}
+          >
+            <select
+              id="cs-purpose"
+              className="input"
+              value={form.purpose || 'commercial'}
+              onChange={(e) => set({ purpose: e.target.value })}
+            >
+              {PURPOSE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
           </Field>
 
           <fieldset className="space-y-2">

@@ -41,6 +41,7 @@ function untracked(r, on, reason) {
     : { ...r, value: null, tracked: false, reason }
 }
 import { parsePlaybook, nodeIntents, collectTimingIssues } from '../playbook.js'
+import { isNonCommercial, playbookCommercialHit, PURPOSES } from '../purpose.js'
 import { leadStages } from '../stages.js'
 import { dailyCap, remainingToday, isWarmingUp } from '../pacing.js'
 // One reputation formula for the whole app. The mailbox page and this campaign
@@ -209,6 +210,7 @@ const SETTINGS_KEYS = [
   'name', 'track_settings', 'stop_lead_settings', 'send_as_plain_text',
   'force_plain_text', 'unsubscribe_text', 'follow_up_percentage',
   'out_of_office_detection_settings', 'email_subject', 'reply_handling',
+  'purpose',
 ]
 
 function validateEmailSubject(raw) {
@@ -309,6 +311,8 @@ function settingsOf(campaign) {
     reply_handling: replyHandlingOf(stored),
     // Column-backed subject (Coral Heron) — empty means compose-time fallback.
     email_subject: campaign.email_subject || '',
+    // Purpose guardrail (PURPOSE-GUARDRAIL-PLAN.md). Column-backed.
+    purpose: PURPOSES.includes(campaign.purpose) ? campaign.purpose : 'commercial',
     // Read-time projection of the columns the mailer and engine actually read,
     // so a client never has to reconcile the JSON with the columns.
     track_opens: Boolean(campaign.track_opens),
@@ -427,6 +431,7 @@ function campaignRow(c) {
     mailboxId: c.mailbox_id || null,
     channelMode: channelModeOf(c),
     emailSubject: c.email_subject || '',
+    purpose: PURPOSES.includes(c.purpose) ? c.purpose : 'commercial',
     launchedAt: c.launched_at || null,
     trackOpens: Boolean(c.track_opens),
     trackClicks: Boolean(c.track_clicks),
@@ -471,6 +476,14 @@ function launchBlockers(campaign) {
   const graph = graphOf(campaign)
   if (!graph.valid) {
     blockers.push({ field: 'playbook', message: 'Fix the playbook before starting', errors: graph.errors })
+  } else if (isNonCommercial(campaign.purpose || 'commercial')) {
+    const hit = playbookCommercialHit(graph)
+    if (hit) {
+      blockers.push({
+        field: 'purpose',
+        message: `This plan is a ${campaign.purpose} ask, but step "${hit.nodeId}" reads like a pitch: “${hit.sentence.slice(0, 120)}”`,
+      })
+    }
   }
   const sendNodes = graph.valid
     ? Object.values(graph.nodes).filter((n) => n.type === 'send')
@@ -1005,6 +1018,12 @@ export function register(api) {
       next.email_subject = emailSubject
     }
 
+    let purpose = PURPOSES.includes(c.purpose) ? c.purpose : 'commercial'
+    if (body.purpose !== undefined) {
+      purpose = oneOf(body, 'purpose', PURPOSES, { required: true })
+      next.purpose = purpose
+    }
+
     const trackOpens = next.track_settings.includes('DONT_TRACK_EMAIL_OPEN') ? 0 : 1
     const trackClicks = next.track_settings.includes('DONT_TRACK_LINK_CLICK') ? 0 : 1
     const stopOnReply = next.track_settings.includes('DONT_TRACK_REPLY_TO_AN_EMAIL') ? 0
@@ -1014,10 +1033,15 @@ export function register(api) {
     const stored = { ...next }
     delete stored.track_opens; delete stored.track_clicks; delete stored.stop_on_reply
     delete stored.tracking_domain; delete stored.reply_to; delete stored.name
-    delete stored.email_subject
+    delete stored.email_subject; delete stored.purpose
 
     tx(() => {
-      if (campaignHasColumn('email_subject')) {
+      if (campaignHasColumn('email_subject') && campaignHasColumn('purpose')) {
+        db.prepare(
+          `UPDATE campaigns SET name = ?, settings = ?, track_opens = ?, track_clicks = ?,
+             stop_on_reply = ?, email_subject = ?, purpose = ?, updated_at = datetime('now') WHERE id = ?`
+        ).run(next.name || c.name, JSON.stringify(stored), trackOpens, trackClicks, stopOnReply, emailSubject, purpose, c.id)
+      } else if (campaignHasColumn('email_subject')) {
         db.prepare(
           `UPDATE campaigns SET name = ?, settings = ?, track_opens = ?, track_clicks = ?,
              stop_on_reply = ?, email_subject = ?, updated_at = datetime('now') WHERE id = ?`
