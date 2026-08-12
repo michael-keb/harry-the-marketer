@@ -764,8 +764,35 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
       senderName: account.display_name || ctx.user.name || account.phone_number,
       meetingLink: ctx.user.meeting_link,
       example: approved || null,
+      workspaceId: ctx.user.id,
     })
     body = composed.body
+
+    // Purpose guardrail applies to SMS too — the default no-reply path switches
+    // email→SMS, so a non-commercial plan's later touches must not skip the check.
+    const smsPurposeHit = guardComposed({
+      purpose: ctx.campaign.purpose || 'commercial',
+      subject: '',
+      body,
+    })
+    if (smsPurposeHit) {
+      logEvent(ctx.user.id, {
+        campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'purpose_blocked',
+        detail: smsPurposeHit.sentence.slice(0, 200),
+      })
+      createDraft({
+        userId: ctx.user.id, campaignId: cl.campaign_id, leadId: cl.lead_id,
+        nodeId, subject: 'SMS', body,
+      })
+      notify(ctx.user.id, {
+        title: 'This reads like a pitch — waiting for you',
+        text: `The line is: “${smsPurposeHit.sentence.slice(0, 120)}”`,
+        link: '/app/inbox',
+      })
+      setLead(cl, { state: 'needs_attention', error: 'purpose_blocked' })
+      return false
+    }
+
     if (gated) {
       createDraft({
         userId: ctx.user.id, campaignId: cl.campaign_id, leadId: cl.lead_id,

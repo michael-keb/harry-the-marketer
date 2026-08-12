@@ -32,6 +32,7 @@ export async function composeSms({
   senderName,
   meetingLink,
   example,
+  workspaceId,
 }) {
   const hint = String(instruction || '').trim() || 'Short friendly check-in'
   try {
@@ -43,6 +44,7 @@ export async function composeSms({
       senderName,
       meetingLink,
       example: example ? { subject: '', body: example.body || example } : null,
+      workspaceId,
     })
     return { body: clip(composed.body || composed.subject || hint) }
   } catch {

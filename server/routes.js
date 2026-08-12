@@ -448,6 +448,7 @@ api.post('/campaigns/:id/generate-playbook', async (req, res) => {
     brief: String(req.body?.brief || '').slice(0, 1000),
     goal: goal ? { name: goal.name, description: goal.description, target: goal.target, icp: goal.icp } : null,
     businessContext: owner.business_context,
+    workspaceId: req.wsId,
   })
   logEvent(req.wsId, { campaignId: c.id, type: 'playbook_generated', detail: `via ${result.via}` })
   res.json(result)
@@ -538,6 +539,7 @@ api.post('/campaigns/:id/preview-messages', async (req, res) => {
   let written = 0
   try {
     await previewPlaybookEmails({
+      workspaceId: req.wsId,
       graph,
       lead: subject,
       businessContext: owner.business_context,
@@ -596,6 +598,7 @@ api.post('/campaigns/:id/preview-messages/:nodeId', async (req, res) => {
 
   try {
     const sample = await composeStepSample({
+      workspaceId: req.wsId,
       graph,
       nodeId,
       lead: subject,
@@ -1098,7 +1101,7 @@ api.post('/goals', async (req, res) => {
   const autopilot = Boolean(req.body?.autopilot)
   const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(req.wsId)
 
-  const plan = await planGoal({ description, businessContext: owner.business_context })
+  const plan = await planGoal({ description, businessContext: owner.business_context, workspaceId: req.wsId })
   let mermaid = goalPlaybook(plan)
   if (!parsePlaybook(mermaid).valid) mermaid = DEFAULT_PLAYBOOK // never ship a broken plan
 
@@ -1118,7 +1121,7 @@ api.post('/goals', async (req, res) => {
     const leads = db.prepare("SELECT * FROM leads WHERE user_id = ? AND status = 'active'").all(req.wsId)
     let attached = 0
     for (const lead of leads) {
-      const score = await qualifyLead({ lead, icp: plan.icp, businessContext: owner.business_context })
+      const score = await qualifyLead({ lead, icp: plan.icp, businessContext: owner.business_context, workspaceId: req.wsId })
       db.prepare('INSERT OR REPLACE INTO lead_scores (goal_id, lead_id, fit, reasons) VALUES (?, ?, ?, ?)')
         .run(goalId, lead.id, score.fit, JSON.stringify(score.reasons))
       if (score.fit >= 60) {
@@ -1159,7 +1162,7 @@ api.post('/goals/:id/qualify', async (req, res) => {
   const leads = db.prepare("SELECT * FROM leads WHERE user_id = ? AND status = 'active'").all(req.wsId)
   for (const lead of leads) {
     if (!rescore && db.prepare('SELECT 1 FROM lead_scores WHERE goal_id = ? AND lead_id = ?').get(g.id, lead.id)) continue
-    const score = await qualifyLead({ lead, icp, businessContext: owner.business_context })
+    const score = await qualifyLead({ lead, icp, businessContext: owner.business_context, workspaceId: req.wsId })
     db.prepare('INSERT OR REPLACE INTO lead_scores (goal_id, lead_id, fit, reasons) VALUES (?, ?, ?, ?)')
       .run(g.id, lead.id, score.fit, JSON.stringify(score.reasons))
   }

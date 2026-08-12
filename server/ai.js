@@ -6,7 +6,7 @@ import OpenAI from 'openai'
 import { env } from './env.js'
 import { timed } from './telemetry.js'
 import { parsePlaybook, pathToNode } from './playbook.js'
-import { chargeAi, AiBudgetError } from './ai-spend.js'
+import { chargeAi, refundAi, AiBudgetError } from './ai-spend.js'
 
 let client = null
 let openaiClient = null
@@ -42,6 +42,19 @@ export function aiStatus() {
   }
 }
 
+/** Provider transport failures (refundable). Model refusal / bad JSON are not. */
+function isProviderFailure(err) {
+  if (!err) return false
+  if (err instanceof AiBudgetError) return false
+  const msg = String(err.message || err)
+  if (/refusal|incomplete plan|missing fields|not in vocabulary|AI disabled/i.test(msg)) return false
+  // SDK / network / 5xx / timeout
+  if (err.status >= 500 || err.statusCode >= 500) return true
+  if (err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || err.name === 'APIConnectionError') return true
+  if (/timeout|ECONN|ENOTFOUND|502|503|504|unreachable|fetch failed/i.test(msg)) return true
+  return false
+}
+
 // Dispatch to the active provider. Both paths return the model's text output;
 // with `schema` set, that text is JSON conforming to the schema.
 async function callModel(opts) {
@@ -49,17 +62,28 @@ async function callModel(opts) {
   const provider = aiProvider()
   // Charge the workspace BEFORE the paid call. Exhausted allowance fails closed
   // into the caller's existing fallback (template / heuristic / null research).
+  let charged = false
   if (opts.workspaceId != null) {
     const op = opts.op || 'other'
     if (!chargeAi(opts.workspaceId, op)) {
       throw new AiBudgetError(`Monthly AI allowance exhausted (op=${op})`)
     }
+    charged = true
   }
-  // Telemetry wraps only real provider calls — heuristic-mode fallbacks are
-  // expected behavior, not failures worth alerting on.
-  if (provider === 'openai') return timed('ai_call', `${opts.op || 'call'} (openai)`, () => callOpenAI(opts))
-  if (provider === 'anthropic') return timed('ai_call', `${opts.op || 'call'} (claude)`, () => callClaude(opts))
-  throw new Error('no AI provider configured (set OPENAI_API_KEY or ANTHROPIC_API_KEY)')
+  try {
+    // Telemetry wraps only real provider calls — heuristic-mode fallbacks are
+    // expected behavior, not failures worth alerting on.
+    if (provider === 'openai') return await timed('ai_call', `${opts.op || 'call'} (openai)`, () => callOpenAI(opts))
+    if (provider === 'anthropic') return await timed('ai_call', `${opts.op || 'call'} (claude)`, () => callClaude(opts))
+    throw new Error('no AI provider configured (set OPENAI_API_KEY or ANTHROPIC_API_KEY)')
+  } catch (err) {
+    // A provider outage must not drain the monthly allowance — refund and rethrow
+    // so the caller's template/heuristic fallback still runs.
+    if (charged && isProviderFailure(err)) {
+      refundAi(opts.workspaceId, opts.op || 'other', { detail: String(err.message || err).slice(0, 120) })
+    }
+    throw err
+  }
 }
 
 // GPT-5-family reasoning effort from our coarse effort levels: keep the mini
@@ -150,7 +174,8 @@ const HONESTY_RULES =
 export async function composeEmail({ instruction, lead, businessContext, thread, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject, workspaceId }) {
   try {
     const text = await callModel({
-      workspaceId,      system:
+      workspaceId,
+      system:
         `You write concise, effective B2B outreach emails for Harry the Marketer as ${senderName || 'the sender'}. ` +
         `Business context (who we are, what we sell, our voice):\n${businessContext || '(none provided — keep it generic but professional)'}\n\n` +
         HONESTY_RULES + '\n\n' +
@@ -284,7 +309,8 @@ export async function classifyReply({ intents, replyText, thread, businessContex
   if (heuristic.intent === 'unsubscribe' && heuristic.confidence >= 0.9) return { ...heuristic, via: 'heuristic' }
   try {
     const text = await callModel({
-      workspaceId,      system:
+      workspaceId,
+      system:
         `You classify replies to B2B outreach emails by intent so Harry the Marketer can route them. ` +
         `Business context: ${businessContext || '(none)'}. ` +
         `Pick exactly one intent from the allowed list. "other" means none fit well and a human should look.`,
@@ -349,6 +375,9 @@ export async function researchLead({ lead, businessContext, workspaceId }) {
     } catch (err) {
       lastError = String(err.message || err)
       console.warn('[ai] research (openai) failed:', lastError)
+      if (workspaceId != null && isProviderFailure(err)) {
+        refundAi(workspaceId, 'research', { detail: lastError.slice(0, 120) })
+      }
       return null
     }
   }
@@ -392,6 +421,9 @@ export async function researchLead({ lead, businessContext, workspaceId }) {
   } catch (err) {
     lastError = String(err.message || err)
     console.warn('[ai] research failed:', lastError)
+    if (workspaceId != null && isProviderFailure(err)) {
+      refundAi(workspaceId, 'research', { detail: lastError.slice(0, 120) })
+    }
     return null
   }
 }
@@ -412,10 +444,11 @@ const ICP_SCHEMA = {
   additionalProperties: false,
 }
 
-export async function planGoal({ description, businessContext }) {
+export async function planGoal({ description, businessContext, workspaceId }) {
   const fallback = heuristicPlanGoal(description)
   try {
     const text = await callModel({
+      workspaceId,
       system:
         `You turn a plain-English revenue outcome into a structured go-to-market plan for Harry the Marketer. ` +
         `Business context: ${businessContext || '(none)'}. ` +
@@ -501,12 +534,13 @@ export function goalPlaybook(plan) {
 // goal, when there is one). The result is validated; if the model's diagram
 // does not parse, we fall back to assembling a proven shape from its angles.
 
-export async function generatePlaybook({ brief, goal, businessContext }) {
+export async function generatePlaybook({ brief, goal, businessContext, workspaceId }) {
   const goalContext = goal
     ? `\nThis campaign is linked to a revenue goal: "${goal.description}" (target: ${goal.target} won). ICP: ${goal.icp || '{}'}.`
     : ''
   try {
     const text = await callModel({
+      workspaceId,
       system:
         `You design outreach playbooks as Mermaid flowcharts for Harry the Marketer. Business context: ${businessContext || '(none)'}.` +
         `\nStrict syntax rules — the engine parses this, so follow them exactly:` +
@@ -659,7 +693,7 @@ function stepFacts(graph, node, path) {
 // `examples` maps a node id to copy the reader has already approved for that
 // step. Approved copy is shown exactly as it stands: rewriting it would hide
 // the edit they made, and pay for a model call to do it.
-export async function previewPlaybookEmails({ graph, lead, businessContext, senderName, meetingLink, examples = {}, onPlan, onSample }) {
+export async function previewPlaybookEmails({ graph, lead, businessContext, senderName, meetingLink, examples = {}, onPlan, onSample, workspaceId }) {
   const steps = Object.values(graph.nodes)
     .filter((n) => n.type === 'send')
     .map((n) => ({ node: n, path: pathToNode(graph, n.id) }))
@@ -698,6 +732,7 @@ export async function previewPlaybookEmails({ graph, lead, businessContext, send
           senderName,
           meetingLink,
           consentLink: '',
+          workspaceId,
         })
       return { node, path, composed, thread }
     }))
@@ -735,7 +770,7 @@ export async function previewPlaybookEmails({ graph, lead, businessContext, send
 // revise it rather than start over.
 export async function composeStepSample({
   graph, nodeId, lead, businessContext, senderName, meetingLink,
-  priorSamples = {}, refine, basedOn,
+  priorSamples = {}, refine, basedOn, workspaceId,
 }) {
   const node = graph.nodes[nodeId]
   if (!node || node.type !== 'send') throw new Error(`"${nodeId}" is not a Send step in this playbook`)
@@ -753,6 +788,7 @@ export async function composeStepSample({
     consentLink: '',
     example: basedOn?.body ? basedOn : null,
     refine,
+    workspaceId,
   })
   return {
     ...stepFacts(graph, node, path),
@@ -765,10 +801,11 @@ export async function composeStepSample({
 
 // ---- AI qualification -----------------------------------------------------
 
-export async function qualifyLead({ lead, icp, businessContext }) {
+export async function qualifyLead({ lead, icp, businessContext, workspaceId }) {
   const fallback = heuristicQualify(lead, icp)
   try {
     const text = await callModel({
+      workspaceId,
       system:
         `You qualify B2B leads against an ideal customer profile for Harry the Marketer. ` +
         `Business context: ${businessContext || '(none)'}. Be honest: unknown fields lower confidence, they do not disqualify.`,

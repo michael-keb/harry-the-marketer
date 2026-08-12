@@ -2790,6 +2790,7 @@ export function register(api) {
       businessContext: owner?.business_context || '',
       senderName: mailbox.display_name || owner?.name || '',
       meetingLink: owner?.meeting_link || '',
+      workspaceId: req.wsId,
     })
 
     let providerMessageId = ''

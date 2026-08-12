@@ -287,6 +287,7 @@ async function composeSeed(test, setup) {
       businessContext: owner?.business_context || '',
       senderName: owner?.name || '',
       meetingLink: owner?.meeting_link || '',
+      workspaceId: test.workspace_id,
     })
     return { subject: composed.subject, body: composed.body, campaign }
   } catch (err) {

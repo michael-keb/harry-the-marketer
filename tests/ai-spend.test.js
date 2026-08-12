@@ -64,3 +64,17 @@ test('researchLead returns null when the allowance is exhausted (no provider cal
   process.env.AI_MODE = 'off'
   assert.equal(profile, null)
 })
+
+test('refundAi restores budget after a provider failure', async () => {
+  const { refundAi, chargeAi: charge, spendStatus: statusOf } = await import('../server/ai-spend.js')
+  // Fresh workspace so the earlier drain does not interfere.
+  const info = db.prepare(
+    "INSERT INTO users (sub, email, name, plan_id, billing_status) VALUES ('dev:refund', 'refund@test.local', 'Refund', 'starter', 'active')"
+  ).run()
+  const id = Number(info.lastInsertRowid)
+  assert.equal(charge(id, 'research'), true)
+  const afterCharge = statusOf(id).usedCents
+  assert.equal(afterCharge, 40)
+  refundAi(id, 'research', { detail: 'provider 503' })
+  assert.equal(statusOf(id).usedCents, 0)
+})

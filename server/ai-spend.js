@@ -9,6 +9,8 @@
 // keeps working, it just stops paying the model.
 //
 // The meter is shown on Monitoring, not in the operator's face on every send.
+// A provider outage refunds the charge so retries cannot drain a month's
+// allowance producing nothing (model refusal is not refunded).
 
 import { db } from './db.js'
 
@@ -24,9 +26,34 @@ export const AI_COST_CENTS = {
   other: 2,
 }
 
+// callModel uses human-readable op labels; normalise them onto the cost table.
+const OP_ALIASES = {
+  'plan goal': 'plan',
+  'generate playbook': 'plan',
+  'compose sms': 'compose',
+  research: 'research',
+  compose: 'compose',
+  classify: 'classify',
+  purpose: 'purpose',
+  qualify: 'qualify',
+  plan: 'plan',
+  other: 'other',
+}
+
+export function normaliseAiOp(op) {
+  const key = String(op || 'other').toLowerCase().trim()
+  return OP_ALIASES[key] || (AI_COST_CENTS[key] ? key : 'other')
+}
+
+export function costOf(op) {
+  return AI_COST_CENTS[normaliseAiOp(op)] ?? AI_COST_CENTS.other
+}
+
 // Monthly allowances (cents) by plan_id. Trial / unpaid get a small ceiling so
 // a forgotten AI_MODE=on local workspace cannot run away; paid plans scale up.
-const ALLOWANCE_CENTS = {
+// MUST match the Stripe Payment Link plan ids written by billing.js — a mismatch
+// silently drops the workspace to the $5 trial ceiling.
+export const ALLOWANCE_CENTS = {
   '': 500,       // trial / unset — $5
   trial: 500,
   starter: 1500, // $15
@@ -84,9 +111,7 @@ export function spendStatus(wsId) {
 /** True when the workspace can afford `op` (or an explicit cent cost). */
 export function canAfford(wsId, opOrCents) {
   if (wsId == null) return true
-  const cost = typeof opOrCents === 'number'
-    ? opOrCents
-    : (AI_COST_CENTS[opOrCents] ?? AI_COST_CENTS.other)
+  const cost = typeof opOrCents === 'number' ? opOrCents : costOf(opOrCents)
   const status = spendStatus(wsId)
   return status.usedCents + cost <= status.allowanceCents
 }
@@ -97,7 +122,8 @@ export function canAfford(wsId, opOrCents) {
  */
 export function chargeAi(wsId, op, { detail = '' } = {}) {
   if (wsId == null) return true
-  const cost = AI_COST_CENTS[op] ?? AI_COST_CENTS.other
+  const normalised = normaliseAiOp(op)
+  const cost = costOf(normalised)
   const month = monthKey()
   const allowance = monthlyAllowanceCents(wsId)
   ensureRow(wsId, month)
@@ -116,10 +142,33 @@ export function chargeAi(wsId, op, { detail = '' } = {}) {
     try {
       db.prepare(
         'INSERT INTO events (user_id, type, detail) VALUES (?, ?, ?)'
-      ).run(wsId, 'ai_spend', `${op}:${cost}c ${detail}`.slice(0, 240))
+      ).run(wsId, 'ai_spend', `${normalised}:${cost}c ${detail}`.slice(0, 240))
     } catch { /* events table always exists; ignore */ }
   }
   return true
+}
+
+/**
+ * Refund a prior charge after a provider outage. Never drops below zero.
+ * Model refusals / bad outputs are NOT refunded — only transport failures.
+ */
+export function refundAi(wsId, op, { detail = '' } = {}) {
+  if (wsId == null) return
+  const normalised = normaliseAiOp(op)
+  const cost = costOf(normalised)
+  const month = monthKey()
+  ensureRow(wsId, month)
+  db.prepare(
+    `UPDATE ai_spend
+        SET cents_used = MAX(0, cents_used - ?),
+            updated_at = datetime('now')
+      WHERE workspace_id = ? AND month = ?`
+  ).run(cost, wsId, month)
+  try {
+    db.prepare(
+      'INSERT INTO events (user_id, type, detail) VALUES (?, ?, ?)'
+    ).run(wsId, 'ai_spend_refund', `${normalised}:${cost}c ${detail}`.slice(0, 240))
+  } catch { /* ignore */ }
 }
 
 /** Thrown (and caught by compose/classify) when a paid call is refused. */
