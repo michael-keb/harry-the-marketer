@@ -6,6 +6,7 @@ import { env, microsoftConfigured } from './env.js'
 import { requireUser, workspace } from './auth.js'
 import { suppressionFor, SuppressedError } from './suppression.js'
 import { REVIVE_MAILBOX_SQL } from './parity/schema.js'
+import { sealSecret, withOpenTokens } from './secrets.js'
 
 const SCOPES = [
   'offline_access',
@@ -24,6 +25,7 @@ function isActiveMailbox(row) {
 }
 
 export async function freshAccessToken(mailbox) {
+  mailbox = withOpenTokens(mailbox)
   if (mailbox.token_expiry > Date.now() + 60_000) return mailbox.access_token
   const res = await fetch(`${AUTH}/token`, {
     method: 'POST',
@@ -59,9 +61,9 @@ export async function freshAccessToken(mailbox) {
   const expiry = Date.now() + (tokens.expires_in || 3600) * 1000
   db.prepare(
     "UPDATE mailboxes SET access_token = ?, token_expiry = ?, status = 'connected', last_error = '', needs_reconnect = 0 WHERE id = ?"
-  ).run(tokens.access_token, expiry, mailbox.id)
+  ).run(sealSecret(tokens.access_token), expiry, mailbox.id)
   if (tokens.refresh_token) {
-    db.prepare('UPDATE mailboxes SET refresh_token = ? WHERE id = ?').run(tokens.refresh_token, mailbox.id)
+    db.prepare('UPDATE mailboxes SET refresh_token = ? WHERE id = ?').run(sealSecret(tokens.refresh_token), mailbox.id)
   }
   mailbox.access_token = tokens.access_token
   mailbox.token_expiry = expiry
@@ -259,11 +261,11 @@ microsoftRouter.get('/api/microsoft/callback', async (req, res) => {
       }
       db.prepare(
         "UPDATE mailboxes SET access_token = ?, refresh_token = COALESCE(NULLIF(?, ''), refresh_token), token_expiry = ?, status = 'connected', last_error = '', display_name = ? WHERE id = ?"
-      ).run(tokens.access_token, tokens.refresh_token || '', expiry, displayName || existing.display_name, existing.id)
+      ).run(sealSecret(tokens.access_token), sealSecret(tokens.refresh_token || ''), expiry, displayName || existing.display_name, existing.id)
     } else {
       db.prepare(
         "INSERT INTO mailboxes (user_id, provider, email, display_name, access_token, refresh_token, token_expiry, deleted_at) VALUES (?, 'outlook', ?, ?, ?, ?, ?, NULL)"
-      ).run(pending.userId, email, displayName, tokens.access_token, tokens.refresh_token || '', expiry)
+      ).run(pending.userId, email, displayName, sealSecret(tokens.access_token), sealSecret(tokens.refresh_token || ''), expiry)
     }
     logEvent(pending.userId, { type: 'mailbox_connected', detail: `outlook:${email}` })
     res.redirect('/app/connections?connected=outlook')

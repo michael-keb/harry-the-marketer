@@ -3,6 +3,7 @@
 
 import { db } from '../db.js'
 import { env, twilioEnvConfigured } from '../env.js'
+import { sealSecret } from '../secrets.js'
 import {
   handler, invalid, notFound, str, int, bool, owned, audit,
 } from './http.js'
@@ -86,7 +87,7 @@ export function register(api) {
     ).run(
       req.wsId, channel, provider,
       displayName || phoneNumber || 'SMS',
-      phoneNumber, messagingServiceSid, accountSid, authToken, dailyLimit
+      phoneNumber, messagingServiceSid, accountSid, sealSecret(authToken), dailyLimit
     )
     const row = db.prepare('SELECT * FROM channel_accounts WHERE id = ?').get(info.lastInsertRowid)
     audit(req, { type: 'channel_account_connected', detail: `${provider}:${phoneNumber || messagingServiceSid}` })
@@ -108,7 +109,7 @@ export function register(api) {
       patch.messaging_service_sid = str(req.body, 'messaging_service_sid', { max: 64 })
     }
     if (req.body.account_sid !== undefined) patch.account_sid = str(req.body, 'account_sid', { max: 64 })
-    if (req.body.auth_token !== undefined) patch.auth_token = str(req.body, 'auth_token', { max: 128 })
+    if (req.body.auth_token !== undefined) patch.auth_token = sealSecret(str(req.body, 'auth_token', { max: 128 }))
     if (req.body.daily_limit !== undefined) patch.daily_limit = int(req.body, 'daily_limit', { min: 1, max: 10_000 })
     if (req.body.is_suspended !== undefined) {
       patch.is_suspended = bool(req.body, 'is_suspended') ? 1 : 0

@@ -443,9 +443,28 @@ for (const stmt of [
   // a mailbox offline for a week or flooded with mail never skips a reply
   // (server/google.js gmailRecentInbound, server/upkeep.js syncMailboxInbound).
   "ALTER TABLE mailboxes ADD COLUMN inbound_watermark TEXT DEFAULT ''",
+  // Session revocation: logout bumps this; cookies carrying an older epoch are
+  // rejected even though their HMAC still verifies (server/auth.js).
+  'ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0',
+  // Purpose guardrail (PURPOSE-GUARDRAIL-PLAN.md). Existing rows migrate to
+  // commercial — safe for the operator tier already using the product.
+  "ALTER TABLE campaigns ADD COLUMN purpose TEXT NOT NULL DEFAULT 'commercial'",
 ]) {
   try { db.exec(stmt) } catch { /* column already exists */ }
 }
+
+// Monthly AI spend ledger (Docs/AI-SPEND.md). One row per workspace per UTC month.
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ai_spend (
+      workspace_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      month TEXT NOT NULL,
+      cents_used INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (workspace_id, month)
+    )
+  `)
+} catch { /* already exists */ }
 
 // Inbound dedupe belongs to the database, not to check-then-insert races: the
 // per-thread engine sync and the whole-inbox upkeep sweep both pull the same

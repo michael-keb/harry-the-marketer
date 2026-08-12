@@ -46,7 +46,11 @@ function verify(token) {
 }
 
 export function setSession(res, userId) {
-  const token = sign({ uid: userId, exp: Date.now() + WEEK })
+  // Carry the user's current session_epoch so logout (which bumps the epoch)
+  // invalidates every outstanding cookie, not just the one that cleared.
+  const row = db.prepare('SELECT session_epoch FROM users WHERE id = ?').get(userId)
+  const epoch = Number(row?.session_epoch || 0)
+  const token = sign({ uid: userId, exp: Date.now() + WEEK, epoch })
   res.cookie(COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
@@ -60,7 +64,14 @@ export function setSession(res, userId) {
 export function currentUser(req) {
   const payload = verify(req.cookies?.[COOKIE])
   if (!payload) return null
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(payload.uid) || null
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.uid)
+  if (!user) return null
+  // Stolen token after logout: the cookie still HMAC-verifies, but its epoch
+  // no longer matches. Treat it as signed-out.
+  const liveEpoch = Number(user.session_epoch || 0)
+  const cookieEpoch = Number(payload.epoch || 0)
+  if (cookieEpoch !== liveEpoch) return null
+  return user
 }
 
 // The verified session's user id, or null. Used to key rate limiters on a
@@ -264,6 +275,15 @@ authRouter.post(
 )
 
 authRouter.post('/api/auth/logout', (req, res) => {
+  // Revoke every outstanding session for this user before clearing the cookie.
+  // Without the epoch bump, a stolen copy of the cookie stays valid for up to
+  // 7 days — logout would only hide it from this browser.
+  const user = currentUser(req)
+  if (user) {
+    db.prepare(
+      'UPDATE users SET session_epoch = COALESCE(session_epoch, 0) + 1 WHERE id = ?'
+    ).run(user.id)
+  }
   res.clearCookie(COOKIE, { path: '/' })
   // Sign-out returns to the marketing site, not the login form — a signed-out
   // visitor is a visitor again.

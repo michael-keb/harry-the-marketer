@@ -9,6 +9,7 @@ import { recordTouch } from '../touches.js'
 import { recordTelemetry } from '../telemetry.js'
 import { suppressionFor } from '../suppression.js'
 import { toE164 } from './phone.js'
+import { sealSecret } from '../secrets.js'
 import { twilioSendSms, smsThreadId, twilioConfigured } from './twilio.js'
 
 export { SuppressedError }
@@ -165,7 +166,7 @@ export function ensureEnvSmsAccount(wsId) {
               status = 'connected', display_name = CASE WHEN display_name = '' THEN ? ELSE display_name END
         WHERE id = ?`
     ).run(
-      env.TWILIO_AUTH_TOKEN,
+      sealSecret(env.TWILIO_AUTH_TOKEN),
       phone || existing.phone_number,
       messagingSid || existing.messaging_service_sid,
       phone || messagingSid || 'Twilio SMS',
@@ -184,7 +185,7 @@ export function ensureEnvSmsAccount(wsId) {
     phone,
     messagingSid,
     env.TWILIO_ACCOUNT_SID,
-    env.TWILIO_AUTH_TOKEN,
+    sealSecret(env.TWILIO_AUTH_TOKEN),
   )
   return db.prepare('SELECT * FROM channel_accounts WHERE id = ?').get(info.lastInsertRowid)
 }

@@ -10,6 +10,7 @@ import { env, googleConfigured } from './env.js'
 import { requireUser, workspace } from './auth.js'
 import { suppressionFor, SuppressedError } from './suppression.js'
 import { REVIVE_MAILBOX_SQL } from './parity/schema.js'
+import { sealSecret, withOpenTokens } from './secrets.js'
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.send',
@@ -28,6 +29,8 @@ function isActiveMailbox(row) {
 // ---- token management -------------------------------------------------------
 
 export async function freshAccessToken(mailbox) {
+  // Tokens may be AES-GCM sealed at rest — open them for the provider call.
+  mailbox = withOpenTokens(mailbox)
   if (mailbox.token_expiry > Date.now() + 60_000) return mailbox.access_token
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -65,7 +68,7 @@ export async function freshAccessToken(mailbox) {
   const tokens = await res.json()
   const expiry = Date.now() + (tokens.expires_in || 3600) * 1000
   db.prepare("UPDATE mailboxes SET access_token = ?, token_expiry = ?, status = 'connected', last_error = '', needs_reconnect = 0 WHERE id = ?")
-    .run(tokens.access_token, expiry, mailbox.id)
+    .run(sealSecret(tokens.access_token), expiry, mailbox.id)
   mailbox.access_token = tokens.access_token
   mailbox.token_expiry = expiry
   return tokens.access_token
@@ -381,11 +384,11 @@ googleRouter.get('/api/google/callback', async (req, res) => {
       }
       db.prepare(
         "UPDATE mailboxes SET access_token = ?, refresh_token = COALESCE(NULLIF(?, ''), refresh_token), token_expiry = ?, status = 'connected', last_error = '', display_name = ? WHERE id = ?"
-      ).run(tokens.access_token, tokens.refresh_token || '', expiry, info.name || existing.display_name, existing.id)
+      ).run(sealSecret(tokens.access_token), sealSecret(tokens.refresh_token || ''), expiry, info.name || existing.display_name, existing.id)
     } else {
       db.prepare(
         "INSERT INTO mailboxes (user_id, provider, email, display_name, access_token, refresh_token, token_expiry, deleted_at) VALUES (?, 'gmail', ?, ?, ?, ?, ?, NULL)"
-      ).run(pending.userId, email, info.name || '', tokens.access_token, tokens.refresh_token || '', expiry)
+      ).run(pending.userId, email, info.name || '', sealSecret(tokens.access_token), sealSecret(tokens.refresh_token || ''), expiry)
     }
     logEvent(pending.userId, { type: 'mailbox_connected', detail: `gmail:${email}` })
     res.redirect('/app/connections?connected=1')

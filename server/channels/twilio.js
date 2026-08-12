@@ -4,14 +4,17 @@
 import crypto from 'node:crypto'
 import { env } from '../env.js'
 import { toE164 } from './phone.js'
+import { openSecret } from '../secrets.js'
 
 export function twilioConfigured(account) {
   if (account?.provider === 'sandbox') return true
-  return Boolean(account?.account_sid && account?.auth_token && (account.phone_number || account.messaging_service_sid))
+  const token = openSecret(account?.auth_token)
+  return Boolean(account?.account_sid && token && (account.phone_number || account.messaging_service_sid))
 }
 
 function basicAuth(account) {
-  return Buffer.from(`${account.account_sid}:${account.auth_token}`).toString('base64')
+  const token = openSecret(account.auth_token)
+  return Buffer.from(`${account.account_sid}:${token}`).toString('base64')
 }
 
 /**

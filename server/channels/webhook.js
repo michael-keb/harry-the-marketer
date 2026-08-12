@@ -8,6 +8,7 @@ import { unsubscribeLead } from '../suppression.js'
 import { toE164, samePhone } from './phone.js'
 import { verifyTwilioSignature, smsKeyword, smsThreadId } from './twilio.js'
 import { ensureEnvSmsAccount } from './send.js'
+import { openSecret } from '../secrets.js'
 
 export const twilioRouter = express.Router()
 
@@ -66,7 +67,7 @@ twilioRouter.post('/sms', express.urlencoded({ extended: false }), (req, res) =>
 
   const signature = req.get('X-Twilio-Signature') || ''
   const ok = verifyTwilioSignature({
-    authToken: account.auth_token,
+    authToken: openSecret(account.auth_token),
     url: publicWebhookUrl(req),
     params,
     signature,
