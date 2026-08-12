@@ -5,6 +5,7 @@
 import { db, logEvent, touch, kvSet } from './db.js'
 import { parsePlaybook, nodeIntents } from './playbook.js'
 import { composeEmail, classifyReply, researchLead } from './ai.js'
+import { guardComposed } from './purpose.js'
 import { syncInbound } from './mailer.js'
 import { sendMessage, smsAccountFor, smsEligibility } from './channels/send.js'
 import { composeSms } from './channels/compose.js'
@@ -961,7 +962,11 @@ async function enterNode(ctx, cl, nodeId) {
         // Research agent: build a knowledge profile before the first email (AI only;
         // failures fall through silently — the templates still work without it).
         if (!lead.research && !threadMessages(cl).length) {
-          const profile = await researchLead({ lead, businessContext: ctx.user.business_context })
+          const profile = await researchLead({
+            lead,
+            businessContext: ctx.user.business_context,
+            workspaceId: ctx.user.id,
+          })
           if (profile) {
             db.prepare("UPDATE leads SET research = ?, researched_at = datetime('now') WHERE id = ?").run(profile, lead.id)
             lead.research = profile
@@ -994,6 +999,7 @@ async function enterNode(ctx, cl, nodeId) {
           example: approved || null,
           campaignSubject: ctx.campaign.email_subject || '',
           defaultSubject,
+          workspaceId: ctx.user.id,
         })
         const forced = resolveComposeSubject({
           exampleSubject: approved?.subject,
@@ -1003,6 +1009,31 @@ async function enterNode(ctx, cl, nodeId) {
         })
         subject = forced || composed.subject
         body = composed.body
+
+        // Purpose guardrail: under assessment/experience/role, a composed message
+        // that offers a service parks for a human rather than sending.
+        const purposeHit = guardComposed({
+          purpose: ctx.campaign.purpose || 'commercial',
+          subject,
+          body,
+        })
+        if (purposeHit) {
+          logEvent(ctx.user.id, {
+            campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'purpose_blocked',
+            detail: purposeHit.sentence.slice(0, 200),
+          })
+          createDraft({
+            userId: ctx.user.id, campaignId: cl.campaign_id, leadId: cl.lead_id,
+            nodeId, subject, body,
+          })
+          notify(ctx.user.id, {
+            title: 'This reads like a pitch — waiting for you',
+            text: `The line is: “${purposeHit.sentence.slice(0, 120)}”`,
+            link: '/app/inbox',
+          })
+          setLead(cl, { state: 'needs_attention', error: 'purpose_blocked' })
+          return false
+        }
 
         if (gated) {
           createDraft({
@@ -1258,6 +1289,7 @@ async function processWaiting(ctx, cl) {
       replyText: unprocessed.body,
       thread: threadMessages(cl).filter((m) => m.id !== unprocessed.id),
       businessContext: ctx.user.business_context,
+      workspaceId: ctx.user.id,
     })
     await routeReply(ctx, cl, intent, unprocessed)
     return

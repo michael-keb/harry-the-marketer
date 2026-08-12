@@ -123,6 +123,11 @@ export default function Monitoring() {
           </h2>
           <p className="text-xs text-slate-500 mb-3">
             {ai.configuredKey ? `${ai.provider === 'openai' ? 'OpenAI' : 'Claude'} — ${ai.model}` : 'Template mode — no provider key configured'}
+            {ai.spend && (
+              <> · this month ${((ai.spend.usedCents || 0) / 100).toFixed(2)} of ${((ai.spend.allowanceCents || 0) / 100).toFixed(2)}
+                {ai.spend.exhausted ? ' (allowance used — research paused, compose falls back to templates)' : ''}
+              </>
+            )}
           </p>
           {ai.recent.length === 0 ? (
             <p className="text-sm text-slate-500">Provider calls (compose, classify, research, qualify) log here.</p>

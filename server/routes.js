@@ -7,6 +7,7 @@ import { telemetryRecent, telemetryStats, telemetryFailures } from './telemetry.
 import { parsePlaybook, DEFAULT_PLAYBOOK } from './playbook.js'
 import { simulateReply, remainingQuota, sendEmail } from './mailer.js'
 import { tick, campaignCtx, routeReply } from './engine.js'
+import { spendStatus } from './ai-spend.js'
 import { aiStatus, CORE_INTENTS, planGoal, goalPlaybook, qualifyLead, researchLead, generatePlaybook, previewPlaybookEmails, composeStepSample, exampleLead } from './ai.js'
 import { setSendInstruction, sanitizeInstruction } from '../shared/playbook-edit.js'
 import { pendingDrafts, pendingCount, discardStaleDraft } from './drafts.js'
@@ -1195,9 +1196,15 @@ api.post('/leads/:id/research', async (req, res) => {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ? AND user_id = ?').get(req.params.id, req.wsId)
   if (!lead) return res.status(404).json({ error: 'Lead not found' })
   const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(req.wsId)
-  const profile = await researchLead({ lead, businessContext: owner.business_context })
+  const profile = await researchLead({
+    lead,
+    businessContext: owner.business_context,
+    workspaceId: req.wsId,
+  })
   if (!profile) {
-    return res.status(400).json({ error: 'Research needs the AI agent — set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env (see README)' })
+    return res.status(400).json({
+      error: 'Research unavailable — AI not configured, or this month\'s AI allowance is used up (see Monitoring)',
+    })
   }
   db.prepare("UPDATE leads SET research = ?, researched_at = datetime('now') WHERE id = ?").run(profile, lead.id)
   logEvent(req.wsId, { leadId: lead.id, type: 'researched', detail: profile.slice(0, 120) })
@@ -1550,7 +1557,7 @@ api.get('/monitoring', (req, res) => {
       lastTick, intervalMs: env.ENGINE_INTERVAL_MS, healthy: Boolean(engineHealthy),
       ticks: telemetryRecent('tick', 40), stats24: telemetryStats('tick', 24),
     },
-    ai: { ...ai, stats24: aiStats, recent: telemetryRecent('ai_call', 20) },
+    ai: { ...ai, stats24: aiStats, recent: telemetryRecent('ai_call', 20), spend: spendStatus(uid) },
     // The parity modules have been writing telemetry under kind 'parity' and
     // 'provider' since they shipped, and nothing read either — so several specs'
     // "visible on the Monitoring page" definitions of done were unmet while the

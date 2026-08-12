@@ -6,6 +6,7 @@ import OpenAI from 'openai'
 import { env } from './env.js'
 import { timed } from './telemetry.js'
 import { parsePlaybook, pathToNode } from './playbook.js'
+import { chargeAi, AiBudgetError } from './ai-spend.js'
 
 let client = null
 let openaiClient = null
@@ -46,6 +47,14 @@ export function aiStatus() {
 async function callModel(opts) {
   if (process.env.AI_MODE === 'off') throw new Error('AI disabled (AI_MODE=off)')
   const provider = aiProvider()
+  // Charge the workspace BEFORE the paid call. Exhausted allowance fails closed
+  // into the caller's existing fallback (template / heuristic / null research).
+  if (opts.workspaceId != null) {
+    const op = opts.op || 'other'
+    if (!chargeAi(opts.workspaceId, op)) {
+      throw new AiBudgetError(`Monthly AI allowance exhausted (op=${op})`)
+    }
+  }
   // Telemetry wraps only real provider calls — heuristic-mode fallbacks are
   // expected behavior, not failures worth alerting on.
   if (provider === 'openai') return timed('ai_call', `${opts.op || 'call'} (openai)`, () => callOpenAI(opts))
@@ -138,10 +147,10 @@ const HONESTY_RULES =
 // its angle and voice and only moves what has to move for this recipient.
 // `refine` is a one-off note ("shorter, lead with the ROI number") from someone
 // rewriting a sample by hand, and outranks the instruction where they collide.
-export async function composeEmail({ instruction, lead, businessContext, thread, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject }) {
+export async function composeEmail({ instruction, lead, businessContext, thread, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject, workspaceId }) {
   try {
     const text = await callModel({
-      system:
+      workspaceId,      system:
         `You write concise, effective B2B outreach emails for Harry the Marketer as ${senderName || 'the sender'}. ` +
         `Business context (who we are, what we sell, our voice):\n${businessContext || '(none provided — keep it generic but professional)'}\n\n` +
         HONESTY_RULES + '\n\n' +
@@ -267,7 +276,7 @@ export function freshReplyText(body) {
   return fresh || text
 }
 
-export async function classifyReply({ intents, replyText, thread, businessContext }) {
+export async function classifyReply({ intents, replyText, thread, businessContext, workspaceId }) {
   const vocabulary = [...new Set([...(intents || []), ...CORE_INTENTS])]
   const fresh = freshReplyText(replyText)
   const heuristic = heuristicClassify(fresh, vocabulary)
@@ -275,7 +284,7 @@ export async function classifyReply({ intents, replyText, thread, businessContex
   if (heuristic.intent === 'unsubscribe' && heuristic.confidence >= 0.9) return { ...heuristic, via: 'heuristic' }
   try {
     const text = await callModel({
-      system:
+      workspaceId,      system:
         `You classify replies to B2B outreach emails by intent so Harry the Marketer can route them. ` +
         `Business context: ${businessContext || '(none)'}. ` +
         `Pick exactly one intent from the allowed list. "other" means none fit well and a human should look.`,
@@ -309,9 +318,15 @@ export async function classifyReply({ intents, replyText, thread, businessContex
 // Uses Claude's server-side web search to build a knowledge profile for a lead.
 // Requires an API key; without one it returns null (the UI says so honestly).
 
-export async function researchLead({ lead, businessContext }) {
+export async function researchLead({ lead, businessContext, workspaceId }) {
   if (process.env.AI_MODE === 'off') return null
   if (aiProvider() === 'none') return null
+  // Research is the expensive op — refuse before any provider call when the
+  // monthly allowance cannot cover it. The engine falls through silently.
+  if (workspaceId != null && !chargeAi(workspaceId, 'research')) {
+    lastError = 'Monthly AI allowance exhausted — research skipped'
+    return null
+  }
   if (aiProvider() === 'openai') {
     try {
       const response = await timed('ai_call', 'research (openai)', () => getOpenAI().responses.create({
