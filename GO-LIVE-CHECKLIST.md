@@ -126,6 +126,11 @@ Use sandbox first on production; Gmail after Google OAuth is unblocked.
 
 **Webhook URL:** `https://harrythemarketer.com/api/billing/webhook`
 
+**Also set in Render (placeholders in render.yaml, values dashboard-only):**
+`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` (SMS stays off until set);
+`MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (Outlook); `ANTHROPIC_API_KEY` (optional Claude);
+`TOKENS_ENCRYPTION_KEY` (optional — otherwise derived from the session secret).
+
 ---
 
 ## 11. Paid signup provisions a workspace

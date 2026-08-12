@@ -70,6 +70,8 @@ import {
   str, int, bool, oneOf, idList, email as emailField,
   page, paged, owned, tx, nowIso, audit, meter,
 } from './http.js'
+import { rateLimit } from '../security.js'
+import { sessionUid } from '../auth.js'
 
 // ---------------------------------------------------------------- constants --
 
@@ -816,7 +818,16 @@ export function register(api) {
   // ---- on-demand provider sync (Inbox polls this every ~10s) ---------------
   // Pulls recent Gmail/Outlook replies into Harry now, instead of waiting for
   // the engine upkeep pass. Scoped to the caller's workspace only.
-  api.post('/inbox/sync', handler(async (req) => {
+  // Tight cap: the Inbox client polls this every ~10s. Without a dedicated
+  // limit a logged-in loop burns the workspace's Gmail quota and disables reply
+  // sync fleet-wide. 30/min is well above honest polling and well below abuse.
+  api.post('/inbox/sync', rateLimit({
+    windowMs: 60_000,
+    max: 30,
+    key: 'inbox-sync',
+    by: (req) => sessionUid(req) || req.wsId,
+    message: 'Sync is rate-limited — wait a moment and try again',
+  }), handler(async (req) => {
     const t0 = Date.now()
     const result = await pullWorkspaceInbound(req.wsId)
     meter('inbox.sync', Date.now() - t0, true,
