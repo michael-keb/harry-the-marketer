@@ -15,8 +15,13 @@ export function isNonCommercial(purpose) {
 }
 
 // Phrase / pattern list — cheap, always runs, works with no API key.
+// Currency is not $-only: £ / € / AUD / "500 dollars" and fee paraphrases too.
 const COMMERCIAL_PATTERNS = [
   /\$\s?\d/,
+  /£\s?\d/,
+  /€\s?\d/,
+  /\b(?:aud|usd|gbp|eur|cad|nzd)\s*\$?\s*\d/i,
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|pounds?|euros?|bucks)\b/i,
   /\bper\s+hour\b/i,
   /\bhourly\s+rate\b/i,
   /\brate\s+card\b/i,
@@ -36,7 +41,11 @@ const COMMERCIAL_PATTERNS = [
   /\blimited[- ]time\s+offer\b/i,
   /\bour\s+pricing\b/i,
   /\bpricing\s+starts\b/i,
-  /\bstarting\s+at\s+\$/i,
+  /\bstarting\s+at\s+[\$£€]/i,
+  /\bdiscuss\s+my\s+fee\b/i,
+  /\bmy\s+fee\b/i,
+  /\bwhat\s+i\s+charge\b/i,
+  /\bi\s+charge\b/i,
 ]
 
 /**

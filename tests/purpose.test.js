@@ -19,6 +19,14 @@ test('a clean training ask is not commercial', () => {
   assert.equal(hit.commercial, false)
 })
 
+test('non-dollar currencies and fee paraphrases trip the check', () => {
+  assert.equal(checkCommercial('My day rate is £500').commercial, true)
+  assert.equal(checkCommercial('Package pricing starts at €500').commercial, true)
+  assert.equal(checkCommercial('Happy to discuss my fee over a call').commercial, true)
+  assert.equal(checkCommercial('That would be 500 dollars for the engagement').commercial, true)
+  assert.equal(checkCommercial('AUD 500 retainer available').commercial, true)
+})
+
 test('playbookCommercialHit names the offending send node', () => {
   const graph = parsePlaybook(`flowchart TD
     S([Start]) --> A[Send: pitch my freelance services at $120/day]
