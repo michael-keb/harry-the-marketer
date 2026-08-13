@@ -63,3 +63,36 @@ export function leadStages(wsId) {
 
   return stage
 }
+
+// A one-line preview of the last inbound, for the board card. Whitespace is
+// collapsed so a quoted reply does not become a blank card.
+export function messageSnippet(body, max = 140) {
+  const text = String(body || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`
+}
+
+// Latest inbound per lead in one pass. The board (and GET /api/leads) read
+// this rather than N per-lead queries, so a workspace of a few thousand people
+// stays one round-trip.
+export function lastInbounds(wsId) {
+  const rows = db.prepare(`
+    SELECT m.lead_id AS leadId, m.body, m.intent, m.created_at AS createdAt
+    FROM messages m
+    INNER JOIN (
+      SELECT lead_id, MAX(id) AS id
+      FROM messages
+      WHERE user_id = ? AND direction = 'in' AND lead_id IS NOT NULL
+      GROUP BY lead_id
+    ) latest ON latest.id = m.id
+  `).all(wsId)
+  const map = {}
+  for (const row of rows) {
+    map[row.leadId] = {
+      snippet: messageSnippet(row.body),
+      intent: row.intent || '',
+      createdAt: row.createdAt,
+    }
+  }
+  return map
+}

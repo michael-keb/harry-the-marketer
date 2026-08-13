@@ -10,7 +10,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'htm-progress-'))
 process.env.AI_MODE = 'off'
 
 const { db } = await import('../server/db.js')
-const { leadStages } = await import('../server/stages.js')
+const { leadStages, lastInbounds, messageSnippet } = await import('../server/stages.js')
 const { ensureConsent, ownerTerms, consentFor } = await import('../server/consent.js')
 const { followUpTiming } = await import('../server/engine.js')
 const { webhookKind, isSupportedWebhook } = await import('../server/alerts.js')
@@ -44,6 +44,20 @@ test('a prospect stage is read off what actually happened', () => {
   assert.equal(stages[4], 'interested')
   assert.equal(stages[5], 'agreed')
   assert.equal(stages[6], 'won')
+})
+
+test('the last inbound is the card the board reads', () => {
+  assert.equal(messageSnippet('  hello\n\nworld  '), 'hello world')
+  assert.equal(messageSnippet('x'.repeat(200)).endsWith('…'), true)
+
+  const map = lastInbounds(1)
+  assert.equal(map[1], undefined, 'never replied')
+  assert.equal(map[3].intent, '')
+  assert.equal(map[3].snippet, 'b')
+  assert.equal(map[4].intent, 'interested')
+  // A newer inbound replaces the older one — the board always shows the latest tag.
+  inbound.run(3, 'question')
+  assert.equal(lastInbounds(1)[3].intent, 'question')
 })
 
 test('opting out ends the journey wherever it got to', () => {

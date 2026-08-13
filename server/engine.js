@@ -7,7 +7,7 @@ import { parsePlaybook, nodeIntents } from './playbook.js'
 import { composeEmail, classifyReply, researchLead } from './ai.js'
 import { guardComposed } from './purpose.js'
 import { syncInbound } from './mailer.js'
-import { sendMessage, smsAccountFor, smsEligibility } from './channels/send.js'
+import { sendMessage, smsAccountFor, smsEligibility, smsAllowedForWorkspace } from './channels/send.js'
 import { composeSms } from './channels/compose.js'
 import { nextGapMs, sendWindow, followUpJitter, remainingToday } from './pacing.js'
 import { resolveSend, sendingContext, brakeReason } from './gates.js'
@@ -683,7 +683,10 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
 
   const account = smsAccountFor(ctx.campaign)
   if (!account) {
-    setLead(cl, { state: 'error', error: 'No SMS channel account — connect Twilio under Settings → Connections' })
+    const error = smsAllowedForWorkspace(ctx.user.id)
+      ? 'No SMS channel account — connect SMSFlow under Settings → Connections'
+      : 'SMS is not enabled for this workspace — ask the operator to enable it'
+    setLead(cl, { state: 'error', error })
     logEvent(ctx.user.id, {
       campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'error',
       detail: 'sms step with no channel account',

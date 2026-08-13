@@ -86,7 +86,16 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
 
-      # Twilio SMS (optional — SMS stays off until these are set).
+      # SMSFlow SMS (optional — SMS stays off until the API key is set).
+      - key: SMSFLOW_API_KEY
+        sync: false
+      - key: SMSFLOW_FROM_NUMBER
+        sync: false
+      # Gated feature: comma-separated workspace-owner emails allowed to use SMS.
+      - key: SMS_ALLOWED_EMAILS
+        sync: false
+
+      # Twilio SMS (legacy — existing accounts only; new setups use SMSFlow).
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN

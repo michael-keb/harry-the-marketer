@@ -147,6 +147,87 @@ export function ReplyComposer({ thread, onSent }) {
   )
 }
 
+// ---------------------------------------------------------------- sms reply --
+
+// A text is a text: no subject, no copies, no scheduling. Same endpoint as the
+// email reply — the server routes by the thread's channel — and the same rule:
+// nothing sends without an explicit OK naming both numbers.
+export function SmsReplyComposer({ thread, onSent }) {
+  const toast = useToast()
+  const [body, setBody] = useState('')
+  const [confirming, setConfirming] = useState(false)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const lead = thread.lead
+  const from = thread.smsAccount?.phoneNumber || ''
+  const to = thread.threadKey?.startsWith('sms:')
+    ? thread.threadKey.split(':')[2]
+    : thread.messages?.findLast?.((m) => m.direction === 'in')?.from_email || ''
+
+  const send = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api.post(`/api/inbox/threads/${thread.id}/reply`, { body, confirm: true })
+      setConfirming(false)
+      setBody('')
+      onSent(result)
+    } catch (err) {
+      setError(err)
+      setConfirming(false)
+      toast(err.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section aria-label="Write a text reply" className="space-y-2">
+      <label className="block text-xs text-slate-600" htmlFor="sms-reply-body">Your text reply</label>
+      <textarea
+        id="sms-reply-body"
+        className="input min-h-20"
+        maxLength={1600}
+        placeholder={`Reply by SMS${from ? ` — it sends from ${from}` : ''} and joins this conversation…`}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+      />
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-slate-500" aria-live="polite">
+          {body.length}/1600{body.length > 160 ? ` · ~${Math.ceil(body.length / 153)} SMS segments` : ''}
+        </span>
+        <button type="button" className="btn-primary" disabled={!body.trim() || busy} onClick={() => setConfirming(true)}>
+          Send text…
+        </button>
+      </div>
+
+      <Banner error={error} handled={[]} />
+
+      {confirming && (
+        <Modal title="Send this text?" onClose={() => setConfirming(false)}>
+          <div className="space-y-3 text-sm text-slate-700">
+            <p>
+              This sends a real text message{from ? <> from <span className="text-ink-950">{from}</span></> : null} to{' '}
+              <span className="text-ink-950">{to || leadName(lead)}</span> now. Once it leaves it cannot be recalled.
+            </p>
+            <p className="text-slate-600">
+              It counts against that number's daily SMS allowance and joins the conversation, exactly like a text the agent sent.
+            </p>
+            <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-white p-3 text-[13px]">{body}</div>
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn-ghost" onClick={() => setConfirming(false)} disabled={busy}>Cancel</button>
+              <button type="button" className="btn-primary" onClick={send} disabled={busy}>
+                {busy ? 'Sending…' : 'Yes, send it'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </section>
+  )
+}
+
 // ----------------------------------------------------------------- forward ---
 
 export function ForwardDialog({ thread, message, onClose, onSent }) {

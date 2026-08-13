@@ -8,11 +8,13 @@
 //
 // The page owns three things and delegates the rest to web/src/leads/*:
 //   * the table, its filters and its selection
+//   * the conversation board (same derived stages, laid out as columns)
 //   * the CSV import into the workspace (the segment importer is the same
 //     component aimed at a list)
 //   * which lead the detail drawer is showing
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, qs } from '../api.js'
 import { Spinner, EmptyState, ErrorState, Modal, Badge, PageHeader, useToast } from '../ui.jsx'
 import { BulkBar, Tabs, LiveRegion } from '../parity-ui.jsx'
@@ -23,15 +25,26 @@ import { OpenTasks } from '../leads/tasks.jsx'
 import FindEmails from '../leads/FindEmails.jsx'
 import LeadDetail from '../leads/LeadDetail.jsx'
 import ProspectSearch from '../leads/ProspectSearch.jsx'
+import Board from '../leads/Board.jsx'
 import { FieldError, FormError, fmt } from '../leads/shared.jsx'
 
 // The progress tracker: the order a prospect moves through, so the strip above
 // the table reads left to right the way the work actually goes.
 const STAGE_ORDER = ['not contacted', 'contacted', 'replied', 'interested', 'agreed', 'won', 'lost', 'unsubscribed', 'bounced']
+const TABS = ['people', 'board', 'tasks', 'prospects']
 
 export default function Leads() {
   const toast = useToast()
-  const [tab, setTab] = useState('people')
+  const [search, setSearch] = useSearchParams()
+  const tab = TABS.includes(search.get('tab')) ? search.get('tab') : 'people'
+  const setTab = (next) => {
+    setSearch((prev) => {
+      const params = new URLSearchParams(prev)
+      if (!next || next === 'people') params.delete('tab')
+      else params.set('tab', next)
+      return params
+    }, { replace: true })
+  }
   const [leads, setLeads] = useState(null)
   const [error, setError] = useState(null)
   const [query, setQuery] = useState('')
@@ -154,11 +167,13 @@ export default function Leads() {
         onChange={setTab}
         tabs={[
           { id: 'people', label: 'People', count: leads.length },
+          { id: 'board', label: 'Board' },
           { id: 'tasks', label: 'Tasks' },
           { id: 'prospects', label: 'Find prospects' },
         ]}
       />
 
+      {tab === 'board' && <Board leads={leads} onOpenLead={setDetailId} />}
       {tab === 'tasks' && <OpenTasks onOpenLead={(id) => { setTab('people'); setDetailId(id) }} />}
       {tab === 'prospects' && <ProspectSearch onImported={() => load()} />}
 

@@ -2,7 +2,7 @@
 //
 // Two top-level areas:
 //   Email     — Gmail / Outlook (and sandbox) fleet + sending infrastructure
-//   Messages  — SMS (Twilio), WhatsApp, Telegram
+//   Messages  — SMS (SMSFlow), WhatsApp, Telegram
 //
 // `/app/connections?area=email` still redirects here so old links keep working.
 

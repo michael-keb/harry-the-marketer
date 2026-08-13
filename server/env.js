@@ -74,8 +74,19 @@ export const env = {
   // Fail fast on unsafe production config (default: warn only).
   PRODUCTION_STRICT: process.env.PRODUCTION_STRICT === '1' || process.env.PRODUCTION_STRICT === 'true',
 
-  // Twilio — when these are set, every workspace can send SMS without connecting
-  // an account in Settings. TWILIO_PHONE_NUMBER is an alias for TWILIO_FROM_NUMBER.
+  // SMSFlow — the SMS provider. When the API key is set, allow-listed
+  // workspaces can send SMS without connecting an account in Settings.
+  // SMSFLOW_FROM_NUMBER is optional (Sender ID / dedicated number).
+  SMSFLOW_API_KEY: process.env.SMSFLOW_API_KEY || '',
+  SMSFLOW_FROM_NUMBER: process.env.SMSFLOW_FROM_NUMBER || '',
+
+  // SMS access allowlist — comma-separated workspace-owner emails. When set,
+  // only these workspaces may configure or send SMS; when empty, SMS is open
+  // to every workspace (dev / existing behaviour).
+  SMS_ALLOWED_EMAILS: process.env.SMS_ALLOWED_EMAILS || '',
+
+  // Twilio (legacy) — pre-SMSFlow accounts keep sending; new setups use SMSFlow.
+  // TWILIO_PHONE_NUMBER is an alias for TWILIO_FROM_NUMBER.
   TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID || '',
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_PHONE_NUMBER || '',
@@ -99,6 +110,15 @@ export const microsoftConfigured = () =>
 
 export const twilioEnvConfigured = () =>
   Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID))
+
+export const smsflowEnvConfigured = () => Boolean(env.SMSFLOW_API_KEY)
+
+/** Lower-cased SMS allowlist; empty array means SMS is open to everyone. */
+export const smsAllowedEmails = () =>
+  String(env.SMS_ALLOWED_EMAILS || '')
+    .split(/[,\s]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
 
 export const devLoginEnabled = () =>
   env.DEV_LOGIN !== undefined ? env.DEV_LOGIN === '1' || env.DEV_LOGIN === 'true' : !auth0Configured()

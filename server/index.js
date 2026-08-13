@@ -1,13 +1,13 @@
 import express from 'express'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
-import { env, ROOT, auth0Configured, googleConfigured, twilioEnvConfigured, devLoginEnabled, isProduction } from './env.js'
+import { env, ROOT, auth0Configured, googleConfigured, twilioEnvConfigured, smsflowEnvConfigured, devLoginEnabled, isProduction } from './env.js'
 import { authRouter, sessionUid } from './auth.js'
 import { billingRouter, handleBillingWebhook } from './billingRoutes.js'
 import { billingConfigured } from './billing.js'
 import { googleRouter } from './google.js'
 import { microsoftRouter } from './microsoft.js'
-import { twilioRouter } from './channels/webhook.js'
+import { twilioRouter, smsflowRouter } from './channels/webhook.js'
 import { legalRouter } from './legal.js'
 import { trackingRouter } from './tracking.js'
 import { consentRouter } from './consent.js'
@@ -49,6 +49,7 @@ app.get('/api/health', (req, res) => {
     auth0: auth0Configured(),
     google: googleConfigured(),
     twilio: twilioEnvConfigured(),
+    smsflow: smsflowEnvConfigured(),
     devLogin: devLoginEnabled(),
     billing: billingConfigured(),
     appUrl: env.APP_URL,
@@ -70,6 +71,7 @@ app.use(billingRouter)
 app.use(googleRouter)
 app.use(microsoftRouter)
 app.use('/api/hooks/twilio', rateLimit({ windowMs: 60_000, max: 120, key: 'twilio' }), twilioRouter)
+app.use('/api/hooks/smsflow', rateLimit({ windowMs: 60_000, max: 120, key: 'smsflow' }), smsflowRouter)
 // Public and hit by every recipient's mail client — capped so a scanner loop
 // or a scripted sweep cannot hammer SQLite through unauthenticated endpoints.
 // The limiter is scoped to the tracking prefix, not mounted app-wide: mounted

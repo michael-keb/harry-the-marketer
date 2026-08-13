@@ -44,7 +44,7 @@ export default function SmsSendersPanel({ campaign, onChanged, compact = false }
       note={
         rows.length
           ? `${rows.length} SMS sender${rows.length === 1 ? '' : 's'}, ${nfmt(totalRemaining)} of ${nfmt(totalCap)} texts left today. Removing one here never disconnects the account.`
-          : 'Which Twilio (or sandbox) numbers this campaign may text from.'
+          : 'Which SMSFlow (or sandbox) numbers this campaign may text from.'
       }
       actions={(
         <button className="btn-ghost cursor-pointer py-1.5" onClick={() => setAdding(true)}>
@@ -146,7 +146,7 @@ export default function SmsSendersPanel({ campaign, onChanged, compact = false }
           danger
           confirmLabel="Remove from campaign"
           body={
-            `This campaign stops texting from ${labelOf(detaching)}. The Twilio account stays connected `
+            `This campaign stops texting from ${labelOf(detaching)}. The SMS account stays connected `
             + 'everywhere else — this only changes which SMS senders this campaign draws on.'
           }
           onConfirm={() => detach(detaching)}

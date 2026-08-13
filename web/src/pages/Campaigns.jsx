@@ -243,7 +243,7 @@ const CAMPAIGN_TYPES = [
   {
     value: 'sms',
     label: 'SMS',
-    blurb: 'Send texts from a Twilio number. Leads need a phone number and SMS opt-in.',
+    blurb: 'Send texts from an SMSFlow number. Leads need a phone number and SMS opt-in.',
     next: 'Next you’ll attach an SMS sender and draw Send sms: steps.',
   },
   {

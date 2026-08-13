@@ -213,12 +213,13 @@ export function ConversationRow({ row, active, tabStop, checked, onCheck, onSele
         <div className={`truncate text-[13px] ${row.is_read ? 'text-slate-600' : 'font-medium text-ink-900'}`}>
           {row.is_important && <span aria-hidden className="mr-1 text-amber-600">★</span>}
           {row.is_important && <span className="sr-only">Important. </span>}
-          {row.last_message?.subject || '(no subject)'}
+          {row.channel === 'sms' ? 'Text message' : row.last_message?.subject || '(no subject)'}
         </div>
 
         <div className="truncate text-[11.5px] text-slate-500">{snippetOf(row.last_message?.body)}</div>
 
         <RowMarkers>
+          {row.channel === 'sms' ? <Marker key="sms" tone="warn">SMS</Marker> : null}
           {row.intent ? <Badge key="intent" value={row.intent} /> : null}
           {row.is_archived ? <Marker key="arch">Archived</Marker> : null}
           {row.is_snoozed ? <Marker key="snz" title={absolute(row.snoozed_until)}>Snoozed · back {relative(row.snoozed_until)}</Marker> : null}

@@ -127,7 +127,9 @@ Use sandbox first on production; Gmail after Google OAuth is unblocked.
 **Webhook URL:** `https://harrythemarketer.com/api/billing/webhook`
 
 **Also set in Render (placeholders in render.yaml, values dashboard-only):**
-`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` (SMS stays off until set);
+`SMSFLOW_API_KEY`, `SMSFLOW_FROM_NUMBER` (SMS stays off until the API key is set) and
+`SMS_ALLOWED_EMAILS` (comma-separated workspace-owner emails — SMS is gated to these accounts;
+leave unset to open SMS to every workspace). Legacy `TWILIO_*` still works for existing accounts;
 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (Outlook); `ANTHROPIC_API_KEY` (optional Claude);
 `TOKENS_ENCRYPTION_KEY` (optional — otherwise derived from the session secret).
 

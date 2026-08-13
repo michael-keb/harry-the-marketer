@@ -11,7 +11,7 @@ import { spendStatus } from './ai-spend.js'
 import { aiStatus, CORE_INTENTS, planGoal, goalPlaybook, qualifyLead, researchLead, generatePlaybook, previewPlaybookEmails, composeStepSample, exampleLead } from './ai.js'
 import { setSendInstruction, sanitizeInstruction } from '../shared/playbook-edit.js'
 import { pendingDrafts, pendingCount, discardStaleDraft } from './drafts.js'
-import { leadStages } from './stages.js'
+import { leadStages, lastInbounds } from './stages.js'
 import { consentFor, ensureConsent, consentUrl, ownerTerms } from './consent.js'
 import { post as postWebhook, webhookKind } from './alerts.js'
 import { createSheet, disconnectSheet, pushSheet } from './sheets.js'
@@ -67,13 +67,17 @@ api.get('/leads', (req, res) => {
     )
   }
   // Where each prospect actually is — derived, never stored, so it cannot drift.
+  // lastInbound is the message the classifier just tagged; the board uses it
+  // as the card preview, the table ignores it.
   const stages = leadStages(req.wsId)
+  const inbounds = lastInbounds(req.wsId)
   const consents = Object.fromEntries(
     db.prepare('SELECT * FROM consents WHERE user_id = ?').all(req.wsId).map((c) => [c.lead_id, c])
   )
   res.json(rows.map((l) => ({
     ...l,
     stage: stages[l.id] || 'not contacted',
+    lastInbound: inbounds[l.id] || null,
     consent: consents[l.id]
       ? { status: consents[l.id].status, signedName: consents[l.id].signed_name, signedAt: consents[l.id].signed_at }
       : null,

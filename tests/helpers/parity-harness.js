@@ -20,6 +20,13 @@ export function setup(label = 'parity') {
   process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), `htm-${label}-`))
   process.env.AI_MODE = 'off'
   process.env.NODE_ENV = 'test'
+  // SMS config must come from the test, never from the developer's .env —
+  // server/env.js only fills keys that are undefined, so '' pins them empty.
+  for (const key of [
+    'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER',
+    'TWILIO_PHONE_NUMBER', 'TWILIO_MESSAGING_SERVICE_SID',
+    'SMSFLOW_API_KEY', 'SMSFLOW_FROM_NUMBER', 'SMS_ALLOWED_EMAILS',
+  ]) process.env[key] = ''
   return process.env.DATA_DIR
 }
 

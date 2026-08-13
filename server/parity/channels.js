@@ -1,15 +1,26 @@
-// Channel accounts — SMS (Twilio) senders for the workspace.
+// Channel accounts — SMS (SMSFlow) senders for the workspace.
 // Settings → Connections. Distinct from email mailboxes.
+//
+// SMS is a gated feature: when SMS_ALLOWED_EMAILS is set, only listed
+// workspace owners can connect senders or send.
 
 import { db } from '../db.js'
-import { env, twilioEnvConfigured } from '../env.js'
+import { env, twilioEnvConfigured, smsflowEnvConfigured } from '../env.js'
 import { sealSecret } from '../secrets.js'
 import {
-  handler, invalid, notFound, str, int, bool, owned, audit,
+  handler, invalid, notFound, forbidden, str, int, bool, owned, audit,
 } from './http.js'
 import { toE164 } from '../channels/phone.js'
-import { twilioSendSms, twilioConfigured } from '../channels/twilio.js'
-import { ensureEnvSmsAccount } from '../channels/send.js'
+import { smsflowWebhookUrl, SMSFLOW_SID } from '../channels/smsflow.js'
+import {
+  ensureEnvSmsAccount, smsAllowedForWorkspace, smsProviderConfigured, smsProviderSend,
+} from '../channels/send.js'
+
+function webhookUrlFor(row) {
+  if (row.provider === 'smsflow') return smsflowWebhookUrl(row)
+  const base = String(env.APP_URL || '').replace(/\/$/, '')
+  return `${base}/api/hooks/twilio/sms`
+}
 
 function publicAccount(row) {
   if (!row) return null
@@ -29,46 +40,67 @@ function publicAccount(row) {
     lastSyncAt: row.last_sync_at || '',
     isSuspended: Boolean(row.is_suspended),
     createdAt: row.created_at,
-    webhookUrl: `${String(env.APP_URL || '').replace(/\/$/, '')}/api/hooks/twilio/sms`,
+    webhookUrl: webhookUrlFor(row),
+  }
+}
+
+function requireSmsAllowed(wsId) {
+  if (!smsAllowedForWorkspace(wsId)) {
+    throw forbidden('SMS is not enabled for this workspace — ask the operator to add you to the SMS allowlist')
   }
 }
 
 export function register(api) {
   api.get('/channel-accounts', handler((req) => {
-    // Prefer .env Twilio when present so Settings shows the live sender.
+    // Prefer .env SMSFlow when present so Settings shows the live sender.
+    // (Self-gated: does nothing for workspaces off the SMS allowlist.)
     ensureEnvSmsAccount(req.wsId)
     const channel = str(req.query, 'channel', { max: 20, fallback: '' })
     let rows = db.prepare(
       `SELECT * FROM channel_accounts WHERE workspace_id = ? AND COALESCE(deleted_at, '') = '' ORDER BY id`
     ).all(req.wsId)
     if (channel) rows = rows.filter((r) => r.channel === channel)
+    const smsflowRow = rows.find((r) => r.provider === 'smsflow')
     return {
       accounts: rows.map(publicAccount),
+      webhookUrl: smsflowWebhookUrl(smsflowRow),
+      smsAllowed: smsAllowedForWorkspace(req.wsId),
       twilioEnvConfigured: twilioEnvConfigured(),
+      smsflowEnvConfigured: smsflowEnvConfigured(),
     }
   }))
 
   api.post('/channel-accounts', handler((req) => {
+    requireSmsAllowed(req.wsId)
     const channel = str(req.body, 'channel', { required: true, max: 20 }).toLowerCase()
     if (channel !== 'sms') throw invalid('channel', 'Only sms is supported in this release')
-    const provider = str(req.body, 'provider', { max: 40, fallback: 'twilio' }).toLowerCase()
-    if (!['twilio', 'sandbox'].includes(provider)) {
-      throw invalid('provider', 'provider must be twilio or sandbox')
+    const provider = str(req.body, 'provider', { max: 40, fallback: 'smsflow' }).toLowerCase()
+    if (!['smsflow', 'twilio', 'sandbox'].includes(provider)) {
+      throw invalid('provider', 'provider must be smsflow, twilio or sandbox')
     }
 
     const displayName = str(req.body, 'display_name', { max: 120, fallback: '' })
     let phoneNumber = str(req.body, 'phone_number', { max: 32, fallback: '' })
     if (phoneNumber) {
-      const e164 = toE164(phoneNumber)
-      if (!e164) throw invalid('phone_number', 'phone_number must be a valid E.164 number')
-      phoneNumber = e164
+      if (/^\+?\d[\d\s()-]{7,}$/.test(phoneNumber)) {
+        const e164 = toE164(phoneNumber)
+        if (!e164) throw invalid('phone_number', 'phone_number must be a valid E.164 number')
+        phoneNumber = e164
+      }
     }
     const messagingServiceSid = str(req.body, 'messaging_service_sid', { max: 64, fallback: '' })
-    const accountSid = str(req.body, 'account_sid', { max: 64, fallback: env.TWILIO_ACCOUNT_SID })
-    const authToken = str(req.body, 'auth_token', { max: 128, fallback: env.TWILIO_AUTH_TOKEN })
+    // account_sid / auth_token: SMSFlow only needs the API key (auth_token).
+    const accountSid = str(req.body, 'account_sid', {
+      max: 128, fallback: provider === 'smsflow' ? SMSFLOW_SID : env.TWILIO_ACCOUNT_SID,
+    })
+    const authToken = str(req.body, 'auth_token', {
+      max: 128, fallback: provider === 'smsflow' ? env.SMSFLOW_API_KEY : env.TWILIO_AUTH_TOKEN,
+    })
     const dailyLimit = int(req.body, 'daily_limit', { min: 1, max: 10_000, fallback: 50 })
 
-    if (provider === 'twilio') {
+    if (provider === 'smsflow') {
+      if (!authToken) throw invalid('auth_token', 'SMSFlow API key is required')
+    } else if (provider === 'twilio') {
       if (!phoneNumber && !messagingServiceSid) {
         throw invalid('phone_number', 'Provide phone_number or messaging_service_sid')
       }
@@ -108,7 +140,7 @@ export function register(api) {
     if (req.body.messaging_service_sid !== undefined) {
       patch.messaging_service_sid = str(req.body, 'messaging_service_sid', { max: 64 })
     }
-    if (req.body.account_sid !== undefined) patch.account_sid = str(req.body, 'account_sid', { max: 64 })
+    if (req.body.account_sid !== undefined) patch.account_sid = str(req.body, 'account_sid', { max: 128 })
     if (req.body.auth_token !== undefined) patch.auth_token = sealSecret(str(req.body, 'auth_token', { max: 128 }))
     if (req.body.daily_limit !== undefined) patch.daily_limit = int(req.body, 'daily_limit', { min: 1, max: 10_000 })
     if (req.body.is_suspended !== undefined) {
@@ -133,15 +165,16 @@ export function register(api) {
 
   // Test send to your own phone — does not require lead opt-in (operator test).
   api.post('/channel-accounts/:id/test-send', handler(async (req) => {
+    requireSmsAllowed(req.wsId)
     const row = owned('channel_accounts', req.params.id, req.wsId, 'channel account')
     if (row.deleted_at || row.channel !== 'sms') throw notFound('channel account')
     requireConfirmation(req.body, 'send this test SMS')
     const to = toE164(str(req.body, 'to', { required: true, max: 32 }))
     if (!to) throw invalid('to', 'to must be a valid phone number')
     const body = str(req.body, 'body', { max: 1600, fallback: 'Harry SMS test — reply STOP to opt out.' })
-    if (!twilioConfigured(row)) throw invalid('account', 'SMS account is not fully configured')
+    if (!smsProviderConfigured(row)) throw invalid('account', 'SMS account is not fully configured')
 
-    const result = await twilioSendSms(row, { to, body })
+    const result = await smsProviderSend(row, { to, body })
     db.prepare(
       `INSERT INTO messages
          (user_id, campaign_id, lead_id, channel_account_id, channel, direction,

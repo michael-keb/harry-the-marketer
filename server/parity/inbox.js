@@ -64,6 +64,8 @@ import { db } from '../db.js'
 import { blockMatch, suppressionFor } from '../suppression.js'
 import { campaignCtx, routeReply } from '../engine.js'
 import { sendEmail } from '../mailer.js'
+import { sendManualSms, SuppressedError } from '../channels/send.js'
+import { toE164 } from '../channels/phone.js'
 import { pullWorkspaceInbound } from '../upkeep.js'
 import {
   HttpError, invalid, notFound, handler,
@@ -438,6 +440,7 @@ SELECT
   CASE WHEN t.last_outbound_id > 0 THEN t.last_outbound_id ELSE t.last_message_id END AS sent_key,
   lm.subject AS last_subject, lm.body AS last_body, lm.created_at AS last_at,
   lm.direction AS last_direction, lm.from_email AS last_from, lm.to_email AS last_to,
+  lm.channel AS last_channel,
   im.created_at AS last_reply_at, im.intent AS last_intent,
   im.importance_reasons AS last_importance_reasons,
   om.created_at AS last_sent_at,
@@ -551,6 +554,7 @@ function shapeThread(row, at) {
     rowType: 'thread',
     id: row.id,
     threadKey: row.tkey,
+    channel: row.last_channel || 'email',
     campaign_lead_map_id: row.campaign_lead_id || null,
     campaignId: row.campaign_id || null,
     campaign: row.campaign_id ? { id: row.campaign_id, name: row.campaign_name, status: row.campaign_status } : null,
@@ -875,9 +879,29 @@ export function register(api) {
     const cl = campaign && lead
       ? db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(campaign.id, lead.id)
       : null
+    // An SMS thread carries the sender it speaks through, so the composer can
+    // name the number a reply leaves from.
+    const channel = messages.some((m) => m.channel === 'sms') ? 'sms' : 'email'
+    const accountRow = channel === 'sms'
+      ? (() => {
+        const withAccount = messages.find((m) => m.channel_account_id)
+        return withAccount
+          ? db.prepare('SELECT id, provider, display_name, phone_number, status, is_suspended FROM channel_accounts WHERE id = ? AND workspace_id = ?')
+            .get(withAccount.channel_account_id, req.wsId)
+          : null
+      })()
+      : null
     return {
       id: anchorId,
       threadKey: tkey,
+      channel,
+      smsAccount: accountRow ? {
+        id: accountRow.id,
+        provider: accountRow.provider,
+        displayName: accountRow.display_name || '',
+        phoneNumber: accountRow.phone_number || '',
+        sendable: accountRow.status === 'connected' && !accountRow.is_suspended,
+      } : null,
       ...threadState(messages),
       lead,
       campaign: campaign ? { id: campaign.id, name: campaign.name, status: campaign.status } : null,
@@ -886,6 +910,7 @@ export function register(api) {
       messages: messages.map((m) => ({
         id: m.id,
         direction: m.direction,
+        channel: m.channel || 'email',
         subject: m.subject,
         body: m.body,
         from_email: m.from_email,
@@ -1177,9 +1202,61 @@ export function register(api) {
 
   api.post('/inbox/threads/:id/reply', handler(async (req) => {
     refuseBypass(req.body)
-    const { messages } = resolveThread(req.wsId, req.params.id)
+    const { tkey, messages } = resolveThread(req.wsId, req.params.id)
     const body = str(req.body, 'body', { required: true, max: 50000 })
     if (req.body?.confirm !== true) throw invalid('confirm', 'Nothing sends without your OK — send confirm: true')
+
+    // ---- SMS thread: the reply is a text, sent through the thread's own
+    // channel account. No subject, no copies, no scheduling — a text is a text.
+    if (messages.some((m) => m.channel === 'sms')) {
+      if (body.length > 1600) throw invalid('body', 'An SMS reply can be at most 1600 characters')
+      for (const field of ['cc', 'bcc', 'subject', 'sendAt']) {
+        if (req.body?.[field] !== undefined && req.body[field] !== '' && req.body[field] !== null) {
+          throw invalid(field, `${field} does not apply to an SMS reply`)
+        }
+      }
+      refuseAttachments(req.body)
+      const smsAnchor = messages.find((m) => m.channel_account_id) || messages[0]
+      const account = smsAnchor.channel_account_id
+        ? db.prepare('SELECT * FROM channel_accounts WHERE id = ? AND workspace_id = ?')
+          .get(smsAnchor.channel_account_id, req.wsId)
+        : null
+      if (!account || account.deleted_at) {
+        throw invalid('id', 'This conversation has no connected SMS sender — reconnect one under Settings → Connections')
+      }
+      // The other party's number: the thread key is `sms:{account}:{phone}`,
+      // written by both send paths and the webhook alike.
+      const keyPhone = tkey.startsWith('sms:') ? tkey.split(':')[2] : ''
+      const lastIn = [...messages].reverse().find((m) => m.direction === 'in')
+      const to = toE164(keyPhone || lastIn?.from_email || '')
+      if (!to) throw invalid('id', 'This conversation has no phone number to reply to')
+      const smsLead = smsAnchor.lead_id
+        ? db.prepare('SELECT * FROM leads WHERE id = ? AND user_id = ?').get(smsAnchor.lead_id, req.wsId)
+        : null
+
+      let sent
+      try {
+        sent = await sendManualSms({
+          wsId: req.wsId,
+          account,
+          lead: smsLead,
+          to,
+          body,
+          threadId: smsAnchor.thread_id || '',
+          campaignId: smsAnchor.campaign_id || null,
+        })
+      } catch (err) {
+        // A refusal is a 422 naming the conversation, not a crash.
+        if (err instanceof SuppressedError) throw invalid('id', err.message)
+        throw err
+      }
+      audit(req, {
+        campaignId: smsAnchor.campaign_id, leadId: smsAnchor.lead_id,
+        type: 'manual_reply', detail: `sms → ${to} by ${req.user.email}`,
+      })
+      meter('inbox.reply', 0, true, `sms:${account.phone_number || account.id}`)
+      return { ok: true, scheduled: false, channel: 'sms', messageId: sent.messageId, threadId: sent.threadId, cc: [], bcc: [] }
+    }
     // reply.md asks for attachments. This route used to read no such field, so
     // a composer that sent one got a 200 and an email with nothing attached —
     // the same shape as the cc/bcc defect: accepted, echoed nowhere, never

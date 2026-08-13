@@ -16,7 +16,7 @@ import { api } from '../api.js'
 import { Badge, useToast } from '../ui.jsx'
 import { Banner, Marker, Menu, SkeletonRows, absolute, leadName, relative } from './common.jsx'
 import { SnoozeDialog, snoozeItems } from './ThreadList.jsx'
-import { ReplyComposer, ForwardDialog } from './Composer.jsx'
+import { ReplyComposer, SmsReplyComposer, ForwardDialog } from './Composer.jsx'
 import { AssigneeControl, BlockDomainDialog, CategoryControl, RevenueField, ResumeControl, SubsequenceDialog } from './Triage.jsx'
 import { MessageStatusLine, ThreadPanels } from './ThreadPanels.jsx'
 import MessageTrail from './MessageTrail.jsx'
@@ -67,8 +67,11 @@ export default function ThreadView({ threadId, hint, refs, onChanged, announce, 
     } finally { setBusy(false) }
   }
 
-  const subject = thread?.messages?.[thread.messages.length - 1]?.subject || hint?.last_message?.subject || hint?.subject || 'Conversation'
+  const isSms = (thread?.channel || hint?.channel) === 'sms'
   const who = leadName(thread?.lead || hint?.lead)
+  const subject = isSms
+    ? `Texts with ${who}`
+    : thread?.messages?.[thread.messages.length - 1]?.subject || hint?.last_message?.subject || hint?.subject || 'Conversation'
 
   if (error) return <div className="p-5"><Banner error={error} onRetry={load} /></div>
 
@@ -104,6 +107,7 @@ export default function ThreadView({ threadId, hint, refs, onChanged, announce, 
           {thread.lead?.title ? `, ${thread.lead.title}` : ''}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {isSms && <Marker tone="warn">SMS{thread.smsAccount?.phoneNumber ? ` · via ${thread.smsAccount.phoneNumber}` : ''}</Marker>}
           <Marker tone={thread.is_read ? 'plain' : 'good'}>{thread.is_read ? 'Read' : 'Unread'}</Marker>
           {thread.is_important && <Marker tone="warn">Important</Marker>}
           {thread.is_archived && <Marker>Archived</Marker>}
@@ -223,7 +227,22 @@ export default function ThreadView({ threadId, hint, refs, onChanged, announce, 
           />
 
           {/* ---- reply ---------------------------------------------------- */}
-          {thread.lead && thread.campaign ? (
+          {isSms ? (
+            thread.smsAccount?.sendable ? (
+              <SmsReplyComposer
+                thread={thread}
+                onSent={() => {
+                  announce?.('Text reply sent')
+                  toast('Text sent')
+                  load(); onChanged?.()
+                }}
+              />
+            ) : (
+              <p className="text-xs text-slate-500">
+                This text conversation has no connected SMS sender — reconnect one under Settings → Connections.
+              </p>
+            )
+          ) : thread.lead && thread.campaign ? (
             <ReplyComposer
               thread={thread}
               onSent={(result) => {
