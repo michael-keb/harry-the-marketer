@@ -143,3 +143,14 @@ export function seedTag(db, wsId, name = 'VIP', appliesTo = 'lead') {
     .run(wsId, appliesTo, name, '#8b5cf6')
   return db.prepare('SELECT * FROM tags WHERE workspace_id = ? AND applies_to = ? AND name = ?').get(wsId, appliesTo, name)
 }
+
+// A timezone where it is midday right now. Quiet hours can never be widened
+// past the QUIET_FLOOR in server/send-rules.js, so a test that pins a fixed
+// timezone (say UTC) and wants a send to go through fails whenever the suite
+// runs at night in that zone. Local noon is inside every window a test can
+// legally configure, whatever the wall clock says.
+export function daytimeTimezone(at = new Date()) {
+  const offset = 12 - at.getUTCHours()
+  // IANA Etc/GMT names are sign-inverted: Etc/GMT-10 means UTC+10.
+  return offset === 0 ? 'Etc/GMT' : offset > 0 ? `Etc/GMT-${offset}` : `Etc/GMT+${-offset}`
+}

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { daytimeTimezone } from './helpers/parity-harness.js'
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'htm-followup-'))
 process.env.AI_MODE = 'off'
@@ -173,8 +174,9 @@ test('the send gate refuses once the warm-up count is spent, and says so', async
   // A 24-hour, every-day window, so the recipient-quiet-hours gate cannot fire
   // first and mask the one under test. Whichever gate is hit depends on the
   // hour the suite happens to run at otherwise, which is not a property of the
-  // cap.
-  db.prepare("UPDATE users SET send_from = '00:00', send_to = '23:59', send_days = 'everyday', send_timezone = 'UTC' WHERE id = 1").run()
+  // cap. Quiet hours themselves cannot be widened (QUIET_FLOOR), so the
+  // timezone is one where it is midday right now rather than a fixed zone.
+  db.prepare("UPDATE users SET send_from = '00:00', send_to = '23:59', send_days = 'everyday', send_timezone = ? WHERE id = 1").run(daytimeTimezone())
   const owner = db.prepare('SELECT * FROM users WHERE id = 1').get()
   const today = new Date().toISOString().slice(0, 10)
   db.prepare(

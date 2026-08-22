@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { setup, seedUser, seedLead, seedCampaign, seedMailbox, mount } from './helpers/parity-harness.js'
+import { setup, seedUser, seedLead, seedCampaign, seedMailbox, mount, daytimeTimezone } from './helpers/parity-harness.js'
 
 setup('channels-sms')
 
@@ -175,7 +175,9 @@ test('engine sends an SMS step when opt-in and sandbox account exist', async () 
   // A 24/7 window so the test asserts the SMS-send behaviour, not the wall clock:
   // SMS now correctly honours the sending window (a real fix — night-time SMS
   // breaches quiet-hours rules), so without this the run flakes outside 08:30–17:30.
-  db.prepare("UPDATE users SET send_from = '00:00', send_to = '23:59', send_days = 'everyday', send_timezone = 'UTC' WHERE id = ?").run(owner.id)
+  // The window still gets clamped to quiet hours, which cannot be widened
+  // (QUIET_FLOOR), so the timezone is one where it is midday right now.
+  db.prepare("UPDATE users SET send_from = '00:00', send_to = '23:59', send_days = 'everyday', send_timezone = ? WHERE id = ?").run(daytimeTimezone(), owner.id)
 
   await tick()
 
