@@ -390,6 +390,17 @@ function windowOk(window) {
   return { ok: true }
 }
 
+// Which channels a valid playbook actually sends on. Empty diagrams (no Send
+// nodes yet) report neither — callers fall back to the campaign's create-time
+// mode so a brand-new email campaign still asks for a mailbox.
+export function playbookChannels(graph) {
+  const sendNodes = Object.values(graph?.nodes || {}).filter((n) => n.type === 'send')
+  const email = sendNodes.some((n) => String(n.channel || 'email').toLowerCase() === 'email')
+  const sms = sendNodes.some((n) => String(n.channel || '').toLowerCase() === 'sms')
+  const mode = email && sms ? 'multi' : sms && !email ? 'sms' : 'email'
+  return { email, sms, mode }
+}
+
 export function collectTimingIssues(graph) {
   const issues = []
   for (const n of Object.values(graph?.nodes || {})) {

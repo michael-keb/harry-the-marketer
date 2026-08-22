@@ -37,13 +37,21 @@ import { MERMAID_BRAND_CONFIG } from '../mermaid-theme.js'
 mermaid.initialize(MERMAID_BRAND_CONFIG)
 
 const CHEATSHEET = `S([Start])                     one Start node
-A[Send: <what to say>]         the agent writes & sends this email
+A[Send: <what to say>]         email — bare Send: is email
+A[Send email: <what to say>]   same as Send:, spelled out
+B[Send sms: <what to say>]     SMS — needs an SMSFlow sender attached
 A -- reply: interested --> B   branch on the reply's classified intent
 A -- reply --> B               any reply (catch-all)
 A -- no reply 3d --> C         timeout if they never answer
 W2[Wait: 30d]                  pause, then continue
 D{Reply?}                      optional decision diamond
-Won([Won: call booked])        terminal — also Lost / Unsubscribed`
+Won([Won: call booked])        terminal — also Lost / Unsubscribed
+
+Mixed email + SMS example:
+  S([Start]) --> A[Send email: Intro and ask for 15 minutes]
+  A -- no reply 2d --> B[Send sms: Short nudge with booking link]
+  B -- no reply 3d --> Lost([Lost: no reply])
+  A -- positive --> Won([Won: call booked])`
 
 const TABS = [
   { id: 'playbook', label: 'Playbook' },
@@ -276,8 +284,16 @@ export default function CampaignDetail({ user }) {
   }
 
   const channelMode = detail?.channelMode || campaign?.channelMode || 'email'
-  const usesEmail = channelMode === 'email' || channelMode === 'multi'
-  const usesSms = channelMode === 'sms' || channelMode === 'multi'
+  const draftChannels = validation?.channels
+  const savedChannels = detail?.playbookChannels
+  const usesSms = Boolean(
+    draftChannels?.sms || savedChannels?.sms || channelMode === 'sms' || channelMode === 'multi'
+  )
+  const usesEmail = Boolean(
+    draftChannels?.email || savedChannels?.email || channelMode === 'email' || channelMode === 'multi'
+    || !usesSms
+  )
+  const smsSenderCount = Number(detail?.smsSenderCount || 0)
 
   const goTo = (field) => {
     if (field === 'mailboxes' || field === 'sms_accounts') setTab('mailboxes')
@@ -285,7 +301,7 @@ export default function CampaignDetail({ user }) {
     else setTab('playbook')
   }
 
-  const modeLabel = channelMode === 'sms' ? 'SMS' : channelMode === 'multi' ? 'Email + SMS' : 'Email'
+  const modeLabel = usesEmail && usesSms ? 'Email + SMS' : usesSms ? 'SMS' : 'Email'
 
   return (
     <div className="space-y-5">
@@ -373,6 +389,15 @@ export default function CampaignDetail({ user }) {
           You have no mailboxes yet — <Link className="underline" to="/app/connections?area=email">connect Gmail or add a sandbox mailbox</Link> before launching.
         </div>
       )}
+      {usesSms && smsSenderCount === 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          This playbook sends SMS — attach an SMSFlow sender under{' '}
+          <button type="button" className="underline hover:text-amber-900" onClick={() => setTab('mailboxes')}>Sending from</button>
+          {', or '}
+          <Link className="underline" to="/app/connections?area=messages">connect SMS in Connections</Link>
+          {' '}first.
+        </div>
+      )}
       {/* Why a running campaign is quiet right now. Without this, waiting for a
           sending window looks identical to being broken.
           Shown for every gate, not only the clock: a plan stopped by a hold, a
@@ -391,7 +416,7 @@ export default function CampaignDetail({ user }) {
         </div>
       )}
 
-      <LaunchChecklist blockers={detail.blockers} onGoTo={goTo} channelMode={channelMode} />
+      <LaunchChecklist blockers={detail.blockers} onGoTo={goTo} channelMode={channelMode} channels={savedChannels} />
 
       <MetricsStrip campaignId={id} onOpenSetting={() => setTab('settings')} />
 
@@ -469,6 +494,21 @@ export default function CampaignDetail({ user }) {
               )}
 
               <ValidationPanel validation={validation} />
+
+              {usesSms && (
+                <div className="card border-sky-200 bg-sky-50 p-4" role="status">
+                  <p className="text-sm text-sky-900">
+                    This playbook sends <span className="font-semibold">SMS</span>
+                    {usesEmail ? ' as well as email' : ''}.
+                    {smsSenderCount
+                      ? ' An SMSFlow sender is already attached under Sending from.'
+                      : <> Attach an SMSFlow sender under{' '}
+                        <button type="button" className="underline hover:text-sky-950" onClick={() => setTab('mailboxes')}>Sending from</button>
+                        {' '}before this campaign can text anyone.
+                      </>}
+                  </p>
+                </div>
+              )}
 
               {strandedNodes.length > 0 && (
                 <div className="card border-amber-200 bg-amber-50 p-4" role="status">
@@ -564,8 +604,10 @@ export default function CampaignDetail({ user }) {
       {showCheatsheet && (
         <Modal title="Playbook syntax" onClose={() => setShowCheatsheet(false)} wide>
           <p className="mb-3 text-sm text-slate-600">
-            The playbook is a standard Mermaid flowchart. The agent composes each <span className="font-mono text-accent-700">Send:</span> email
-            from your instruction, the lead's data, your business context, and the thread so far — then waits, classifies replies, and follows the matching edge.
+            The playbook is a standard Mermaid flowchart. Bare <span className="font-mono text-accent-700">Send:</span> is email;
+            use <span className="font-mono text-accent-700">Send sms:</span> for a text. Mixed playbooks are fine — attach an
+            SMSFlow sender under Sending from when any step texts. The agent composes each send from your instruction,
+            the lead's data, your business context, and the thread so far.
           </p>
           <pre className="overflow-x-auto whitespace-pre rounded-lg bg-white p-4 font-mono text-[13px] text-slate-700">{CHEATSHEET}</pre>
           <p className="mt-3 text-xs text-slate-500">
@@ -648,13 +690,23 @@ export default function CampaignDetail({ user }) {
 
 function ValidationPanel({ validation }) {
   if (!validation) return null
-  const { valid, errors = [], warnings = [] } = validation
+  const { valid, errors = [], warnings = [], channels } = validation
+  const channelNote = channels?.email && channels?.sms
+    ? 'Sends email and SMS'
+    : channels?.sms
+      ? 'Sends SMS'
+      : channels?.email
+        ? 'Sends email'
+        : ''
   return (
     <div className={`card p-4 ${valid ? '' : 'border-red-200'}`}>
-      <div className="flex items-center gap-2 text-sm font-semibold">
+      <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
         {valid
           ? <span className="text-accent-600">Playbook is valid</span>
           : <span className="text-red-600">{errors.length} error{errors.length === 1 ? '' : 's'} — fix before launch</span>}
+        {valid && channelNote && (
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11.5px] font-medium text-slate-600">{channelNote}</span>
+        )}
       </div>
       {errors.length > 0 && (
         <ul className="mt-2 space-y-1 text-sm text-red-700">

@@ -143,6 +143,49 @@ test('update-status: START lists every unmet condition at once, and STOPPED is t
   assert.match(restart.body.message, /Duplicate it/)
 })
 
+const MIXED_PLAYBOOK = `flowchart TD
+    S([Start]) --> A[Send email: short intro]
+    A -- reply: interested --> W([Won: call booked])
+    A -- no reply 2d --> B[Send sms: short nudge]
+    B -- reply --> W
+    B -- no reply 3d --> L([Lost: no response])
+`
+
+test('mixed email+SMS playbook on an email campaign asks for an SMS sender, not a mode switch', async () => {
+  const { campaign, lead } = readyCampaign('mixed-channels')
+  db.prepare('UPDATE leads SET phone = ? WHERE id = ?').run('+61400000444', lead.id)
+  const saved = await client.put(`/api/campaigns/${campaign.id}/sequence`, { mermaid: MIXED_PLAYBOOK })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.body.channelMode, 'multi')
+  assert.deepEqual(saved.body.channels, { email: true, sms: true, mode: 'multi' })
+  assert.equal(
+    db.prepare('SELECT channel_mode FROM campaigns WHERE id = ?').get(campaign.id).channel_mode,
+    'multi',
+  )
+
+  const blocked = await client.put(`/api/campaigns/${campaign.id}/status`, { status: 'START' })
+  assert.equal(blocked.status, 422)
+  const fields = blocked.body.blockers.map((b) => b.field)
+  assert.ok(fields.includes('sms_accounts'))
+  assert.equal(fields.includes('playbook'), false)
+  assert.match(
+    blocked.body.blockers.find((b) => b.field === 'sms_accounts').message,
+    /SMSFlow/,
+  )
+
+  const detail = await client.get(`/api/campaigns/${campaign.id}/detail`)
+  assert.equal(detail.status, 200)
+  assert.deepEqual(detail.body.playbookChannels, { email: true, sms: true, mode: 'multi' })
+  assert.equal(detail.body.channelMode, 'multi')
+
+  const steps = await client.get(`/api/campaigns/${campaign.id}/steps`)
+  assert.equal(steps.status, 200)
+  assert.deepEqual(steps.body.channels, { email: true, sms: true, mode: 'multi' })
+  const send = Object.fromEntries(steps.body.steps.filter((s) => s.type === 'send').map((s) => [s.nodeId, s.channel]))
+  assert.equal(send.A, 'email')
+  assert.equal(send.B, 'sms')
+})
+
 // ------------------------------------------------------ update-sequences ----
 
 test('update-sequences rejects an invalid diagram with the validator message', async () => {

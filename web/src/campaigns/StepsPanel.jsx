@@ -63,16 +63,21 @@ function branchSummary(branch) {
   return branch.label || 'Then'
 }
 
+function sendChannel(step) {
+  return String(step.channel || 'email').toLowerCase() === 'sms' ? 'sms' : 'email'
+}
+
 function StepCard({ step, selected, onSelect, onTestSend }) {
   const kind = stepKind(step)
   const selectedCls = selected ? 'border-accent-500 ring-2 ring-accent-500/20 shadow-sm' : 'border-slate-200 hover:border-slate-300'
+  const viaSms = step.type === 'send' && sendChannel(step) === 'sms'
 
   return (
     <article
       className={`relative overflow-hidden rounded-xl border bg-white transition-colors ${selectedCls}`}
       aria-label={`Step ${step.position + 1}: ${step.label}`}
     >
-      <div className={`absolute inset-y-0 left-0 w-1 ${kind.rail}`} aria-hidden />
+      <div className={`absolute inset-y-0 left-0 w-1 ${viaSms ? 'bg-emerald-500' : kind.rail}`} aria-hidden />
 
       <div className="pl-4 pr-4 py-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -90,8 +95,12 @@ function StepCard({ step, selected, onSelect, onTestSend }) {
                 {kind.label}
               </span>
               {step.type === 'send' && (
-                <span className="inline-flex items-center rounded-full bg-slate-50 px-2 py-0.5 text-[11.5px] font-medium text-slate-700 ring-1 ring-inset ring-slate-200">
-                  {String(step.channel || 'email').toLowerCase() === 'sms' ? 'SMS' : 'Email'}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px] font-semibold ring-1 ring-inset ${
+                  viaSms
+                    ? 'bg-emerald-50 text-emerald-800 ring-emerald-200'
+                    : 'bg-sky-50 text-sky-800 ring-sky-200'
+                }`}>
+                  {viaSms ? 'SMS' : 'Email'}
                 </span>
               )}
               <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] font-medium text-accent-700">
@@ -110,7 +119,7 @@ function StepCard({ step, selected, onSelect, onTestSend }) {
             )}
 
             {step.type === 'terminal' && (
-              <p className="mt-1.5 text-sm text-slate-500">This path ends here — no further emails.</p>
+              <p className="mt-1.5 text-sm text-slate-500">This path ends here — no further messages.</p>
             )}
           </button>
 
@@ -151,14 +160,14 @@ function StepCard({ step, selected, onSelect, onTestSend }) {
           <details className="group mt-3 rounded-lg border border-slate-200 bg-slate-50/60">
             <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium text-slate-600 marker:content-none [&::-webkit-details-marker]:hidden">
               <span className="flex items-center justify-between gap-2">
-                Sample email copy
+                Sample {viaSms ? 'SMS' : 'email'} copy
                 <span className="text-xs font-normal text-slate-400 group-open:hidden">Show</span>
                 <span className="hidden text-xs font-normal text-slate-400 group-open:inline">Hide</span>
               </span>
             </summary>
             <section className="border-t border-slate-200 px-3 py-2.5" aria-label={`Sample copy for step ${step.nodeId}`}>
               <p className="text-xs text-slate-500">
-                An example for a stand-in lead — the real email is written at send time.
+                An example for a stand-in lead — the real {viaSms ? 'text' : 'email'} is written at send time.
               </p>
               <p className="mt-2 text-sm font-medium text-slate-700">{step.sample.subject}</p>
               <pre className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-slate-600">
@@ -204,6 +213,17 @@ export function StepsList({ campaignId, onTestSend, selectedNode, onSelectNode }
       ) : !data?.steps?.length ? (
         <p className="text-sm text-slate-500">No steps yet — draw a Send node in the diagram, or use Generate with AI.</p>
       ) : (
+        <>
+          {data.channels?.email && data.channels?.sms && (
+            <p className="mb-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+              This playbook mixes <span className="font-semibold">email</span> and <span className="font-semibold">SMS</span> — each send step is labelled. SMS steps need an SMSFlow sender under Sending from.
+            </p>
+          )}
+          {data.channels?.sms && !data.channels?.email && (
+            <p className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+              Every send in this playbook is SMS. Attach an SMSFlow sender under Sending from before launch.
+            </p>
+          )}
         <ol className="relative space-y-0">
           {data.steps.map((s, i) => (
             <li key={s.nodeId} className="relative pb-3 last:pb-0">
@@ -222,6 +242,7 @@ export function StepsList({ campaignId, onTestSend, selectedNode, onSelectNode }
             </li>
           ))}
         </ol>
+        </>
       )}
       {data?.warnings?.length > 0 && (
         <ul className="mt-3 space-y-1 text-xs text-amber-700">
@@ -248,7 +269,7 @@ export function NodePerformance({ nodeStats = [], selectedNode, onSelectNode }) 
             <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
               <th scope="col" className="px-3 py-2.5 font-medium">Node</th>
               <th scope="col" className="px-3 py-2.5 font-medium">Step</th>
-              <th scope="col" className="px-3 py-2.5 text-right font-medium">Emails sent</th>
+              <th scope="col" className="px-3 py-2.5 text-right font-medium">Sends</th>
               <th scope="col" className="px-3 py-2.5 text-right font-medium">Leads here now</th>
             </tr>
           </thead>

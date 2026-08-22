@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parsePlaybook, parseCondition, parseDuration, DEFAULT_PLAYBOOK, nodeIntents } from '../server/playbook.js'
+import { parsePlaybook, parseCondition, parseDuration, DEFAULT_PLAYBOOK, nodeIntents, playbookChannels } from '../server/playbook.js'
 
 test('parseDuration handles units', () => {
   assert.equal(parseDuration('3d'), 3 * 86400e3)
@@ -129,4 +129,27 @@ test('Send sms: sets channel sms; bare Send: stays email', () => {
   assert.equal(g.nodes.A.channel, 'email')
   assert.equal(g.nodes.B.channel, 'sms')
   assert.equal(g.nodes.B.instruction, 'Short nudge')
+})
+
+test('playbookChannels reports mixed, email-only, and SMS-only diagrams', () => {
+  const mixed = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send email: Intro]
+    A -- no reply 2d --> B[Send sms: Short nudge]
+    B --> W([Won])
+  `)
+  assert.deepEqual(playbookChannels(mixed), { email: true, sms: true, mode: 'multi' })
+
+  const emailOnly = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send: Intro]
+    A --> W([Won])
+  `)
+  assert.deepEqual(playbookChannels(emailOnly), { email: true, sms: false, mode: 'email' })
+
+  const smsOnly = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send sms: Nudge]
+    A --> W([Won])
+  `)
+  assert.deepEqual(playbookChannels(smsOnly), { email: false, sms: true, mode: 'sms' })
+
+  assert.deepEqual(playbookChannels({ nodes: {} }), { email: false, sms: false, mode: 'email' })
 })

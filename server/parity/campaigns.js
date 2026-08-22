@@ -40,7 +40,7 @@ function untracked(r, on, reason) {
     ? { ...r, tracked: true, reason: '' }
     : { ...r, value: null, tracked: false, reason }
 }
-import { parsePlaybook, nodeIntents, collectTimingIssues } from '../playbook.js'
+import { parsePlaybook, nodeIntents, collectTimingIssues, playbookChannels } from '../playbook.js'
 import { isNonCommercial, playbookCommercialHit, PURPOSES } from '../purpose.js'
 import { leadStages } from '../stages.js'
 import { dailyCap, remainingToday, isWarmingUp } from '../pacing.js'
@@ -485,38 +485,29 @@ function launchBlockers(campaign) {
       })
     }
   }
-  const sendNodes = graph.valid
-    ? Object.values(graph.nodes).filter((n) => n.type === 'send')
-    : []
-  const hasEmailSend = sendNodes.some((n) => String(n.channel || 'email').toLowerCase() === 'email')
-  const hasSmsSend = sendNodes.some((n) => String(n.channel || '').toLowerCase() === 'sms')
+  const channels = graph.valid ? playbookChannels(graph) : { email: false, sms: false, mode }
+  const hasSends = channels.email || channels.sms
+  // The diagram is the source of truth once it has Send nodes. An empty or
+  // invalid playbook still honours the campaign's create-time mode so a new
+  // email campaign asks for a mailbox (and a new SMS campaign asks for a sender)
+  // before anyone draws a step.
+  const needsEmail = hasSends ? channels.email : (mode === 'email' || mode === 'multi')
+  const needsSms = hasSends ? channels.sms : (mode === 'sms' || mode === 'multi')
+  const hasEmailSend = channels.email
+  const hasSmsSend = channels.sms
 
-  // Playbook channel vs campaign mode (Cedar Pike).
-  if (graph.valid && mode === 'email' && hasSmsSend) {
-    blockers.push({
-      field: 'playbook',
-      message: 'Email-mode campaigns cannot include SMS send steps — switch to multi or remove SMS steps',
-    })
-  }
-  if (graph.valid && mode === 'sms' && hasEmailSend) {
-    blockers.push({
-      field: 'playbook',
-      message: 'SMS-mode campaigns cannot include email send steps — switch to multi or remove email steps',
-    })
-  }
-
-  if (mode === 'email' || mode === 'multi') {
+  if (needsEmail) {
     const mailboxes = db.prepare('SELECT COUNT(*) n FROM campaign_mailboxes WHERE campaign_id = ?').get(campaign.id).n
     if (!mailboxes && !campaign.mailbox_id) {
       blockers.push({ field: 'mailboxes', message: 'Attach a sending mailbox before starting' })
     }
   }
-  if (mode === 'sms' || mode === 'multi') {
+  if (needsSms) {
     const smsAccounts = db.prepare(
       'SELECT COUNT(*) n FROM campaign_channel_accounts WHERE campaign_id = ?'
     ).get(campaign.id).n
     if (!smsAccounts) {
-      blockers.push({ field: 'sms_accounts', message: 'Attach an SMS sender before starting' })
+      blockers.push({ field: 'sms_accounts', message: 'Attach an SMSFlow sender under Sending from before starting' })
     }
   }
   const leads = db.prepare('SELECT COUNT(*) n FROM campaign_leads WHERE campaign_id = ?').get(campaign.id).n
@@ -876,10 +867,16 @@ export function register(api) {
       ? db.prepare('SELECT id, name, status FROM campaigns WHERE id = ? AND user_id = ?').get(c.parent_campaign_id, req.wsId)
       : null
     const children = db.prepare('SELECT id, name, status FROM campaigns WHERE parent_campaign_id = ? AND user_id = ?').all(c.id, req.wsId)
+    const channels = playbookChannels(graph)
+    const smsSenderCount = db.prepare(
+      'SELECT COUNT(*) n FROM campaign_channel_accounts WHERE campaign_id = ?'
+    ).get(c.id).n
     return {
       ...campaignRow(c),
       mermaid: c.mermaid,
-      validation: { valid: graph.valid, errors: graph.errors, warnings: graph.warnings },
+      validation: { valid: graph.valid, errors: graph.errors, warnings: graph.warnings, channels },
+      playbookChannels: channels,
+      smsSenderCount,
       settings: settingsOf(c),
       schedule: scheduleOf(c, owner),
       mailboxes,
@@ -1155,9 +1152,9 @@ export function register(api) {
     // nobody has drawn yet has not failed anything, and telling its owner their
     // playbook is invalid sends them looking for a mistake they have not made.
     if (!String(c.mermaid || '').trim()) {
-      return { steps: [], data: [], errors: [], warnings: [], valid: true, empty: true, startId: null }
+      return { steps: [], data: [], errors: [], warnings: [], valid: true, empty: true, startId: null, channels: { email: false, sms: false, mode: 'email' } }
     }
-    if (!graph.valid) return { steps: [], data: [], errors: graph.errors, warnings: graph.warnings, valid: false, empty: false }
+    if (!graph.valid) return { steps: [], data: [], errors: graph.errors, warnings: graph.warnings, valid: false, empty: false, channels: playbookChannels(graph) }
 
     const withSamples = bool(req.query, 'sample', false)
     const samples = withSamples
@@ -1233,12 +1230,15 @@ export function register(api) {
         email_body: sample?.body ?? null,
         is_sample: Boolean(sample),
         sample_note: sample
-          ? 'An example composed for a representative lead — the email that goes out is written at send time for the real recipient.'
+          ? String(node.channel || 'email').toLowerCase() === 'sms'
+            ? 'An example composed for a representative lead — the text that goes out is written at send time for the real recipient.'
+            : 'An example composed for a representative lead — the email that goes out is written at send time for the real recipient.'
           : '',
       }
     })
     return {
       steps,
+      channels: playbookChannels(graph),
       // The documented envelope over the same array: Send steps only, ordered
       // by their position along the path from Start.
       success: true,
@@ -1375,8 +1375,14 @@ export function register(api) {
       }
     }
 
+    const channels = playbookChannels(graph)
     const result = tx(() => {
-      db.prepare("UPDATE campaigns SET mermaid = ?, updated_at = datetime('now') WHERE id = ?").run(mermaid, c.id)
+      if (campaignHasColumn('channel_mode')) {
+        db.prepare("UPDATE campaigns SET mermaid = ?, channel_mode = ?, updated_at = datetime('now') WHERE id = ?")
+          .run(mermaid, channels.mode, c.id)
+      } else {
+        db.prepare("UPDATE campaigns SET mermaid = ?, updated_at = datetime('now') WHERE id = ?").run(mermaid, c.id)
+      }
       // Leads standing on a step that no longer exists are parked for a human
       // rather than silently restarted — deterministic, and never a resend.
       const live = db.prepare(
@@ -1427,6 +1433,8 @@ export function register(api) {
       remapping: orphaned,
       ...result,
       warnings: graph.warnings,
+      channels,
+      channelMode: channels.mode,
     }
   }))
 

@@ -4,7 +4,7 @@ import { db, logEvent, touch, kvGet } from './db.js'
 import { requireUser, workspace } from './auth.js'
 import { googleConfigured, microsoftConfigured, auth0Configured, devLoginEnabled, env } from './env.js'
 import { telemetryRecent, telemetryStats, telemetryFailures } from './telemetry.js'
-import { parsePlaybook, DEFAULT_PLAYBOOK } from './playbook.js'
+import { parsePlaybook, playbookChannels, DEFAULT_PLAYBOOK } from './playbook.js'
 import { simulateReply, remainingQuota, sendEmail } from './mailer.js'
 import { tick, campaignCtx, routeReply } from './engine.js'
 import { spendStatus } from './ai-spend.js'
@@ -419,7 +419,7 @@ api.get('/campaigns/:id', (req, res) => {
 
   res.json({
     ...campaignSummary(c), mermaid: c.mermaid,
-    validation: { valid: graph.valid, errors: graph.errors, warnings: graph.warnings },
+    validation: { valid: graph.valid, errors: graph.errors, warnings: graph.warnings, channels: playbookChannels(graph) },
     leads, nodeStats, goal: linkedGoal || null,
     sending: sendingStatus(req.wsId, mailbox, c),
   })
@@ -694,7 +694,13 @@ api.delete('/campaigns/:id', (req, res) => {
 // Validate playbook text without saving (live editor feedback).
 api.post('/playbook/validate', (req, res) => {
   const graph = parsePlaybook(String(req.body?.mermaid || ''))
-  res.json({ valid: graph.valid, errors: graph.errors, warnings: graph.warnings, nodes: Object.keys(graph.nodes).length })
+  res.json({
+    valid: graph.valid,
+    errors: graph.errors,
+    warnings: graph.warnings,
+    nodes: Object.keys(graph.nodes).length,
+    channels: playbookChannels(graph),
+  })
 })
 
 // Attach / detach leads.

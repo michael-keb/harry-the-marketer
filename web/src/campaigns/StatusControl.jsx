@@ -22,22 +22,40 @@ import { StateChip, blockersOf, codeOf, messageOf } from './shared.jsx'
 const BLOCKER_FIX = {
   playbook: { label: 'A valid playbook', fix: 'Fix the diagram in the Playbook tab' },
   mailboxes: { label: 'A sending mailbox', fix: 'Attach one in the Sending from panel' },
-  sms_accounts: { label: 'An SMS sender', fix: 'Attach one in the Sending from panel' },
+  sms_accounts: { label: 'An SMSFlow sender', fix: 'Attach one in the Sending from panel' },
   leads: { label: 'At least one lead', fix: 'Attach leads in the Leads tab' },
+  cohort: { label: 'Leads that match this playbook', fix: 'Add missing emails or phone numbers on the Leads tab' },
+  purpose: { label: 'Playbook matches this ask', fix: 'Edit the playbook so it matches the campaign purpose' },
+  email_subject: { label: 'A valid email subject', fix: 'Fix the subject in Settings' },
+  defaults: { label: 'Sending defaults', fix: 'Review Settings' },
 }
 
-function conditionsFor(channelMode = 'email') {
-  if (channelMode === 'sms') return ['playbook', 'sms_accounts', 'leads']
-  if (channelMode === 'multi') return ['playbook', 'mailboxes', 'sms_accounts', 'leads']
-  return ['playbook', 'mailboxes', 'leads']
+function conditionsFor({ channelMode = 'email', channels, blockers = [] } = {}) {
+  const usesSms = Boolean(
+    channels?.sms || channelMode === 'sms' || channelMode === 'multi'
+    || blockers.some((b) => b.field === 'sms_accounts')
+  )
+  const usesEmail = Boolean(
+    channels?.email || channelMode === 'email' || channelMode === 'multi'
+    || blockers.some((b) => b.field === 'mailboxes')
+    || (!usesSms && channelMode !== 'sms')
+  )
+  const conditions = ['playbook']
+  if (usesEmail) conditions.push('mailboxes')
+  if (usesSms) conditions.push('sms_accounts')
+  conditions.push('leads')
+  for (const b of blockers) {
+    if (b?.field && !conditions.includes(b.field)) conditions.push(b.field)
+  }
+  return conditions
 }
 
 // The readiness strip: what is still missing, and where to fix it. It disappears
 // once every condition is met.
-export function LaunchChecklist({ blockers = [], onGoTo, channelMode = 'email' }) {
+export function LaunchChecklist({ blockers = [], onGoTo, channelMode = 'email', channels }) {
   if (!blockers.length) return null
   const unmet = new Map(blockers.map((b) => [b.field, b]))
-  const conditions = conditionsFor(channelMode)
+  const conditions = conditionsFor({ channelMode, channels, blockers })
   return (
     <div className="card border-amber-200 bg-amber-50 p-4" role="status">
       <h3 className="text-sm font-semibold text-amber-800">Not ready to start</h3>
@@ -48,7 +66,7 @@ export function LaunchChecklist({ blockers = [], onGoTo, channelMode = 'email' }
       <ul className="mt-3 space-y-2">
         {conditions.map((field) => {
           const blocker = unmet.get(field)
-          const meta = BLOCKER_FIX[field]
+          const meta = BLOCKER_FIX[field] || { label: blocker?.message || field, fix: 'Review this campaign' }
           return (
             <li key={field} className="flex items-start gap-2 text-sm">
               <span
