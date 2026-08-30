@@ -230,6 +230,7 @@ export default function ThreadView({ threadId, hint, refs, onChanged, announce, 
           {isSms ? (
             thread.smsAccount?.sendable ? (
               <SmsReplyComposer
+                key={thread.threadKey || thread.id}
                 thread={thread}
                 onSent={() => {
                   announce?.('Text reply sent')
@@ -244,6 +245,7 @@ export default function ThreadView({ threadId, hint, refs, onChanged, announce, 
             )
           ) : thread.lead && thread.campaign ? (
             <ReplyComposer
+              key={thread.threadKey || thread.id}
               thread={thread}
               onSent={(result) => {
                 announce?.(result.scheduled ? `Reply queued for ${absolute(result.scheduledAt)}` : 'Reply sent')

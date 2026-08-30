@@ -48,7 +48,17 @@ export default function Campaigns() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [creating, setCreating] = useState(false)
+  const [creating, setCreating] = useState(params.get('new') === '1')
+
+  useEffect(() => {
+    if (params.get('new') !== '1') return
+    setCreating(true)
+    setParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('new')
+      return next
+    }, { replace: true })
+  }, [params, setParams])
 
   const filters = useMemo(
     () => ({ status, q, includeArchived: includeArchived ? 1 : undefined, parentCampaignId: parentCampaignId || undefined }),

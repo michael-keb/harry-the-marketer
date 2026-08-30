@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { Spinner, ErrorState, EmptyState, Icon, timeAgo } from '../ui.jsx'
 import NeedsYou from '../dashboard/NeedsYou.jsx'
+import FirstRunWelcome from '../dashboard/FirstRunWelcome.jsx'
 import { SeriesChart } from './Reports.jsx'
 
 const EVENT_LABELS = {
@@ -20,7 +21,7 @@ const EVENT_LABELS = {
   unsubscribed_link: 'Unsubscribed',
 }
 
-export default function Dashboard() {
+export default function Dashboard({ user }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
 
@@ -36,7 +37,7 @@ export default function Dashboard() {
   if (error) return <ErrorState error={error} onRetry={load} />
   if (!data) return <Spinner label="Loading dashboard…" />
 
-  const { stats, sentByDay, activity, attention, ai, engine } = data
+  const { stats, sentByDay, activity, attention, ai, engine, scope } = data
   // Every one of these is an absolute path under /app. They used to be written
   // as /leads, /inbox and so on, which react-router matched against the public
   // marketing routes and answered with the 404 page — a KPI that reads right
@@ -52,6 +53,17 @@ export default function Dashboard() {
 
   const lastTickMs = engine.lastTick ? Date.parse(engine.lastTick) : null
   const engineHealthy = lastTickMs && Date.now() - lastTickMs < engine.intervalMs * 3
+  const firstRun = stats.leads === 0 && stats.sent === 0
+    && activity.every((e) => e.type === 'signup')
+
+  if (firstRun) {
+    return (
+      <div className="space-y-5">
+        <h1 className="text-3xl font-semibold text-ink-900">Welcome</h1>
+        <FirstRunWelcome planId={user?.billing?.planId} name={user?.name} />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-5">
@@ -112,6 +124,14 @@ export default function Dashboard() {
 
         <section className="card">
           <h2 className="text-sm font-semibold text-slate-700 px-4 pt-4 pb-2">Activity</h2>
+          {/* The one panel the lens cannot cut: workspace events (invites,
+              signups) have no campaign or lead to scope by. The server says so
+              via `scope`, and so does the panel. */}
+          {scope && (
+            <p className="px-4 pb-2 text-[11px] text-slate-500">
+              Workspace-wide — the client lens does not filter activity.
+            </p>
+          )}
           {activity.length === 0 ? (
             <div className="p-4"><EmptyState icon="pulse" title="Nothing yet" hint="Launch a campaign and the agent's every move shows up here." /></div>
           ) : (

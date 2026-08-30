@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leads after enroll · Q1 Cold Outreach · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+  <link rel="stylesheet" href="../follow-ups.css">
+</head>
+<body>
+  <div class="review-bar">
+    <strong>Review 6 / 6</strong>
+    <span>Enrolled leads sit in Nudge with a distinct source label. Remove works the same as any other enrollment — no special lock.</span>
+    <span class="intents">Coral Stoat</span>
+    <nav class="review-nav">
+      <a href="05-campaign-graph-enroll.html">← Prev</a>
+      <a href="../index.html">Index</a>
+    </nav>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="01-reports-follow-ups.html">Reports</a>
+        <a href="04-campaign-threshold.html" class="active">Campaigns</a>
+        <a href="06-leads-after-enroll.html">Leads</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Campaigns / Q1 Cold Outreach / Leads</span>
+        <div class="avatar">MC</div>
+      </header>
+      <div class="content">
+        <h1>Q1 Cold Outreach <span class="badge badge-success">Running</span></h1>
+
+        <div class="tabs" style="margin-top:1rem">
+          <button class="tab" type="button">Playbook</button>
+          <button class="tab" type="button">Schedule</button>
+          <button class="tab active" type="button">Leads</button>
+          <button class="tab" type="button">Settings</button>
+          <button class="tab" type="button">Activity</button>
+        </div>
+
+        <div class="callout" style="margin-top:0.25rem">
+          460 leads enrolled into Nudge from the non-response graph · 30 Aug 2026, 09:41.
+          You can remove any of them the same way you remove a manually added lead.
+        </div>
+
+        <div class="row between" style="margin-top:1rem">
+          <div class="field" style="margin:0;max-width:16rem">
+            <label for="q">Search</label>
+            <input id="q" type="search" value="" placeholder="Name or email">
+          </div>
+          <div class="field" style="margin:0;width:auto">
+            <label for="src">Source</label>
+            <select id="src" style="width:auto">
+              <option>Any source</option>
+              <option selected>Non-response graph</option>
+              <option>Imported</option>
+              <option>Manual</option>
+            </select>
+          </div>
+        </div>
+
+        <table style="margin-top:1rem">
+          <thead>
+            <tr>
+              <th>Lead</th>
+              <th>Stage</th>
+              <th>Source</th>
+              <th>Enrolled</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Priya Sharma<br><span class="caption">priya@northwind.io</span></td>
+              <td>Nudge</td>
+              <td><span class="source-chip">Non-response graph</span></td>
+              <td>Just now</td>
+              <td><button class="btn btn-sm" type="button" data-open="remove-priya">Remove</button></td>
+            </tr>
+            <tr>
+              <td>Jordan Blake<br><span class="caption">jordan@fieldkit.com</span></td>
+              <td>Nudge</td>
+              <td><span class="source-chip">Non-response graph</span></td>
+              <td>Just now</td>
+              <td><button class="btn btn-sm" type="button" data-open="remove-priya">Remove</button></td>
+            </tr>
+            <tr>
+              <td>Chris Adeyemi<br><span class="caption">chris@northline.io</span></td>
+              <td>Nudge</td>
+              <td><span class="source-chip">Non-response graph</span></td>
+              <td>Just now</td>
+              <td><button class="btn btn-sm" type="button">Remove</button></td>
+            </tr>
+            <tr>
+              <td>Maya Voss<br><span class="caption">maya@kindling.co</span></td>
+              <td>Intro</td>
+              <td><span class="badge">Imported</span></td>
+              <td>12 Aug</td>
+              <td><button class="btn btn-sm" type="button">Remove</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="caption" style="margin-top:0.5rem">Showing 3 of 460 with source “Non-response graph”, plus one imported lead so the label is distinct.</p>
+
+        <section class="panel">
+          <h2>Activity</h2>
+          <table>
+            <thead><tr><th>When</th><th>What</th><th>Source</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>30 Aug, 09:41</td>
+                <td>460 leads enrolled into Nudge</td>
+                <td><span class="source-chip">Non-response graph</span></td>
+              </tr>
+              <tr>
+                <td>12 Aug, 16:02</td>
+                <td>Response threshold set to 5 days</td>
+                <td>MC · Settings</td>
+              </tr>
+              <tr>
+                <td>4 Aug, 11:18</td>
+                <td>1,200 leads imported</td>
+                <td>CSV</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note-gap">
+            Brief gap (undecided): threshold changes have no required audit trail.
+            The 12 Aug row is a proposed line so compliance review has somewhere to look.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="remove-priya" class="modal-backdrop hidden" role="dialog" aria-labelledby="rm-title">
+    <div class="modal">
+      <h3 id="rm-title">Remove Priya Sharma?</h3>
+      <p class="caption">Same confirmation as any other enrollment. Coming from the non-response graph does not lock her in.</p>
+      <div class="modal-actions">
+        <button class="btn" type="button" data-close="remove-priya">Keep in Nudge</button>
+        <button class="btn btn-danger" type="button" data-close="remove-priya">Remove from campaign</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../../HTML Prototype/js/harry.js"></script>
+</body>
+</html>

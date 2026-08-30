@@ -16,8 +16,8 @@
 import { useState } from 'react'
 import { api } from '../api.js'
 import { Confirm, LiveRegion } from '../parity-ui.jsx'
-import { Icon, useToast } from '../ui.jsx'
-import { StateChip, blockersOf, codeOf, messageOf } from './shared.jsx'
+import { Icon, Modal, useToast } from '../ui.jsx'
+import { StateChip, blockersOf, codeOf, messageOf, nfmt } from './shared.jsx'
 
 const BLOCKER_FIX = {
   playbook: { label: 'A valid playbook', fix: 'Fix the diagram in the Playbook tab' },
@@ -111,10 +111,77 @@ export function LaunchChecklist({ blockers = [], onGoTo, channelMode = 'email', 
   )
 }
 
-export default function StatusControl({ campaign, onChanged, onDuplicate, onGoTo, showChip = true, actions = null }) {
+const DAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+function scheduleSentence(schedule) {
+  if (!schedule) return null
+  const days = Array.isArray(schedule.days) ? schedule.days : []
+  const dayText = days.length === 7 ? 'every day'
+    : days.length === 5 && [1, 2, 3, 4, 5].every((d) => days.includes(d)) ? 'weekdays'
+    : days.map((d) => DAY_ABBR[d] ?? d).join(', ')
+  return `${dayText || 'weekdays'}, ${schedule.start_hour}–${schedule.end_hour}${schedule.timezone ? ` (${schedule.timezone})` : ''}`
+}
+
+// The pre-start summary. Starting is the moment a campaign stops being a
+// document and begins contacting people, so instead of "are you sure" the
+// dialog shows what is about to act: how many leads, from which senders,
+// inside which window, and whether a person still OKs every email.
+function StartConfirm({ resuming, summary, busy, onConfirm, onClose }) {
+  const s = summary || {}
+  const senders = [
+    ...(s.mailboxes || []),
+    s.smsSenderCount ? `${s.smsSenderCount} SMS sender${s.smsSenderCount === 1 ? '' : 's'}` : null,
+  ].filter(Boolean)
+  const windowLine = scheduleSentence(s.schedule)
+  return (
+    <Modal title={resuming ? 'Resume this campaign?' : 'Start this campaign?'} onClose={onClose}>
+      <div className="space-y-3 text-sm text-slate-700">
+        <p>
+          {resuming
+            ? 'Sending picks up where it paused. From the next window, the agent works these leads again:'
+            : 'From the next send window, the agent starts working these leads:'}
+        </p>
+        <ul className="space-y-1 rounded-lg border border-slate-200 bg-white p-3 text-[13px]">
+          <li>
+            <span className="text-slate-500">Leads</span>{' '}
+            {s.leadCount == null ? 'attached to this campaign' : `${nfmt(s.leadCount)} attached`}
+          </li>
+          <li>
+            <span className="text-slate-500">Sending from</span>{' '}
+            {senders.length ? senders.join(', ') : 'the attached senders'}
+          </li>
+          {windowLine && (
+            <li><span className="text-slate-500">Send window</span> {windowLine}</li>
+          )}
+          <li>
+            <span className="text-slate-500">Approvals</span>{' '}
+            {s.requireApproval == null
+              ? 'as set in Settings → Sending'
+              : s.requireApproval
+                ? 'on — every email waits in Needs your OK first'
+                : 'off — emails go out without a person reading them'}
+          </li>
+        </ul>
+        <p className="text-slate-600">
+          {s.requireApproval
+            ? 'Nothing reaches a lead until you approve it, and you can pause any time.'
+            : 'Real emails go on the wire without a second look. You can pause any time, but what has left cannot be recalled.'}
+        </p>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="button" className="btn-primary" onClick={onConfirm} disabled={busy}>
+            {busy ? 'Starting…' : resuming ? 'Yes, resume it' : 'Yes, start it'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+export default function StatusControl({ campaign, onChanged, onDuplicate, onGoTo, showChip = true, actions = null, launchSummary = null }) {
   const toast = useToast()
   const [busy, setBusy] = useState('')
-  const [confirming, setConfirming] = useState(null) // 'STOPPED'
+  const [confirming, setConfirming] = useState(null) // 'START' | 'STOPPED'
   const [blockers, setBlockers] = useState(null)     // from the server's 422
   const [note, setNote] = useState('')
   const [stoppedError, setStoppedError] = useState('')
@@ -176,7 +243,7 @@ export default function StatusControl({ campaign, onChanged, onDuplicate, onGoTo
                   className="btn-primary"
                   disabled={Boolean(busy) || archived}
                   aria-label={state === 'PAUSED' ? 'Resume this campaign' : 'Start this campaign'}
-                  onClick={() => send('START')}
+                  onClick={() => setConfirming('START')}
                 >
                   {busy === 'START' ? 'Starting…' : state === 'PAUSED' ? 'Resume' : 'Start'}
                 </button>
@@ -219,6 +286,16 @@ export default function StatusControl({ campaign, onChanged, onDuplicate, onGoTo
         <div className="w-full max-w-xl text-left">
           <LaunchChecklist blockers={blockers} onGoTo={onGoTo} />
         </div>
+      )}
+
+      {confirming === 'START' && (
+        <StartConfirm
+          resuming={state === 'PAUSED'}
+          summary={launchSummary}
+          busy={busy === 'START'}
+          onConfirm={() => send('START')}
+          onClose={() => setConfirming(null)}
+        />
       )}
 
       {confirming === 'STOPPED' && (

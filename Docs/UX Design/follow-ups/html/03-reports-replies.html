@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Replies graph · Reports · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+  <link rel="stylesheet" href="../follow-ups.css">
+</head>
+<body>
+  <div class="review-bar">
+    <strong>Review 3 / 6</strong>
+    <span>Immediate neighbour of Follow-ups. Same three-column rate-card layout and the same follow-up-reply-rate numbers as the existing panel above.</span>
+    <span class="intents">Copper Marten</span>
+    <nav class="review-nav">
+      <a href="02-reports-follow-ups-empty.html">← Prev</a>
+      <a href="../index.html">Index</a>
+      <a href="04-campaign-threshold.html">Next →</a>
+    </nav>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="01-reports-follow-ups.html" class="active">Reports</a>
+        <a href="04-campaign-threshold.html">Campaigns</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Reports</span>
+        <input type="date" value="2026-08-01" style="width:auto"> –
+        <input type="date" value="2026-08-30" style="width:auto">
+        <div class="avatar">MC</div>
+      </header>
+      <div class="content">
+        <h1>Reports</h1>
+        <p class="caption">Campaigns tab · 1 Aug – 30 Aug 2026 · Australia/Sydney</p>
+
+        <div class="tabs" style="margin-top:1rem">
+          <button class="tab" type="button">Overview</button>
+          <button class="tab active" type="button">Campaigns</button>
+          <button class="tab" type="button">Over time</button>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>First emails versus follow-ups</h2>
+            <p class="caption">Existing panel · same endpoint shape</p>
+          </div>
+          <dl class="rate-grid">
+            <div class="rate-card">
+              <dt>First-email reply rate</dt>
+              <dd class="big">8.4%</dd>
+              <dd class="caption">218 replies of 2,590 first emails</dd>
+            </div>
+            <div class="rate-card">
+              <dt>Follow-up reply rate</dt>
+              <dd class="big">4.1%</dd>
+              <dd class="caption">76 replies of 1,840 follow-ups</dd>
+            </div>
+            <div class="rate-card">
+              <dt>Conversation replies</dt>
+              <dd class="big">41</dd>
+              <dd class="caption">emails sent along a reply edge, earning 19 answers</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel">
+          <h2>Reply intent by campaign</h2>
+          <p class="caption">ResponseStats stays above the pair of tabs.</p>
+        </section>
+
+        <section class="panel">
+          <div class="tabs">
+            <a class="tab" href="01-reports-follow-ups.html" style="text-decoration:none">Follow-ups</a>
+            <button class="tab active" type="button">Replies</button>
+          </div>
+          <div class="row between">
+            <div>
+              <h2 style="margin:0">Reply rates</h2>
+              <p class="caption">Same three-column cards, same range metadata, same payload as First emails versus follow-ups.</p>
+            </div>
+          </div>
+          <dl class="rate-grid" style="margin-top:0.85rem">
+            <div class="rate-card">
+              <dt>First-email reply rate</dt>
+              <dd class="big">8.4%</dd>
+              <dd class="caption">218 replies of 2,590 first emails</dd>
+            </div>
+            <div class="rate-card">
+              <dt>Follow-up reply rate</dt>
+              <dd class="big">4.1%</dd>
+              <dd class="caption">76 replies of 1,840 follow-ups</dd>
+            </div>
+            <div class="rate-card">
+              <dt>Conversation replies</dt>
+              <dd class="big">41</dd>
+              <dd class="caption">emails sent along a reply edge, earning 19 answers</dd>
+            </div>
+          </dl>
+          <p class="caption" style="margin-top:0.75rem">Range 1 Aug – 30 Aug 2026 · Australia/Sydney · /api/analytics/followup-reply-rate</p>
+          <p class="note-gap">
+            Brief gap (undecided): if Follow-ups is ever hidden by a flag, this tab has no written rule for whether it still appears beside it.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

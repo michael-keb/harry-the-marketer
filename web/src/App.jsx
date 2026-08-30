@@ -207,7 +207,7 @@ export default function App({ user, onUserChanged }) {
           key={`${location.pathname}::${lens.client?.id || 'all'}`}
         >
           <Routes>
-            <Route index element={<Dashboard />} />
+            <Route index element={<Dashboard user={user} />} />
             <Route path="goals" element={<Goals />} />
             <Route path="campaigns" element={<Campaigns />} />
             <Route path="campaigns/:id" element={<CampaignDetail user={user} />} />

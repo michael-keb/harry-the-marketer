@@ -3,17 +3,18 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { Spinner } from '../ui.jsx'
 import { PLANS } from '../../../shared/site-content.js'
+import { displayAuthError } from '../../../shared/auth-errors.js'
 import AuthLayout from './AuthLayout.jsx'
-import GoogleIcon from './GoogleIcon.jsx'
-import { useAuthConfig, safeNext } from './useAuthConfig.js'
+import GoogleContinue from './GoogleContinue.jsx'
+import { useAuthConfig, safeNext, authSearch } from './useAuthConfig.js'
 
 const ASIDE = {
   title: 'What you get immediately',
   points: [
-    'A working default playbook — you are not starting at a blank canvas.',
-    'A sandbox mailbox: run a whole campaign, simulate replies, connect nothing.',
+    'Every new campaign starts from a working default playbook — not a blank canvas.',
+    'Add a sandbox mailbox in one click: run a campaign, simulate replies, connect nothing.',
     'The full editor with live diagram rendering and server-side validation.',
-    'Reply classification routing leads down the branches you drew.',
+    'Reply classification routes leads down the branches you drew.',
     'One-click unsubscribe and conservative send limits on by default.',
   ],
   footnote:
@@ -26,13 +27,13 @@ export default function Signup({ onLoggedIn }) {
   const { config, configError } = useAuthConfig()
 
   const next = safeNext(params.get('next'))
-  const requestedPlan = PLANS.find((p) => p.id === params.get('plan'))
+  const requestedPlan = PLANS.find((p) => p.id === params.get('plan') && p.monthly)
 
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
   const [accepted, setAccepted] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(params.get('error') || '')
+  const [error, setError] = useState(() => displayAuthError(params.get('error'), 'signup'))
 
   if (!config && !configError) {
     return (
@@ -51,7 +52,9 @@ export default function Signup({ onLoggedIn }) {
     setBusy(true)
     setError('')
     try {
-      const result = await api.post('/api/auth/dev-login', { email, name, next })
+      const result = await api.post('/api/auth/dev-login', {
+        email, name, next, plan: requestedPlan?.id,
+      })
       await onLoggedIn?.()
       navigate(safeNext(result?.redirect || next), { replace: true })
     } catch (err) {
@@ -60,23 +63,23 @@ export default function Signup({ onLoggedIn }) {
     }
   }
 
-  // screen_hint=signup lands the visitor on Auth0's signup tab rather than its
-  // login tab — otherwise "Create account" and "Sign in" go to the same screen.
-  const auth0Href = `/api/auth/login?screen_hint=signup&next=${encodeURIComponent(next)}`
+  const auth0Href = `/api/auth/login?screen_hint=signup&next=${encodeURIComponent(next)}${
+    requestedPlan ? `&plan=${encodeURIComponent(requestedPlan.id)}` : ''
+  }`
 
   return (
     <AuthLayout
       title="Create your account"
       lede={
-        requestedPlan && requestedPlan.monthly
+        requestedPlan
           ? `Starting your ${requestedPlan.name} trial. You will not be charged today — set up your workspace first and add billing when you are ready.`
-          : 'Your trial starts now. A sandbox mailbox and a campaign you can run end to end today, before any card.'
+          : 'Your trial starts now. Create a campaign on a working playbook, or add a sandbox mailbox — before any card.'
       }
       aside={ASIDE}
       footer={
         <>
           Already have an account?{' '}
-          <Link to={`/login${next !== '/app' ? `?next=${encodeURIComponent(next)}` : ''}`}
+          <Link to={`/login${authSearch({ next })}`}
             className="text-accent-700 hover:text-accent-600 font-medium">
             Sign in
           </Link>
@@ -92,10 +95,7 @@ export default function Signup({ onLoggedIn }) {
 
         {config?.auth0 && (
           <>
-            <a href={auth0Href} className="btn-primary w-full justify-center text-base py-2.5">
-              <GoogleIcon />
-              Sign up with Google
-            </a>
+            <GoogleContinue href={auth0Href} label="Sign up with Google" />
             <p className="text-[11px] text-slate-500 text-center">
               By continuing you agree to the{' '}
               <a href="/terms" className="text-slate-600 hover:text-accent-700 underline underline-offset-2">Terms</a> and{' '}
@@ -154,13 +154,6 @@ export default function Signup({ onLoggedIn }) {
           </p>
         )}
       </div>
-
-      {/* The reassurance panel is hidden on small screens — this is its stand-in. */}
-      <ul className="mt-6 space-y-2 lg:hidden">
-        {ASIDE.points.slice(0, 3).map((p) => (
-          <li key={p} className="text-xs text-slate-500 leading-relaxed">· {p}</li>
-        ))}
-      </ul>
     </AuthLayout>
   )
 }

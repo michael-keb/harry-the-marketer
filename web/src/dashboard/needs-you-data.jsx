@@ -308,7 +308,11 @@ export function useNeedsYou(decisions, onReloadDecisions) {
   )
 
   const unavailable = SOURCE_IDS.filter((id) => sources[id].status === 'error')
-  const loading = SOURCE_IDS.some((id) => sources[id].status === 'loading')
+  // Named, not just counted: a source that has not answered yet contributes 0
+  // to the total exactly like a failed one, so the section must be able to say
+  // *which* lists are still being checked while rows from the others render.
+  const pending = SOURCE_IDS.filter((id) => sources[id].status === 'loading')
+  const loading = pending.length > 0
   // A total is only a total when every source answered. With one down it is a
   // floor, and the section says "at least" rather than pretending otherwise.
   const total = SOURCE_IDS.reduce((sum, id) => sum + (counts[id] ?? 0), 0)
@@ -323,7 +327,7 @@ export function useNeedsYou(decisions, onReloadDecisions) {
   const setPaused = useCallback((value) => { pausedRef.current = value }, [])
 
   return {
-    sources, items, counts, unavailable, loading, total, leadNames,
+    sources, items, counts, unavailable, pending, loading, total, leadNames,
     reload, reloadSource: loadSource, setPaused,
   }
 }

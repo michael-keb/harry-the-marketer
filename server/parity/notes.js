@@ -203,14 +203,18 @@ function shapeTask(row, ctx) {
   }
 }
 
-function taskCounts(wsId, now) {
+// `clientId` is the Client Lens: when the rows are narrowed to one client the
+// counts must narrow with them, or "Workspace-wide: N open" beside a filtered
+// list becomes a lie in the other direction.
+function taskCounts(wsId, now, clientId = 0) {
+  const lens = clientId ? ' AND lead_id IN (SELECT id FROM leads WHERE user_id = ? AND client_id = ?)' : ''
   const row = db.prepare(
     `SELECT
        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open,
        SUM(CASE WHEN status = 'open' AND due_at IS NOT NULL AND due_at != '' AND due_at < ? THEN 1 ELSE 0 END) AS overdue,
        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done
-     FROM lead_tasks WHERE workspace_id = ?`
-  ).get(now, wsId)
+     FROM lead_tasks WHERE workspace_id = ?${lens}`
+  ).get(now, wsId, ...(clientId ? [wsId, clientId] : []))
   return { open: row?.open || 0, overdue: row?.overdue || 0, done: row?.done || 0 }
 }
 
@@ -237,6 +241,12 @@ function listTasks(req, { leadId = null } = {}) {
     where.push('t.campaign_id = ?')
     args.push(campaignId)
   }
+  // Client Lens: a task belongs to a client through its lead.
+  const clientId = int(req.query, 'clientId', { min: 1, fallback: 0 })
+  if (clientId) {
+    where.push('t.lead_id IN (SELECT id FROM leads WHERE user_id = ? AND client_id = ?)')
+    args.push(req.wsId, clientId)
+  }
   if (due !== 'any') {
     // Undated tasks are excluded from every date filter — an undated task is
     // not overdue and is not due today, it is simply undated.
@@ -252,7 +262,7 @@ function listTasks(req, { leadId = null } = {}) {
 
   const ctx = { roster: roster(req.wsId), now, viewer: req.user.email }
   const { items, hasMore } = paged(rows.map((r) => shapeTask(r, ctx)), limit)
-  const counts = taskCounts(req.wsId, now)
+  const counts = taskCounts(req.wsId, now, clientId)
   // Telemetry carries counts only, never task text.
   meter('tasks_list', Date.now() - started, true, `open=${counts.open} overdue=${counts.overdue}`)
   return { items, hasMore, nextOffset: hasMore ? offset + limit : null, counts }

@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Follow-ups · Reports · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+  <link rel="stylesheet" href="../follow-ups.css">
+</head>
+<body>
+  <div class="review-bar">
+    <strong>Review 1 / 6</strong>
+    <span>Tab sits immediately after Reply intent. Graph is new — not First emails versus follow-ups. Always visible. Read-only.</span>
+    <span class="intents">Coral Harrier · Slate Tern · Indigo Falcon · Slate Egret · Indigo Pike</span>
+    <nav class="review-nav">
+      <a href="../index.html">Index</a>
+      <a href="02-reports-follow-ups-empty.html">Next →</a>
+    </nav>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="../../HTML Prototype/pages/analytics-dashboard.html">Dashboard</a>
+        <a href="01-reports-follow-ups.html" class="active">Reports</a>
+        <a href="04-campaign-threshold.html">Campaigns</a>
+        <a href="../../HTML Prototype/pages/leads-list.html">Leads</a>
+        <a href="../../HTML Prototype/pages/inbox-replies.html">Inbox</a>
+        <a href="../../HTML Prototype/pages/mailboxes.html">Mailboxes</a>
+        <a href="../../HTML Prototype/pages/deliverability.html">Monitoring</a>
+        <a href="../../HTML Prototype/pages/settings-block-list.html">Settings</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Reports</span>
+        <select style="width:auto" aria-label="Campaign filter">
+          <option>All campaigns</option>
+          <option>Q1 Cold Outreach</option>
+          <option>Partner nurture</option>
+        </select>
+        <input type="date" value="2026-08-01" style="width:auto" aria-label="From"> –
+        <input type="date" value="2026-08-30" style="width:auto" aria-label="To">
+        <div class="avatar">MC</div>
+      </header>
+      <div class="content">
+        <div class="row between">
+          <div>
+            <h1>Reports</h1>
+            <p class="caption">Campaigns tab · 1 Aug – 30 Aug 2026 · Australia/Sydney</p>
+          </div>
+        </div>
+
+        <div class="tabs" style="margin-top:1rem">
+          <button class="tab" type="button">Overview</button>
+          <button class="tab active" type="button">Campaigns</button>
+          <button class="tab" type="button">Over time</button>
+          <button class="tab" type="button">Mailboxes</button>
+          <button class="tab" type="button">Replies</button>
+          <button class="tab" type="button">Clients</button>
+          <a class="tab" href="05-campaign-graph-enroll.html" style="text-decoration:none">Campaign drill-down</a>
+        </div>
+
+        <!-- Existing CampaignsTab, replicated so placement is reviewable -->
+        <section class="panel" aria-labelledby="states">
+          <div class="panel-head">
+            <h2 id="states">Campaign states</h2>
+          </div>
+          <p class="caption" style="margin-bottom:0.6rem">“Holding” is a running campaign whose sending window is shut right now.</p>
+          <div class="taglist">
+            <span class="badge badge-success">2 running</span>
+            <span class="badge">1 holding</span>
+            <span class="badge">1 paused</span>
+            <span class="badge">2 draft</span>
+            <span class="badge">1 archived</span>
+            <span class="caption">7 campaigns in total</span>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="vs">
+          <div class="panel-head">
+            <h2 id="vs">First emails versus follow-ups</h2>
+            <p class="caption">Existing panel — not reused for the Follow-ups tab</p>
+          </div>
+          <p class="caption" style="margin-bottom:0.6rem">A follow-up is a send reached by a “no reply” or “after” edge. Unchanged.</p>
+          <dl class="rate-grid">
+            <div class="rate-card">
+              <dt>First-email reply rate</dt>
+              <dd class="big">8.4%</dd>
+              <dd class="caption">218 replies of 2,590 first emails</dd>
+            </div>
+            <div class="rate-card">
+              <dt>Follow-up reply rate</dt>
+              <dd class="big">4.1%</dd>
+              <dd class="caption">76 replies of 1,840 follow-ups</dd>
+            </div>
+            <div class="rate-card">
+              <dt>Conversation replies</dt>
+              <dd class="big">41</dd>
+              <dd class="caption">emails sent along a reply edge, earning 19 answers</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel" aria-labelledby="perf">
+          <div class="panel-head"><h2 id="perf">Campaign performance</h2></div>
+          <table>
+            <thead><tr><th>Campaign</th><th>Sent</th><th>Leads</th><th>Reply rate</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td><a href="04-campaign-threshold.html">Q1 Cold Outreach</a></td><td>4,820</td><td>1,240</td><td>6.5%</td><td><span class="badge badge-success">Running</span></td></tr>
+              <tr><td>Partner nurture</td><td>2,100</td><td>410</td><td>4.7%</td><td><span class="badge badge-success">Running</span></td></tr>
+              <tr><td>Alumni warm</td><td>880</td><td>220</td><td>9.1%</td><td><span class="badge">Paused</span></td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" id="response-stats" aria-labelledby="intent">
+          <div class="panel-head">
+            <h2 id="intent">Reply intent by campaign</h2>
+            <p class="caption">ResponseStats — the Follow-ups tab starts immediately below</p>
+          </div>
+          <p class="caption">Positive 84 · Neutral 31 · Negative 12 · Uncategorised 9</p>
+          <div style="margin-top:0.6rem">
+            <div class="row between" style="font-size:12px"><span>Q1 Cold Outreach</span><span class="caption">312 replies</span></div>
+            <div class="intent-bar" aria-hidden="true">
+              <i style="width:62%;background:#0d9488"></i>
+              <i style="width:22%;background:#64748b"></i>
+              <i style="width:10%;background:#dc2626"></i>
+              <i style="width:6%;background:#94a3b8"></i>
+            </div>
+          </div>
+          <div style="margin-top:0.7rem">
+            <div class="row between" style="font-size:12px"><span>Partner nurture</span><span class="caption">98 replies</span></div>
+            <div class="intent-bar" aria-hidden="true">
+              <i style="width:55%;background:#0d9488"></i>
+              <i style="width:30%;background:#64748b"></i>
+              <i style="width:15%;background:#dc2626"></i>
+            </div>
+          </div>
+        </section>
+
+        <!-- NEW: Follow-ups | Replies immediately after ResponseStats -->
+        <section class="panel" aria-labelledby="fu-tabs">
+          <h2 id="fu-tabs" class="caption" style="text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.4rem">After Reply intent</h2>
+          <div data-tabs>
+            <div class="tabs">
+              <button class="tab active" type="button">Follow-ups</button>
+              <a class="tab" href="03-reports-replies.html" style="text-decoration:none">Replies</a>
+            </div>
+            <div class="tab-panel active">
+              <div class="row between">
+                <div>
+                  <h2 style="margin:0">Who has gone quiet</h2>
+                  <p class="caption">Dedicated non-response graph — not First emails versus follow-ups.</p>
+                </div>
+                <span class="readonly-flag">Read-only · no enroll from here</span>
+              </div>
+
+              <div class="scope-strip" role="note">
+                <strong>Active campaigns only</strong>
+                Counted at the moment this report ran: Q1 Cold Outreach, Partner nurture.
+                Paused, draft and archived are excluded — even if they were running earlier in the range.
+              </div>
+
+              <p class="nr-legend">
+                <span><i class="swatch swatch-replied"></i>Replied</span>
+                <span><i class="swatch swatch-window"></i>Still inside threshold</span>
+                <span><i class="swatch swatch-over"></i>Non-responsive (threshold crossed)</span>
+              </p>
+
+              <div class="nr-row">
+                <div class="nr-row-head">
+                  <span>Q1 Cold Outreach · 5-day threshold</span>
+                  <span class="caption">1,240 contacted</span>
+                </div>
+                <div class="nr-bar readonly" title="Read-only. Use the campaign graph to enroll.">
+                  <span class="replied" style="width:25%"></span>
+                  <span class="in-window" style="width:38%"></span>
+                  <span class="over" style="width:37%"></span>
+                </div>
+                <p class="caption">312 replied · 468 still in window · 460 non-responsive</p>
+              </div>
+
+              <div class="nr-row">
+                <div class="nr-row-head">
+                  <span>Partner nurture · 3-day threshold</span>
+                  <span class="caption">410 contacted</span>
+                </div>
+                <div class="nr-bar readonly">
+                  <span class="replied" style="width:24%"></span>
+                  <span class="in-window" style="width:41%"></span>
+                  <span class="over" style="width:35%"></span>
+                </div>
+                <p class="caption">98 replied · 168 still in window · 144 non-responsive</p>
+              </div>
+
+              <div class="bucket-grid">
+                <div class="bucket"><div class="stat-label">Non-responsive now</div><div class="n">604</div><p class="caption">Across 2 active campaigns</p></div>
+                <div class="bucket"><div class="stat-label">Within window</div><div class="n">636</div><p class="caption">Timer still running</p></div>
+                <div class="bucket over"><div class="stat-label">1–3 days over</div><div class="n">271</div><p class="caption">Next window this week</p></div>
+                <div class="bucket over"><div class="stat-label">4+ days over</div><div class="n">333</div><p class="caption">Window already open</p></div>
+              </div>
+
+              <h3 style="margin-top:1.5rem">Scheduled follow-ups</h3>
+              <p class="caption" style="margin-bottom:0.6rem">One row per eligible lead. Window = last send + that campaign’s threshold. Any reply, any intent, would reset the timer — none of these have one.</p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Lead</th>
+                    <th>Campaign</th>
+                    <th>Last send</th>
+                    <th>Threshold</th>
+                    <th>Follow-up window</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Priya Sharma<br><span class="caption">priya@northwind.io</span></td>
+                    <td>Q1 Cold Outreach</td>
+                    <td>27 Aug, 09:12</td>
+                    <td>5 days</td>
+                    <td class="window">Mon 1 Sep, 09:00–12:00</td>
+                  </tr>
+                  <tr>
+                    <td>Alex Chen<br><span class="caption">alex@harbor.co</span></td>
+                    <td>Partner nurture</td>
+                    <td>26 Aug, 14:40</td>
+                    <td>3 days</td>
+                    <td class="window">Fri 29 Aug, 14:00–17:00</td>
+                  </tr>
+                  <tr>
+                    <td>Jordan Blake<br><span class="caption">jordan@fieldkit.com</span></td>
+                    <td>Q1 Cold Outreach</td>
+                    <td>24 Aug, 11:05</td>
+                    <td>5 days</td>
+                    <td class="window">Open since 29 Aug</td>
+                  </tr>
+                  <tr>
+                    <td>Samira Ortiz<br><span class="caption">samira@lumen.studio</span></td>
+                    <td>Partner nurture</td>
+                    <td>28 Aug, 08:22</td>
+                    <td>3 days</td>
+                    <td class="window">Sun 31 Aug, 08:00–11:00</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p class="caption" style="margin-top:0.5rem">604 leads · windows recompute when a campaign threshold changes. Already-enrolled playbook members are not re-timed.</p>
+
+              <h3 style="margin-top:1.5rem">Contact timeline</h3>
+              <p class="caption" style="margin-bottom:0.6rem">One dedicated row per unique contact. Cells show messages sent and replies per stage. Movement is not left-to-right only — a contact can step back. No buttons, no selection.</p>
+              <div class="tl-wrap">
+                <table class="tl-table">
+                  <thead>
+                    <tr>
+                      <th>Contact</th>
+                      <th>State</th>
+                      <th>Stages</th>
+                      <th>Next window</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        Priya Sharma
+                        <div class="contact-meta">Q1 Cold Outreach</div>
+                      </td>
+                      <td>Quiet 4d<br><span class="caption">No reply</span></td>
+                      <td>
+                        <div class="stages">
+                          <div class="stage past"><span class="name">Start</span><span class="counts">—</span></div>
+                          <div class="stage past"><span class="name">Intro</span><span class="counts">1s · 0r</span></div>
+                          <div class="stage current"><span class="name">Nudge</span><span class="counts">1s · 0r</span></div>
+                          <div class="stage future"><span class="name">Proof</span><span class="counts">0s · 0r</span></div>
+                          <div class="stage future terminal"><span class="name">Won</span><span class="counts">—</span></div>
+                        </div>
+                      </td>
+                      <td class="window">Mon 1 Sep<br>09:00–12:00</td>
+                    </tr>
+                    <tr>
+                      <td>
+                        Alex Chen
+                        <div class="contact-meta">Partner nurture</div>
+                      </td>
+                      <td>Stepped back<br><span class="caption">Was at Proof</span></td>
+                      <td>
+                        <div class="stages">
+                          <div class="stage past"><span class="name">Start</span><span class="counts">—</span></div>
+                          <div class="stage past"><span class="name">Intro</span><span class="counts">1s · 1r</span></div>
+                          <div class="stage current"><span class="name">Ask</span><span class="counts">0s · 0r</span></div>
+                          <div class="stage left" title="Visited, then left — non-linear"><span class="name">Proof</span><span class="counts">1s · 0r</span></div>
+                          <div class="stage future terminal"><span class="name">Won</span><span class="counts">—</span></div>
+                        </div>
+                      </td>
+                      <td class="window">Fri 29 Aug<br>14:00–17:00</td>
+                    </tr>
+                    <tr>
+                      <td>
+                        Jordan Blake
+                        <div class="contact-meta">Q1 Cold Outreach</div>
+                      </td>
+                      <td>Window open<br><span class="caption">6d quiet</span></td>
+                      <td>
+                        <div class="stages">
+                          <div class="stage past"><span class="name">Start</span><span class="counts">—</span></div>
+                          <div class="stage current"><span class="name">Intro</span><span class="counts">1s · 0r</span></div>
+                          <div class="stage future"><span class="name">Nudge</span><span class="counts">0s · 0r</span></div>
+                          <div class="stage future"><span class="name">Proof</span><span class="counts">0s · 0r</span></div>
+                          <div class="stage future terminal"><span class="name">Won</span><span class="counts">—</span></div>
+                        </div>
+                      </td>
+                      <td class="window">Open since<br>29 Aug</td>
+                    </tr>
+                    <tr>
+                      <td>
+                        Samira Ortiz
+                        <div class="contact-meta">Partner nurture</div>
+                      </td>
+                      <td>In window<br><span class="caption">2d quiet</span></td>
+                      <td>
+                        <div class="stages">
+                          <div class="stage past"><span class="name">Start</span><span class="counts">—</span></div>
+                          <div class="stage past"><span class="name">Intro</span><span class="counts">1s · 0r</span></div>
+                          <div class="stage current"><span class="name">Check-in</span><span class="counts">1s · 0r</span></div>
+                          <div class="stage future"><span class="name">Ask</span><span class="counts">0s · 0r</span></div>
+                          <div class="stage future terminal"><span class="name">Won</span><span class="counts">—</span></div>
+                        </div>
+                      </td>
+                      <td class="window">Sun 31 Aug<br>08:00–11:00</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="caption" style="margin-top:0.5rem">s = messages sent at that stage · r = replies at that stage · amber cell = visited then left. Alumni warm is paused, so it is not in this grid.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

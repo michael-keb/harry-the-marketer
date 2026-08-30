@@ -21,8 +21,10 @@ const PRESETS = {
 // A 422 may name either spelling depending on which one was sent.
 const err2 = (err, a, b) => fieldError(err, a) || fieldError(err, b)
 
-export default function AddMailbox({ googleConfigured, microsoftConfigured, onClose, onAdded }) {
-  const [path, setPath] = useState('gmail')
+export default function AddMailbox({ googleConfigured, microsoftConfigured, onClose, onAdded, initialPath = 'gmail' }) {
+  const [path, setPath] = useState(
+    initialPath === 'sandbox' || initialPath === 'outlook' || initialPath === 'smtp' ? initialPath : 'gmail'
+  )
   const [announcement, say] = useAnnounce()
 
   return (

@@ -24,6 +24,14 @@ export default function OverviewTab({ params, legacy, overview }) {
 
   return (
     <div className="space-y-4">
+      {/* Two time models share this tab, and side by side they read as one.
+          The strip says which panels obey the range picker and which never
+          did, before anyone tries to reconcile the numbers. */}
+      <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600" role="note">
+        <span className="font-medium text-ink-900">Two time scopes on this tab:</span>{' '}
+        Headline numbers and the contact mix follow your selected range
+        {range ? ` (${range.from} to ${range.to})` : ''}. The pipeline funnel and Learning are all time — they ignore the range picker.
+      </p>
       <Panel
         id="headline"
         title="Headline numbers"
@@ -178,6 +186,7 @@ function Funnel({ legacy }) {
       id="funnel"
       title="Pipeline funnel"
       note="All time, across every campaign — the stage each lead has reached, not a range. Conversion is measured against the stage above it."
+      actions={<span className="text-xs text-slate-500">All time — ignores the range picker</span>}
     >
       {funnel.leads === 0 ? (
         <EmptyState icon="reports" title="No leads yet" hint="Import or add leads and the funnel fills in from the top." />
@@ -238,6 +247,7 @@ function Learning({ legacy }) {
       id="learning"
       title="Learning"
       note="What the results say about the playbooks, computed from reply attribution per step: each reply is credited to the send that earned it. All time, across every campaign."
+      actions={<span className="text-xs text-slate-500">All time — ignores the range picker</span>}
     >
       {!legacy.data ? (
         <Spinner label="Loading the learning section…" />

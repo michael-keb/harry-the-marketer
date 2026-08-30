@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enroll quiet leads · Campaign drill-down · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+  <link rel="stylesheet" href="../follow-ups.css">
+</head>
+<body>
+  <div class="review-bar">
+    <strong>Review 5 / 6</strong>
+    <span>Enrollment lives here — on the campaign graph — not on the Follow-ups tab. Clicking the non-responsive cohort calls the enroll API and sends them to the next playbook step already defined (Nudge).</span>
+    <span class="intents">Coral Stoat</span>
+    <nav class="review-nav">
+      <a href="04-campaign-threshold.html">← Prev</a>
+      <a href="../index.html">Index</a>
+      <a href="06-leads-after-enroll.html">Next →</a>
+    </nav>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="01-reports-follow-ups.html" class="active">Reports</a>
+        <a href="04-campaign-threshold.html">Campaigns</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Reports / Campaign drill-down</span>
+        <select style="width:auto" aria-label="Campaign">
+          <option selected>Q1 Cold Outreach</option>
+          <option>Partner nurture</option>
+        </select>
+        <input type="date" value="2026-08-01" style="width:auto"> –
+        <input type="date" value="2026-08-30" style="width:auto">
+        <div class="avatar">MC</div>
+      </header>
+      <div class="content">
+        <div class="row between">
+          <div>
+            <h1>Q1 Cold Outreach</h1>
+            <p class="caption">Running · 5-day quiet threshold · next playbook step: Nudge</p>
+          </div>
+          <a href="01-reports-follow-ups.html" class="btn">Read-only Follow-ups tab</a>
+        </div>
+
+        <div class="callout" style="margin-top:1rem">
+          Click a non-responsive bar to enroll those leads into <strong>Nudge</strong> — the next step already on this campaign’s playbook.
+          They keep the same Remove rights as any other enrollment.
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Non-responsive cohort</h2>
+            <p class="caption">This graph is the enrollment surface</p>
+          </div>
+          <p class="nr-legend">
+            <span><i class="swatch swatch-replied"></i>Replied</span>
+            <span><i class="swatch swatch-window"></i>Still inside threshold</span>
+            <span><i class="swatch swatch-over"></i>Non-responsive — click to enroll</span>
+          </p>
+
+          <div class="nr-row">
+            <div class="nr-row-head">
+              <span>Q1 Cold Outreach · 1,240 contacted</span>
+              <span class="caption">Active now</span>
+            </div>
+            <div class="nr-bar" style="padding:0">
+              <span class="replied" style="width:25%" title="312 replied — not a cohort you can enroll"></span>
+              <span class="in-window" style="width:38%" title="468 still in window — not yet non-responsive"></span>
+              <button type="button" class="over" id="cohort" title="Enroll 460 non-responsive leads into Nudge" style="width:37%;border:none;cursor:pointer"></button>
+            </div>
+            <p class="caption">312 replied · 468 still in window · <strong>460 non-responsive</strong> — click the amber segment only</p>
+          </div>
+
+          <p class="note-gap">
+            Brief gap (undecided): no review step before commit, no consent check, and no partial-failure model if some of the 460 fail to enroll.
+            This prototype treats the click as the commit.
+          </p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="enroll-modal" class="modal-backdrop hidden" role="dialog" aria-labelledby="enroll-title">
+    <div class="modal" style="width:min(440px,92vw)">
+      <h3 id="enroll-title">460 leads enrolled into Nudge</h3>
+      <p class="caption">The next step already on this playbook. Nothing new was invented.</p>
+      <dl class="threshold-preview" style="margin-top:0.85rem">
+        <dt>Source</dt>
+        <dd><span class="source-chip">Non-response graph</span> — this label is what the activity trail will show.</dd>
+        <dt>Who moved</dt>
+        <dd>460 leads who had crossed the 5-day threshold and had not replied.</dd>
+        <dt>What did not happen</dt>
+        <dd>The Follow-ups tab did not change. It stays a read-only report.</dd>
+      </dl>
+      <div class="modal-actions">
+        <button class="btn" type="button" data-close="enroll-modal">Stay here</button>
+        <a class="btn btn-primary" href="06-leads-after-enroll.html">See them on Leads</a>
+      </div>
+    </div>
+  </div>
+
+  <script src="../../HTML Prototype/js/harry.js"></script>
+  <script>
+    document.getElementById('cohort').addEventListener('click', function () {
+      document.getElementById('enroll-modal').classList.remove('hidden');
+    });
+  </script>
+</body>
+</html>

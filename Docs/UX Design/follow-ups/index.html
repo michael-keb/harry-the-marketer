@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Follow-ups · UX review · Harry</title>
+  <link rel="stylesheet" href="../HTML Prototype/css/harry.css">
+  <style>
+    .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    ol.screens { line-height: 1.7; margin-top: 1rem; }
+    ol.screens a { font-weight: 600; }
+    table.map { margin-top: 1.25rem; }
+    table.map td:first-child { white-space: nowrap; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="caption"><a href="../HTML Prototype/index.html">← HTML prototypes</a></p>
+    <h1>Follow-ups — HTML review</h1>
+    <p class="caption">6 screens · replicated from the existing Reports / Campaign chrome · brief of 30 Aug 2026 (8 intents)</p>
+
+    <ol class="screens">
+      <li><a href="html/01-reports-follow-ups.html">Reports → Campaigns → Follow-ups</a> — tab after Reply intent; non-response graph; schedule list; read-only contact grid</li>
+      <li><a href="html/02-reports-follow-ups-empty.html">Follow-ups empty</a> — no active or running campaigns at query time</li>
+      <li><a href="html/03-reports-replies.html">Adjacent Replies tab</a> — three-column cards matching First emails versus follow-ups</li>
+      <li><a href="html/04-campaign-threshold.html">Campaign settings · threshold</a> — per-campaign, future enrollments only</li>
+      <li><a href="html/05-campaign-graph-enroll.html">Campaign graph · auto-enroll</a> — click a non-responsive cohort (not on the Follow-ups tab)</li>
+      <li><a href="html/06-leads-after-enroll.html">Leads after enroll</a> — source label in the trail; same Remove as any other enrollment</li>
+    </ol>
+
+    <h2 style="margin-top:2rem">Intent → screen</h2>
+    <table class="map">
+      <thead><tr><th>Intent</th><th>Name</th><th>Shown on</th></tr></thead>
+      <tbody>
+        <tr><td>Coral Harrier</td><td>Follow-up tab placement</td><td><a href="html/01-reports-follow-ups.html">01</a></td></tr>
+        <tr><td>Quartz Egret</td><td>Configurable response threshold</td><td><a href="html/04-campaign-threshold.html">04</a></td></tr>
+        <tr><td>Slate Tern</td><td>Active-campaign scope</td><td><a href="html/01-reports-follow-ups.html">01</a>, <a href="html/02-reports-follow-ups-empty.html">02</a></td></tr>
+        <tr><td>Coral Stoat</td><td>Auto-enroll trigger</td><td><a href="html/05-campaign-graph-enroll.html">05</a>, <a href="html/06-leads-after-enroll.html">06</a></td></tr>
+        <tr><td>Copper Marten</td><td>Reply graph parity</td><td><a href="html/03-reports-replies.html">03</a> (neighbour of 01)</td></tr>
+        <tr><td>Indigo Falcon</td><td>Follow-up list scheduling</td><td><a href="html/01-reports-follow-ups.html">01</a></td></tr>
+        <tr><td>Slate Egret</td><td>Read-only contact timeline</td><td><a href="html/01-reports-follow-ups.html">01</a></td></tr>
+        <tr><td>Indigo Pike</td><td>Grid timeline progression</td><td><a href="html/01-reports-follow-ups.html">01</a></td></tr>
+      </tbody>
+    </table>
+
+    <p class="caption" style="margin-top:1.5rem">
+      Hard split from the brief: the Follow-ups tab is strictly read-only.
+      Enrollment lives on the campaign graph, not inside this tab.
+    </p>
+  </div>
+</body>
+</html>

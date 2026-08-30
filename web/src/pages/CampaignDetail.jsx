@@ -336,15 +336,14 @@ export default function CampaignDetail({ user }) {
             onDuplicate={() => { setTab('manage'); setDuplicateOpen(true) }}
             onGoTo={goTo}
             showChip={false}
-            actions={
-              <>
-                <button className="btn-ghost" onClick={() => setTestSendNode('')}>Send me a test</button>
-                <button className="btn-primary" disabled={Boolean(busy)} onClick={runEngine}
-                  title="The engine also runs automatically every 20s">
-                  {busy === 'tick' ? 'Running…' : 'Run engine now'}
-                </button>
-              </>
-            }
+            launchSummary={{
+              leadCount: detail.counts?.total ?? null,
+              mailboxes: (detail.mailboxes || []).map((m) => m.email),
+              smsSenderCount,
+              schedule: detail.schedule,
+              requireApproval: user ? Boolean(user.requireApproval) : null,
+            }}
+            actions={<button className="btn-ghost" onClick={() => setTestSendNode('')}>Send me a test</button>}
           />
         </div>
 
@@ -584,6 +583,8 @@ export default function CampaignDetail({ user }) {
           onDuplicateRequest={() => setDuplicateOpen(true)}
           duplicateOpen={duplicateOpen}
           onCloseDuplicate={() => setDuplicateOpen(false)}
+          onRunEngine={runEngine}
+          engineBusy={busy === 'tick'}
         />
       )}
 

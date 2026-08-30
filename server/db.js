@@ -466,6 +466,23 @@ try {
   `)
 } catch { /* already exists */ }
 
+// Auth0 CSRF state must live on disk. An in-memory Map dies on every Render
+// restart (and would be wrong the moment there is more than one instance),
+// which is why sign-up bounced to /login?error=invalid_state after Google.
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_states (
+      state TEXT PRIMARY KEY,
+      next TEXT NOT NULL DEFAULT '/app',
+      intent TEXT NOT NULL DEFAULT 'login',
+      plan TEXT NOT NULL DEFAULT '',
+      expiry INTEGER NOT NULL
+    )
+  `)
+} catch { /* already exists */ }
+try { db.exec("ALTER TABLE oauth_states ADD COLUMN intent TEXT NOT NULL DEFAULT 'login'") } catch { /* exists */ }
+try { db.exec("ALTER TABLE oauth_states ADD COLUMN plan TEXT NOT NULL DEFAULT ''") } catch { /* exists */ }
+
 // Inbound dedupe belongs to the database, not to check-then-insert races: the
 // per-thread engine sync and the whole-inbox upkeep sweep both pull the same
 // Gmail message, and under their overlap a reply could land — and count —

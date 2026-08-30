@@ -41,6 +41,7 @@ function RequireAuth({ user, children }) {
 }
 
 export default function Root() {
+  const location = useLocation()
   const [user, setUser] = useState(undefined) // undefined = loading, null = signed out
   const [error, setError] = useState(null)
 
@@ -56,9 +57,11 @@ export default function Root() {
 
   useEffect(() => { loadUser() }, [loadUser])
 
-  // A failure here means the API is unreachable — the marketing site would still
-  // render, but silently pretending everything is fine would be worse.
-  if (error) return <div className="p-10"><ErrorState error={error} onRetry={loadUser} /></div>
+  // The product needs a live API. The marketing site and the sign-up form do
+  // not — blocking those behind /api/auth/me is how a visitor cannot read
+  // /security or start a trial during an outage.
+  const onApp = location.pathname === '/app' || location.pathname.startsWith('/app/')
+  if (error && onApp) return <div className="p-10"><ErrorState error={error} onRetry={loadUser} /></div>
 
   const signedIn = Boolean(user)
 

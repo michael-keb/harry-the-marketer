@@ -34,8 +34,18 @@ export default function Connections() {
 
   const [emailTab, setEmailTab] = useState('fleet')
   const [meta, setMeta] = useState(null)
-  const [adding, setAdding] = useState(false)
+  const addParam = params.get('add')
+  const [adding, setAdding] = useState(addParam === 'sandbox' || addParam === 'email')
+  const [addPath] = useState(addParam === 'sandbox' ? 'sandbox' : 'gmail')
   const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    if (!params.get('add')) return
+    const next = new URLSearchParams(params)
+    next.delete('add')
+    if (!next.get('area')) next.set('area', 'email')
+    setParams(next, { replace: true })
+  }, [params, setParams])
   const [oauthNoticeHidden, setOauthNoticeHidden] = useState(
     () => localStorage.getItem(OAUTH_NOTICE_KEY) === '1'
   )
@@ -171,6 +181,7 @@ export default function Connections() {
             <AddMailbox
               googleConfigured={googleConfigured}
               microsoftConfigured={microsoftConfigured}
+              initialPath={addPath}
               onClose={() => setAdding(false)}
               onAdded={() => { setReloadKey((k) => k + 1); setEmailTab('fleet') }}
             />

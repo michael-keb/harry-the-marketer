@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { Spinner } from '../ui.jsx'
+import { displayAuthError } from '../../../shared/auth-errors.js'
 import AuthLayout from './AuthLayout.jsx'
-import GoogleIcon from './GoogleIcon.jsx'
-import { useAuthConfig, safeNext } from './useAuthConfig.js'
+import GoogleContinue from './GoogleContinue.jsx'
+import { useAuthConfig, safeNext, authSearch } from './useAuthConfig.js'
 
 export default function Login({ onLoggedIn }) {
   const [params] = useSearchParams()
@@ -15,7 +16,7 @@ export default function Login({ onLoggedIn }) {
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(params.get('error') || configError || '')
+  const [error, setError] = useState(() => displayAuthError(params.get('error'), 'login'))
 
   if (!config && !configError) {
     return (
@@ -39,6 +40,7 @@ export default function Login({ onLoggedIn }) {
     }
   }
 
+  // The server always sends Auth0 the Google connection itself; no query knob.
   const auth0Href = `/api/auth/login?next=${encodeURIComponent(next)}`
 
   return (
@@ -48,7 +50,7 @@ export default function Login({ onLoggedIn }) {
       footer={
         <>
           No account yet?{' '}
-          <Link to={`/signup${next !== '/app' ? `?next=${encodeURIComponent(next)}` : ''}`}
+          <Link to={`/signup${authSearch({ next })}`}
             className="text-accent-700 hover:text-accent-600 font-medium">
             Start a free trial
           </Link>
@@ -63,10 +65,7 @@ export default function Login({ onLoggedIn }) {
         )}
 
         {config?.auth0 && (
-          <a href={auth0Href} className="btn-primary w-full justify-center text-base py-2.5">
-            <GoogleIcon />
-            Continue with Google
-          </a>
+          <GoogleContinue href={auth0Href} label="Continue with Google" />
         )}
 
         {config?.auth0 && config?.devLogin && (

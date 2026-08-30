@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Follow-ups empty · Reports · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+  <link rel="stylesheet" href="../follow-ups.css">
+</head>
+<body>
+  <div class="review-bar">
+    <strong>Review 2 / 6</strong>
+    <span>Tab stays visible when nothing is active. Empty copy says only active or running campaigns contribute — it does not hide the tab.</span>
+    <span class="intents">Slate Tern · Coral Harrier</span>
+    <nav class="review-nav">
+      <a href="01-reports-follow-ups.html">← Prev</a>
+      <a href="../index.html">Index</a>
+      <a href="03-reports-replies.html">Next →</a>
+    </nav>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="01-reports-follow-ups.html" class="active">Reports</a>
+        <a href="04-campaign-threshold.html">Campaigns</a>
+        <a href="../../HTML Prototype/pages/leads-list.html">Leads</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Reports</span>
+        <input type="date" value="2026-08-01" style="width:auto"> –
+        <input type="date" value="2026-08-30" style="width:auto">
+        <div class="avatar">MC</div>
+      </header>
+      <div class="content">
+        <h1>Reports</h1>
+        <p class="caption">Campaigns tab · no campaign is active or running right now</p>
+
+        <div class="tabs" style="margin-top:1rem">
+          <button class="tab" type="button">Overview</button>
+          <button class="tab active" type="button">Campaigns</button>
+          <button class="tab" type="button">Over time</button>
+          <button class="tab" type="button">Mailboxes</button>
+        </div>
+
+        <section class="panel">
+          <h2>Campaign states</h2>
+          <div class="taglist">
+            <span class="badge">2 paused</span>
+            <span class="badge">3 draft</span>
+            <span class="badge">2 archived</span>
+            <span class="caption">7 campaigns in total · 0 running</span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Reply intent by campaign</h2>
+          <p class="caption">Alumni warm and Q1 Cold Outreach both sent in this range, but both are paused now.</p>
+        </section>
+
+        <section class="panel">
+          <div class="tabs">
+            <button class="tab active" type="button">Follow-ups</button>
+            <a class="tab" href="03-reports-replies.html" style="text-decoration:none">Replies</a>
+          </div>
+          <div class="row between">
+            <h2 style="margin:0">Who has gone quiet</h2>
+            <span class="readonly-flag">Read-only</span>
+          </div>
+          <div class="empty" style="background:#fff;border:1px solid var(--border);border-radius:8px;margin-top:1rem">
+            <p><strong style="color:var(--text)">No active campaigns to count</strong></p>
+            <p class="caption" style="max-width:28rem;margin:0.5rem auto 0">
+              This graph only includes campaigns whose status is active or running at the moment the report is generated.
+              Campaigns that ran earlier in 1–30 Aug and are now paused, drafted or archived do not appear here.
+            </p>
+            <p style="margin-top:1rem"><a href="04-campaign-threshold.html">Open a campaign</a> to start it, or go back to the <a href="01-reports-follow-ups.html">populated view</a>.</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

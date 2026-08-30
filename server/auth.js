@@ -4,6 +4,7 @@ import { db, sessionSecret, logEvent, resolveWorkspace } from './db.js'
 import { env, auth0Configured, devLoginEnabled, isProduction } from './env.js'
 import { rateLimit } from './security.js'
 import { composeBusinessContext, parseProfile } from '../shared/profile.js'
+import { mapAuth0Error, sanitizePlan } from '../shared/auth-errors.js'
 import { isSupportedWebhook } from './alerts.js'
 import { billingStatus } from './billing.js'
 
@@ -102,7 +103,7 @@ export function workspace(req, res, next) {
   next()
 }
 
-function upsertUser({ sub, email, name = '', picture = '' }) {
+function upsertUser({ sub, email, name = '', picture = '', plan = '' }) {
   const normalizedEmail = String(email || '').trim().toLowerCase()
   const canonical = normalizedEmail
     ? db.prepare('SELECT * FROM users WHERE lower(email) = ? ORDER BY id LIMIT 1').get(normalizedEmail)
@@ -124,6 +125,11 @@ function upsertUser({ sub, email, name = '', picture = '' }) {
     .run(sub, normalizedEmail || email, name, picture)
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid)
   logEvent(user.id, { type: 'signup', detail: normalizedEmail || email })
+  const planId = sanitizePlan(plan)
+  if (planId) {
+    db.prepare('UPDATE users SET plan_id = ? WHERE id = ?').run(planId, user.id)
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
+  }
   return user
 }
 
@@ -163,37 +169,79 @@ authRouter.get('/api/auth/me', (req, res) => {
 })
 
 // Auth0 authorization-code flow (no SDK; plain OIDC).
-const pendingStates = new Map() // state -> { expiry, next }
+//
+// The only public button is "Continue / Sign up with Google". Send that
+// connection so Auth0 skips its hosted email/password Lock page and goes
+// straight to Google. Without it, signup looked broken: the button promised
+// Google and landed on Auth0's database form instead.
+const GOOGLE_CONNECTION = 'google-oauth2'
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
 
-// `screen_hint=signup` opens Auth0's signup tab — this is what makes /signup a
-// genuinely different destination from /login rather than the same form twice.
+function saveOAuthState(state, { next, intent = 'login', plan = '' }) {
+  db.prepare('INSERT INTO oauth_states (state, next, intent, plan, expiry) VALUES (?, ?, ?, ?, ?)')
+    .run(state, next, intent === 'signup' ? 'signup' : 'login', sanitizePlan(plan), Date.now() + OAUTH_STATE_TTL_MS)
+}
+
+function takeOAuthState(state) {
+  db.prepare('DELETE FROM oauth_states WHERE expiry < ?').run(Date.now())
+  const row = db.prepare('SELECT next, intent, plan, expiry FROM oauth_states WHERE state = ?').get(state)
+  if (!row) return null
+  db.prepare('DELETE FROM oauth_states WHERE state = ?').run(state)
+  if (row.expiry < Date.now()) return null
+  return {
+    next: row.next,
+    intent: row.intent === 'signup' ? 'signup' : 'login',
+    plan: sanitizePlan(row.plan),
+    expiry: row.expiry,
+  }
+}
+
+function authErrorRedirect(code, { next, intent, plan } = {}) {
+  const path = intent === 'signup' ? '/signup' : '/login'
+  const params = new URLSearchParams()
+  params.set('error', mapAuth0Error(code))
+  const safe = safeNext(next)
+  if (safe && safe !== APP_HOME) params.set('next', safe)
+  const cleanPlan = sanitizePlan(plan)
+  if (cleanPlan) params.set('plan', cleanPlan)
+  return `${path}?${params}`
+}
+
+// `screen_hint=signup` is still forwarded for Auth0's own logs / hosted UI, but
+// the Google connection is what actually creates the account.
 authRouter.get('/api/auth/login', rateLimit({ windowMs: 15 * 60_000, max: 30, key: 'auth-start' }), (req, res) => {
   const next = safeNext(req.query.next)
+  const intent = req.query.screen_hint === 'signup' ? 'signup' : 'login'
+  const plan = sanitizePlan(req.query.plan)
   if (!auth0Configured()) {
-    return res.redirect(`/login?error=auth0_not_configured&next=${encodeURIComponent(next)}`)
+    return res.redirect(authErrorRedirect('unavailable', { next, intent, plan }))
   }
   const state = crypto.randomBytes(16).toString('hex')
-  pendingStates.set(state, { expiry: Date.now() + 10 * 60 * 1000, next })
+  saveOAuthState(state, { next, intent, plan })
   const url = new URL(`https://${env.AUTH0_DOMAIN}/authorize`)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('client_id', env.AUTH0_CLIENT_ID)
   url.searchParams.set('redirect_uri', `${env.APP_URL}/api/auth/callback`)
   url.searchParams.set('scope', 'openid profile email')
   url.searchParams.set('state', state)
+  url.searchParams.set('connection', GOOGLE_CONNECTION)
   // Audience + first-party API "Allow Skipping User Consent" skips the Authorize App screen.
   if (env.AUTH0_AUDIENCE) url.searchParams.set('audience', env.AUTH0_AUDIENCE)
-  if (req.query.screen_hint === 'signup') url.searchParams.set('screen_hint', 'signup')
+  if (intent === 'signup') url.searchParams.set('screen_hint', 'signup')
   res.redirect(url.toString())
 })
 
 authRouter.get('/api/auth/callback', async (req, res) => {
+  const { code, state, error } = req.query
+  const pending = state ? takeOAuthState(state) : null
+  const ctx = {
+    next: pending?.next || APP_HOME,
+    intent: pending?.intent || 'login',
+    plan: pending?.plan || '',
+  }
   try {
-    const { code, state, error, error_description: desc } = req.query
-    if (error) return res.redirect(`/login?error=${encodeURIComponent(desc || error)}`)
-    const pending = pendingStates.get(state)
-    pendingStates.delete(state)
-    for (const [s, p] of pendingStates) if (p.expiry < Date.now()) pendingStates.delete(s)
-    if (!pending || pending.expiry < Date.now()) return res.redirect('/login?error=invalid_state')
+    if (error) return res.redirect(authErrorRedirect(error, ctx))
+    if (!pending) return res.redirect(authErrorRedirect('timeout', ctx))
 
     const tokenRes = await fetch(`https://${env.AUTH0_DOMAIN}/oauth/token`, {
       method: 'POST',
@@ -235,7 +283,7 @@ authRouter.get('/api/auth/callback', async (req, res) => {
     // the victim's workspace. A profile carrying an email must have proven it.
     if (profile.email && profile.email_verified === false) {
       console.warn('[auth] refused login with unverified email claim:', profile.email)
-      return res.redirect(`/login?error=${encodeURIComponent('Verify your email address first — check your inbox for the confirmation link')}`)
+      return res.redirect(authErrorRedirect('unverified_email', ctx))
     }
 
     const user = upsertUser({
@@ -243,12 +291,13 @@ authRouter.get('/api/auth/callback', async (req, res) => {
       email: profile.email || `${profile.sub}@no-email.auth0`,
       name: profile.name || profile.nickname || '',
       picture: profile.picture || '',
+      plan: ctx.plan,
     })
     setSession(res, user.id)
     res.redirect(safeNext(pending.next))
   } catch (err) {
     console.error('[auth] callback error', err)
-    res.redirect(`/login?error=${encodeURIComponent('Login failed — check server logs and Auth0 settings')}`)
+    res.redirect(authErrorRedirect('oauth_failed', ctx))
   }
 })
 
@@ -268,7 +317,7 @@ authRouter.post(
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address' })
     const name = String(req.body?.name || '').trim()
     const existing = db.prepare('SELECT id FROM users WHERE sub = ?').get(`dev:${email}`)
-    const user = upsertUser({ sub: `dev:${email}`, email, name })
+    const user = upsertUser({ sub: `dev:${email}`, email, name, plan: sanitizePlan(req.body?.plan) })
     setSession(res, user.id)
     res.json({ ok: true, created: !existing, redirect: safeNext(req.body?.next) })
   }

@@ -18,7 +18,7 @@
 //   2. A count must never be a lie. A source that failed to load says so and
 //      shows no number, because a 0 here reads as "nothing to do".
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { clockTime, Icon } from '../ui.jsx'
@@ -33,7 +33,7 @@ const FOLD = 8
 
 export default function NeedsYou({ decisions, onDecisionsChanged }) {
   const queue = useNeedsYou(decisions, onDecisionsChanged)
-  const { sources, counts, unavailable, loading, total, leadNames, setPaused } = queue
+  const { sources, counts, unavailable, pending, loading, total, leadNames, setPaused } = queue
 
   const [tab, setTab] = useState('all')
   const [live, setLive] = useState('')
@@ -55,6 +55,16 @@ export default function NeedsYou({ decisions, onDecisionsChanged }) {
     if (!unavailable.length) return
     setLive(`${unavailable.map((id) => SOURCE_META[id].label).join(' and ')} could not be loaded — the counts below are incomplete.`)
   }, [unavailable.join(',')]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The mirror announcement: rows appear one source at a time, so "the list is
+  // now complete" is real information, not chrome.
+  const hadPending = useRef(false)
+  useEffect(() => {
+    if (pending.length) { hadPending.current = true; return }
+    if (!hadPending.current) return
+    hadPending.current = false
+    setLive(`Finished checking — ${total} thing${total === 1 ? '' : 's'} need${total === 1 ? 's' : ''} you.`)
+  }, [pending.length, total])
 
   const shown = useMemo(
     () => (tab === 'all' ? queue.items : queue.items.filter((i) => i.source === tab)),
@@ -143,10 +153,13 @@ export default function NeedsYou({ decisions, onDecisionsChanged }) {
       label: (
         <>
           All
-          <Pill>{unavailable.length ? `${total}+` : total}</Pill>
+          <Pill>{unavailable.length || pending.length ? `${total}+` : total}</Pill>
           <span className="sr-only">
-            , {unavailable.length
-              ? `at least ${total} things need you — ${unavailable.map((id) => SOURCE_META[id].label).join(' and ')} could not be loaded`
+            , {unavailable.length || pending.length
+              ? `at least ${total} things need you — ${[
+                  unavailable.length ? `${unavailable.map((id) => SOURCE_META[id].label).join(' and ')} could not be loaded` : '',
+                  pending.length ? `${pending.map((id) => SOURCE_META[id].label).join(' and ')} still being checked` : '',
+                ].filter(Boolean).join('; ')}`
               : `${total} thing${total === 1 ? '' : 's'} need${total === 1 ? 's' : ''} you`}
           </span>
         </>
@@ -161,9 +174,11 @@ export default function NeedsYou({ decisions, onDecisionsChanged }) {
             {SOURCE_META[id].label}
             <Pill unknown={count === null}>{count === null ? '—' : count}</Pill>
             <span className="sr-only">
-              , {count === null
-                ? 'count unavailable, this source could not be loaded'
-                : SOURCE_META[id].noun(count)}
+              , {count !== null
+                ? SOURCE_META[id].noun(count)
+                : sources[id].status === 'loading'
+                  ? 'still being checked'
+                  : 'count unavailable, this source could not be loaded'}
             </span>
           </>
         ),
@@ -172,7 +187,7 @@ export default function NeedsYou({ decisions, onDecisionsChanged }) {
   ]
 
   const heading = tab === 'all'
-    ? (unavailable.length ? `at least ${total}` : String(total))
+    ? (unavailable.length || pending.length ? `at least ${total}` : String(total))
     : counts[tab] === null ? 'unknown' : String(counts[tab])
 
   const visible = expanded ? shown : shown.slice(0, FOLD)
@@ -205,6 +220,15 @@ export default function NeedsYou({ decisions, onDecisionsChanged }) {
           <button type="button" className="btn-ghost mt-2 !py-1 !text-xs" onClick={() => queue.reload()}>
             Try again
           </button>
+        </div>
+      )}
+
+      {/* Rows land one source at a time, and a half-loaded queue is
+          indistinguishable from a finished one. Until every source has
+          answered, say so — otherwise "3 things" reads as the whole truth. */}
+      {pending.length > 0 && shown.length > 0 && (
+        <div className="mx-4 mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-800" role="status">
+          Still checking {pending.map((id) => SOURCE_META[id].label.toLowerCase()).join(', ')} — more may appear in a moment.
         </div>
       )}
 

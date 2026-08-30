@@ -9,14 +9,19 @@ export class ApiError extends Error {
 
 // The client lens, applied in one place.
 //
-// Only these read routes understand `clientId`, because only campaigns, leads
-// and mailboxes carry a `client_id`. Appending it everywhere would be a lie by
-// omission — Reports and Monitoring really are workspace-wide, and the sidebar
-// says so rather than quietly returning unfiltered numbers under a filter.
+// Only these read routes understand `clientId`. Campaigns, leads and mailboxes
+// carry a `client_id` directly; the dashboard, approval drafts, tasks and
+// reminders reach one through their campaign or lead. Appending it everywhere
+// would be a lie by omission — Goals, Reports and Monitoring really are
+// workspace-wide, and the sidebar says so rather than quietly returning
+// unfiltered numbers under a filter.
 //
 // Doing it here rather than in each page means a page cannot forget, and the
 // lens can be switched off in one edit.
-const LENS_AWARE = ['/api/leads', '/api/campaign-list', '/api/mailboxes/fleet']
+const LENS_AWARE = [
+  '/api/leads', '/api/campaign-list', '/api/mailboxes/fleet',
+  '/api/dashboard', '/api/drafts', '/api/tasks', '/api/reminders',
+]
 
 function withLens(url) {
   if (typeof url !== 'string' || !url.startsWith('/api/')) return url

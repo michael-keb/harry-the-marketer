@@ -13,11 +13,47 @@ import { Banner, FieldError, absolute, fromLocalInput, leadName, relative } from
 
 const splitAddresses = (raw) => String(raw || '').split(/[,\s;]+/).map((v) => v.trim()).filter(Boolean)
 
+// ------------------------------------------------------------- reply drafts --
+//
+// A half-typed reply must survive a thread switch, a refresh and the mobile
+// back button — the composer unmounts on all three. Drafts live in
+// localStorage keyed per thread and are cleared at the same moment the
+// textarea is: only once the server has taken the send.
+const DRAFTS_KEY = 'harry.replyDrafts'
+const DRAFTS_CAP = 50
+
+function readDraftStore() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch { return {} }
+}
+
+export function savedReply(threadKey) {
+  const entry = readDraftStore()[threadKey]
+  return typeof entry?.body === 'string' ? entry.body : ''
+}
+
+export function rememberReply(threadKey, body) {
+  try {
+    const store = readDraftStore()
+    if (String(body || '').trim()) store[threadKey] = { body, at: Date.now() }
+    else delete store[threadKey]
+    // Newest DRAFTS_CAP threads only — an unbounded store would quietly eat
+    // the localStorage quota shared with the client lens and order history.
+    const keep = Object.keys(store)
+      .sort((a, b) => (store[b].at || 0) - (store[a].at || 0))
+      .slice(0, DRAFTS_CAP)
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(Object.fromEntries(keep.map((k) => [k, store[k]]))))
+  } catch { /* private browsing — the draft lives only as long as the textarea */ }
+}
+
 // ------------------------------------------------------------- manual reply --
 
 export function ReplyComposer({ thread, onSent }) {
   const toast = useToast()
-  const [body, setBody] = useState('')
+  const draftKey = String(thread.threadKey || thread.id)
+  const [body, setBody] = useState(() => savedReply(draftKey))
   const [subject, setSubject] = useState('')
   const [sendLater, setSendLater] = useState(false)
   const [sendAt, setSendAt] = useState('')
@@ -35,7 +71,11 @@ export function ReplyComposer({ thread, onSent }) {
   const addAgreementLink = async () => {
     try {
       const consent = await api.post(`/api/leads/${lead.id}/agreement`)
-      setBody((current) => `${current.trimEnd()}${current.trim() ? '\n\n' : ''}When you have a moment, this confirms what you're agreeing to — it takes seconds:\n${consent.url}\n`)
+      setBody((current) => {
+        const next = `${current.trimEnd()}${current.trim() ? '\n\n' : ''}When you have a moment, this confirms what you're agreeing to — it takes seconds:\n${consent.url}\n`
+        rememberReply(draftKey, next)
+        return next
+      })
       toast(consent.status === 'signed' ? 'They already signed — link added anyway' : 'Agreement link added to your reply')
     } catch (err) { toast(err.message, 'error') }
   }
@@ -51,8 +91,10 @@ export function ReplyComposer({ thread, onSent }) {
         confirm: true,
       })
       setConfirming(false)
-      // The typed reply is only cleared once the server has taken it.
+      // The typed reply is only cleared once the server has taken it — and the
+      // persisted copy goes with it.
       setBody('')
+      rememberReply(draftKey, '')
       setSubject('')
       setSendLater(false)
       setSendAt('')
@@ -73,7 +115,7 @@ export function ReplyComposer({ thread, onSent }) {
         className="input min-h-24"
         placeholder="Write a manual reply — it sends from the campaign mailbox and joins the thread…"
         value={body}
-        onChange={(e) => setBody(e.target.value)}
+        onChange={(e) => { setBody(e.target.value); rememberReply(draftKey, e.target.value) }}
       />
 
       <button type="button" className="text-xs text-slate-600 underline cursor-pointer hover:text-ink-900" aria-expanded={extras} onClick={() => setExtras((v) => !v)}>
@@ -154,7 +196,8 @@ export function ReplyComposer({ thread, onSent }) {
 // nothing sends without an explicit OK naming both numbers.
 export function SmsReplyComposer({ thread, onSent }) {
   const toast = useToast()
-  const [body, setBody] = useState('')
+  const draftKey = String(thread.threadKey || thread.id)
+  const [body, setBody] = useState(() => savedReply(draftKey))
   const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -172,6 +215,7 @@ export function SmsReplyComposer({ thread, onSent }) {
       const result = await api.post(`/api/inbox/threads/${thread.id}/reply`, { body, confirm: true })
       setConfirming(false)
       setBody('')
+      rememberReply(draftKey, '')
       onSent(result)
     } catch (err) {
       setError(err)
@@ -191,7 +235,7 @@ export function SmsReplyComposer({ thread, onSent }) {
         maxLength={1600}
         placeholder={`Reply by SMS${from ? ` — it sends from ${from}` : ''} and joins this conversation…`}
         value={body}
-        onChange={(e) => setBody(e.target.value)}
+        onChange={(e) => { setBody(e.target.value); rememberReply(draftKey, e.target.value) }}
       />
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-slate-500" aria-live="polite">

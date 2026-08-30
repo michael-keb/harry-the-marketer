@@ -18,7 +18,7 @@ import { Confirm } from '../parity-ui.jsx'
 import { Modal, useToast, timeAgo } from '../ui.jsx'
 import { Field, Panel, codeOf, errorFor, messageOf, nfmt, useOffsetList } from './shared.jsx'
 
-export default function ManagePanel({ campaign, onChanged, onDuplicateRequest, duplicateOpen, onCloseDuplicate }) {
+export default function ManagePanel({ campaign, onChanged, onDuplicateRequest, duplicateOpen, onCloseDuplicate, onRunEngine, engineBusy }) {
   const toast = useToast()
   const navigate = useNavigate()
   const [archiving, setArchiving] = useState(false)
@@ -83,6 +83,22 @@ export default function ManagePanel({ campaign, onChanged, onDuplicateRequest, d
           {' '}— assignment is a label, not a permission: everyone in the workspace can still act on this campaign.
         </p>
       </Panel>
+
+      {/* Moved here from the page header, where a primary "Run engine now"
+          outranked Start itself. The engine runs on its own every 20 seconds;
+          a manual tick is a debugging convenience, so it lives with the other
+          rarely-needed controls. */}
+      {onRunEngine && (
+        <Panel
+          id="engine"
+          title="Engine"
+          note="The engine runs automatically every 20 seconds. Running it by hand changes nothing the next automatic run would not — it only saves the wait."
+        >
+          <button className="btn-ghost cursor-pointer" disabled={engineBusy} onClick={onRunEngine}>
+            {engineBusy ? 'Running…' : 'Run engine now'}
+          </button>
+        </Panel>
+      )}
 
       {archiving && (
         <Confirm

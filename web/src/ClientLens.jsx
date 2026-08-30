@@ -124,8 +124,9 @@ export default function ClientLens() {
           concludes their leads have disappeared. */}
       {client && (
         <p className="mt-1 text-[11px] leading-snug text-accent-300">
-          Campaigns, leads and mailboxes are filtered to this client. Reports and
-          Monitoring stay workspace-wide.
+          Campaigns, leads, mailboxes, the dashboard and its Needs You queue are
+          filtered to this client. Goals, Reports and Monitoring stay
+          workspace-wide.
         </p>
       )}
 

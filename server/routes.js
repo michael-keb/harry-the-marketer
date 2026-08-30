@@ -5,8 +5,8 @@ import { requireUser, workspace } from './auth.js'
 import { googleConfigured, microsoftConfigured, auth0Configured, devLoginEnabled, env } from './env.js'
 import { telemetryRecent, telemetryStats, telemetryFailures } from './telemetry.js'
 import { parsePlaybook, playbookChannels, DEFAULT_PLAYBOOK } from './playbook.js'
-import { simulateReply, remainingQuota, sendEmail } from './mailer.js'
-import { tick, campaignCtx, routeReply } from './engine.js'
+import { simulateReply, remainingQuota } from './mailer.js'
+import { tick } from './engine.js'
 import { spendStatus } from './ai-spend.js'
 import { aiStatus, CORE_INTENTS, planGoal, goalPlaybook, qualifyLead, researchLead, generatePlaybook, previewPlaybookEmails, composeStepSample, exampleLead } from './ai.js'
 import { setSendInstruction, sanitizeInstruction } from '../shared/playbook-edit.js'
@@ -791,7 +791,10 @@ api.post('/engine/tick', async (req, res) => {
 
 api.get('/drafts', (req, res) => {
   const owner = db.prepare('SELECT require_approval FROM users WHERE id = ?').get(req.wsId)
-  res.json({ requireApproval: Boolean(owner?.require_approval), drafts: pendingDrafts(req.wsId) })
+  // Client Lens: the approval queue narrows with the sidebar, so the Needs You
+  // count and the Inbox folder agree with what the lens claims is shown.
+  const clientId = Number(req.query.clientId) || 0
+  res.json({ requireApproval: Boolean(owner?.require_approval), drafts: pendingDrafts(req.wsId, 200, clientId) })
 })
 
 function getDraft(req, res) {
@@ -987,84 +990,9 @@ api.delete('/sheet', (req, res) => {
 })
 
 // ---- inbox ------------------------------------------------------------------
-
-api.get('/inbox', (req, res) => {
-  const intent = String(req.query.intent || '')
-  const unreadOnly = req.query.unread === '1'
-  let rows = db.prepare(
-    `SELECT m.*, l.first_name, l.last_name, l.company, c.name AS campaign_name
-     FROM messages m
-     LEFT JOIN leads l ON l.id = m.lead_id
-     LEFT JOIN campaigns c ON c.id = m.campaign_id
-     WHERE m.user_id = ? AND m.direction = 'in'
-     ORDER BY m.id DESC LIMIT 500`
-  ).all(req.wsId)
-  if (intent) rows = rows.filter((m) => (m.intent || 'unclassified') === intent)
-  if (unreadOnly) rows = rows.filter((m) => !m.is_read)
-  res.json(rows)
-})
-
-api.get('/inbox/thread/:threadId', (req, res) => {
-  const rows = db.prepare(
-    'SELECT * FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY id'
-  ).all(req.wsId, req.params.threadId)
-  if (!rows.length) return res.status(404).json({ error: 'Thread not found' })
-  const first = rows.find((m) => m.campaign_id && m.lead_id)
-  const cl = first
-    ? db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(first.campaign_id, first.lead_id)
-    : null
-  res.json({ messages: rows, campaignLead: cl })
-})
-
-api.post('/inbox/:messageId/read', (req, res) => {
-  db.prepare('UPDATE messages SET is_read = 1 WHERE id = ? AND user_id = ?').run(req.params.messageId, req.wsId)
-  res.json({ ok: true })
-})
-
-// Reclassify a reply and reroute the lead through the playbook accordingly.
-api.post('/inbox/:messageId/reclassify', async (req, res) => {
-  const msg = db.prepare("SELECT * FROM messages WHERE id = ? AND user_id = ? AND direction = 'in'").get(req.params.messageId, req.wsId)
-  if (!msg) return res.status(404).json({ error: 'Message not found' })
-  const intent = String(req.body?.intent || '').trim().toLowerCase()
-  if (!intent) return res.status(400).json({ error: 'intent required' })
-  db.prepare('UPDATE messages SET intent = ? WHERE id = ?').run(intent, msg.id)
-  const cl = msg.campaign_id && msg.lead_id
-    ? db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(msg.campaign_id, msg.lead_id)
-    : null
-  if (cl && ['waiting', 'needs_attention'].includes(cl.state)) {
-    const ctx = campaignCtx(msg.campaign_id)
-    if (ctx?.graph?.valid) {
-      db.prepare("UPDATE campaign_leads SET state = 'waiting' WHERE id = ?").run(cl.id)
-      cl.state = 'waiting'
-      // A person chose this intent — say so, or an unsubscribe they confirmed
-      // would be parked as if the classifier had guessed it.
-      await routeReply(ctx, cl, intent, null, { setBy: req.user?.email || 'user' })
-    }
-  }
-  logEvent(req.wsId, { campaignId: msg.campaign_id, leadId: msg.lead_id, type: 'reclassified', detail: intent })
-  res.json({ ok: true })
-})
-
-// Manual reply from the inbox (sent through the campaign's mailbox).
-api.post('/inbox/thread/:threadId/reply', async (req, res) => {
-  const rows = db.prepare('SELECT * FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY id').all(req.wsId, req.params.threadId)
-  if (!rows.length) return res.status(404).json({ error: 'Thread not found' })
-  const body = String(req.body?.body || '').trim()
-  if (!body) return res.status(400).json({ error: 'Reply body required' })
-  const anchor = rows.find((m) => m.campaign_id && m.lead_id) || rows[0]
-  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(anchor.campaign_id)
-  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(anchor.lead_id)
-  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(anchor.mailbox_id)
-  if (!campaign || !lead || !mailbox) return res.status(400).json({ error: 'Thread is missing campaign context' })
-  const lastSubject = rows[rows.length - 1].subject || ''
-  const subject = lastSubject.startsWith('Re:') ? lastSubject : `Re: ${lastSubject}`
-  try {
-    await sendEmail({ mailbox, user: { id: req.wsId }, campaign, lead, nodeId: 'manual', subject, body })
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(400).json({ error: String(err.message || err) })
-  }
-})
+// The inbox API lives in server/parity/inbox.js. The legacy read/reclassify/
+// reply routes that used to sit here were dead code — and the reply one sent
+// mail without the confirm gate its replacement requires — so they are gone.
 
 api.get('/inbox/intents', (req, res) => {
   const used = db.prepare(
@@ -1363,29 +1291,45 @@ api.get('/analytics', (req, res) => {
 
 api.get('/dashboard', (req, res) => {
   const uid = req.wsId
+  // Client Lens. When the sidebar narrows the workspace to one client, the
+  // KPIs, the 14-day chart and the parked-lead queue narrow with it — a page
+  // that claims to be filtered while showing workspace numbers is how the lens
+  // starts lying. Activity and the engine/AI status stay workspace-wide
+  // (engine health has no client, and workspace-level events carry no campaign
+  // or lead to scope by); `scope` in the payload names them so the UI can too.
+  const clientId = Number(req.query.clientId) || 0
+  const campLens = clientId ? ' AND client_id = ?' : ''
+  const idArgs = clientId ? [clientId] : []
+  // A message belongs to a client through its campaign or its mailbox — the
+  // same rule clientAllowance() bills by.
+  const msgLens = clientId
+    ? ` AND (campaign_id IN (SELECT id FROM campaigns WHERE user_id = ? AND client_id = ?)
+         OR mailbox_id IN (SELECT id FROM mailboxes WHERE user_id = ? AND client_id = ?))`
+    : ''
+  const msgArgs = clientId ? [uid, clientId, uid, clientId] : []
   const count = (sql, ...args) => db.prepare(sql).get(uid, ...args).n
   const stats = {
-    leads: count('SELECT COUNT(*) n FROM leads WHERE user_id = ?'),
-    activeCampaigns: count("SELECT COUNT(*) n FROM campaigns WHERE user_id = ? AND status = 'running'"),
-    sent: count("SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'out'"),
-    replies: count("SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'in'"),
-    interested: count("SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'in' AND intent = 'interested'"),
+    leads: count(`SELECT COUNT(*) n FROM leads WHERE user_id = ?${campLens}`, ...idArgs),
+    activeCampaigns: count(`SELECT COUNT(*) n FROM campaigns WHERE user_id = ? AND status = 'running'${campLens}`, ...idArgs),
+    sent: count(`SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'out'${msgLens}`, ...msgArgs),
+    replies: count(`SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'in'${msgLens}`, ...msgArgs),
+    interested: count(`SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'in' AND intent = 'interested'${msgLens}`, ...msgArgs),
     won: db.prepare(
-      "SELECT COUNT(*) n FROM campaign_leads cl JOIN campaigns c ON c.id = cl.campaign_id WHERE c.user_id = ? AND cl.outcome = 'won'"
-    ).get(uid).n,
+      `SELECT COUNT(*) n FROM campaign_leads cl JOIN campaigns c ON c.id = cl.campaign_id WHERE c.user_id = ? AND cl.outcome = 'won'${clientId ? ' AND c.client_id = ?' : ''}`
+    ).get(uid, ...idArgs).n,
     needsAttention: db.prepare(
-      "SELECT COUNT(*) n FROM campaign_leads cl JOIN campaigns c ON c.id = cl.campaign_id WHERE c.user_id = ? AND cl.state = 'needs_attention'"
-    ).get(uid).n,
-    unread: count("SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'in' AND is_read = 0"),
-    awaitingApproval: pendingCount(uid),
+      `SELECT COUNT(*) n FROM campaign_leads cl JOIN campaigns c ON c.id = cl.campaign_id WHERE c.user_id = ? AND cl.state = 'needs_attention'${clientId ? ' AND c.client_id = ?' : ''}`
+    ).get(uid, ...idArgs).n,
+    unread: count(`SELECT COUNT(*) n FROM messages WHERE user_id = ? AND direction = 'in' AND is_read = 0${msgLens}`, ...msgArgs),
+    awaitingApproval: pendingCount(uid, clientId),
   }
   const sentByDay = db.prepare(
     `SELECT date(created_at) day,
             SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) sent,
             SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) replies
-     FROM messages WHERE user_id = ? AND created_at >= date('now', '-13 days')
+     FROM messages WHERE user_id = ? AND created_at >= date('now', '-13 days')${msgLens}
      GROUP BY day ORDER BY day`
-  ).all(uid)
+  ).all(uid, ...msgArgs)
   const activity = db.prepare(
     `SELECT e.*, l.email AS lead_email, c.name AS campaign_name
      FROM events e LEFT JOIN leads l ON l.id = e.lead_id LEFT JOIN campaigns c ON c.id = e.campaign_id
@@ -1398,12 +1342,13 @@ api.get('/dashboard', (req, res) => {
      FROM campaign_leads cl
      JOIN campaigns c ON c.id = cl.campaign_id
      JOIN leads l ON l.id = cl.lead_id
-     WHERE c.user_id = ? AND cl.state IN ('needs_attention', 'error')
+     WHERE c.user_id = ? AND cl.state IN ('needs_attention', 'error')${clientId ? ' AND c.client_id = ?' : ''}
      ORDER BY cl.updated_at DESC LIMIT 50`
-  ).all(uid)
+  ).all(uid, ...idArgs)
   res.json({
     stats, sentByDay, activity, attention, ai: aiStatus(),
     engine: { lastTick: kvGet('engine_last_tick'), intervalMs: env.ENGINE_INTERVAL_MS },
+    scope: clientId ? { clientId, workspaceWide: ['activity', 'ai', 'engine'] } : null,
   })
 })
 

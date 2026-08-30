@@ -94,9 +94,9 @@ describe('ClientLens — publishing the selection', () => {
   })
 
   it('leaves workspace-wide routes alone rather than pretending to filter them', async () => {
-    // Reports and Monitoring really are workspace-wide. Appending clientId to
-    // them would be a lie by omission — the numbers would not change and the
-    // reader would believe they had.
+    // Goals, Reports and Monitoring really are workspace-wide. Appending
+    // clientId to them would be a lie by omission — the numbers would not
+    // change and the reader would believe they had.
     const { ClientLens, api } = await load()
     render(<ClientLens />)
     await screen.findByRole('button', { name: /Viewing:/ })
@@ -106,6 +106,30 @@ describe('ClientLens — publishing the selection', () => {
 
     await api.get('/api/reports/overview')
     expect(calls.at(-1)).toBe('/api/reports/overview')
+    await api.get('/api/goals')
+    expect(calls.at(-1)).toBe('/api/goals')
+  })
+
+  it('filters the dashboard and every Needs You source', async () => {
+    // The audit's headline defect: the sidebar claimed a filtered view while
+    // the dashboard, approvals, tasks and reminders stayed workspace-wide.
+    // These four routes now narrow with the lens, so the KPIs and the Needs
+    // You queue mean what the sidebar says they mean.
+    const { ClientLens, api } = await load()
+    render(<ClientLens />)
+    await screen.findByRole('button', { name: /Viewing:/ })
+
+    openMenu()
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Acme' })) })
+
+    await api.get('/api/dashboard')
+    expect(calls.at(-1)).toBe('/api/dashboard?clientId=7')
+    await api.get('/api/drafts')
+    expect(calls.at(-1)).toBe('/api/drafts?clientId=7')
+    await api.get('/api/tasks?status=open&limit=50')
+    expect(calls.at(-1)).toBe('/api/tasks?status=open&limit=50&clientId=7')
+    await api.get('/api/reminders?status=pending&due=overdue&limit=50')
+    expect(calls.at(-1)).toBe('/api/reminders?status=pending&due=overdue&limit=50&clientId=7')
   })
 
   it('removes the id when the lens is cleared', async () => {
@@ -153,8 +177,8 @@ describe('ClientLens — saying so out loud', () => {
     expect(screen.getByRole('button', { name: /Viewing:\s*Acme/ })).toBeInTheDocument()
     // Continuously, not once: this sentence is the mitigation for "my leads
     // have disappeared".
-    expect(screen.getByText(/Campaigns, leads and mailboxes are filtered to this client/)).toBeInTheDocument()
-    expect(screen.getByText(/Reports and\s+Monitoring stay workspace-wide/)).toBeInTheDocument()
+    expect(screen.getByText(/Campaigns, leads, mailboxes, the dashboard and its Needs You queue are\s+filtered to this client/)).toBeInTheDocument()
+    expect(screen.getByText(/Goals, Reports and Monitoring stay\s+workspace-wide/)).toBeInTheDocument()
   })
 
   it('says nothing extra when no client is selected', async () => {

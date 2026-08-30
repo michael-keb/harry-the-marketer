@@ -9,7 +9,8 @@ import { Check } from '../site/ui.jsx'
  *
  * The left column is the form. The right column is the reassurance panel —
  * present on signup (where the visitor is deciding) and omitted on login
- * (where they have already decided and just want the form).
+ * (where they have already decided and just want the form). On small screens
+ * the panel stacks under the form so the trust copy is never stripped.
  */
 export default function AuthLayout({ title, lede, children, footer, aside }) {
   const location = useLocation()
@@ -37,7 +38,7 @@ export default function AuthLayout({ title, lede, children, footer, aside }) {
         </div>
 
         {aside && (
-          <div className="hidden lg:block">
+          <div>
             <div className="rounded-xl border border-slate-200 bg-white p-8">
               <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-600">{aside.title}</h2>
               <ul className="mt-6 space-y-4">

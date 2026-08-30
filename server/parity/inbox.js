@@ -1146,6 +1146,14 @@ export function register(api) {
     const at = now()
     const where = ['workspace_id = ?']
     const args = [req.wsId]
+    // Client Lens: a reminder belongs to a client through its lead. The clause
+    // joins the WHERE before the keyset cursor below, so every page of one
+    // listing is cut by the same rule.
+    const clientId = int(req.query, 'clientId', { min: 1, fallback: 0 })
+    if (clientId) {
+      where.push('lead_id IN (SELECT id FROM leads WHERE user_id = ? AND client_id = ?)')
+      args.push(req.wsId, clientId)
+    }
     if (status !== 'all') { where.push('status = ?'); args.push(status) }
     if (due === 'overdue') { where.push('reminder_at < ?'); args.push(at.toISOString()) }
     if (due === 'today') {

@@ -94,16 +94,16 @@ export default function LeadsPanel({ campaign, steps = [], poolMailboxes = [], s
             className={`btn-ghost cursor-pointer py-1.5 ${list.total ? '' : 'pointer-events-none opacity-40'}`}
             href={exportUrl}
             aria-disabled={list.total ? undefined : 'true'}
-            aria-label={list.total ? `Export ${list.total} leads matching your filters as CSV` : 'No leads to export'}
+            aria-label={list.total ? `Export ${list.total} lead${list.total === 1 ? '' : 's'} matching your filters as CSV` : 'No leads to export'}
             download
           >
-            {list.total ? `Export ${nfmt(list.total)} leads` : 'No leads to export'}
+            {list.total ? `Export ${nfmt(list.total)} lead${list.total === 1 ? '' : 's'}` : 'No leads to export'}
           </a>
           <button className="btn-ghost cursor-pointer py-1.5" onClick={() => setImporting(true)}>Attach leads</button>
         </>
       }
     >
-      <LiveRegion message={note || (list.loading ? '' : `${list.total} leads match your filters`)} />
+      <LiveRegion message={note || (list.loading ? '' : `${list.total} lead${list.total === 1 ? ' matches' : 's match'} your filters`)} />
 
       <div className="mb-3 flex flex-wrap items-end gap-3">
         <div className="min-w-44 flex-1">
@@ -167,7 +167,7 @@ export default function LeadsPanel({ campaign, steps = [], poolMailboxes = [], s
           <TableScroll label="Leads in this campaign">
             <table className="w-full min-w-[840px] text-sm">
               <caption className="sr-only">
-                {list.total} leads in this campaign{filtered ? `, ${filterSentence}` : ''}
+                {list.total} lead{list.total === 1 ? '' : 's'} in this campaign{filtered ? `, ${filterSentence}` : ''}
               </caption>
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500">

@@ -37,13 +37,21 @@ export function discardStaleDraft(draft) {
   })
 }
 
-export function pendingCount(wsId) {
+// `clientId` is the Client Lens: 0 means the whole workspace, anything else
+// narrows the queue to drafts whose campaign belongs to that client.
+export function pendingCount(wsId, clientId = 0) {
+  if (clientId) {
+    return db.prepare(
+      `SELECT COUNT(*) n FROM drafts d JOIN campaigns c ON c.id = d.campaign_id
+       WHERE d.user_id = ? AND d.status = 'pending' AND c.client_id = ?`
+    ).get(wsId, clientId).n
+  }
   return db.prepare("SELECT COUNT(*) n FROM drafts WHERE user_id = ? AND status = 'pending'").get(wsId).n
 }
 
 // Everything waiting on a human, newest first, with enough context to decide
 // without opening anything else.
-export function pendingDrafts(wsId, limit = 200) {
+export function pendingDrafts(wsId, limit = 200, clientId = 0) {
   return db.prepare(
     `SELECT d.*, l.email AS lead_email, l.first_name, l.last_name, l.company, l.title,
             c.name AS campaign_name, c.status AS campaign_status,
@@ -53,7 +61,7 @@ export function pendingDrafts(wsId, limit = 200) {
      FROM drafts d
      JOIN leads l ON l.id = d.lead_id
      JOIN campaigns c ON c.id = d.campaign_id
-     WHERE d.user_id = ? AND d.status = 'pending'
+     WHERE d.user_id = ? AND d.status = 'pending'${clientId ? ' AND c.client_id = ?' : ''}
      ORDER BY d.id ASC LIMIT ?`
-  ).all(wsId, limit)
+  ).all(...(clientId ? [wsId, clientId, limit] : [wsId, limit]))
 }

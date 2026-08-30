@@ -30,3 +30,11 @@ export function safeNext(value, fallback = '/app') {
   if (next.startsWith('/api/')) return fallback
   return next
 }
+
+export function authSearch({ next, plan } = {}) {
+  const params = new URLSearchParams()
+  if (next && next !== '/app') params.set('next', next)
+  if (plan) params.set('plan', plan)
+  const q = params.toString()
+  return q ? `?${q}` : ''
+}

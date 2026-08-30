@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
-import { Spinner, EmptyState, ErrorState, Modal, Badge, Icon, PageHeader, useToast, timeAgo } from '../ui.jsx'
+import { Spinner, EmptyState, ErrorState, Modal, Badge, Icon, Notice, PageHeader, useToast, timeAgo } from '../ui.jsx'
+import { useClientLens } from '../ClientLens.jsx'
 
 export default function Goals() {
   const toast = useToast()
+  const lens = useClientLens()
   const [goals, setGoals] = useState(null)
   const [error, setError] = useState(null)
   const [description, setDescription] = useState('')
@@ -41,6 +43,16 @@ export default function Goals() {
   return (
     <div className="space-y-5">
       <PageHeader title="Revenue goals" lead="State the outcome; the AI builds the go-to-market workflow." />
+
+      {/* Goals have no client of their own, so the lens cannot filter them.
+          While a client is selected, that has to be said on the page itself —
+          the sidebar's disclosure is out of view by the time these numbers are
+          being read as that client's. */}
+      {lens.client && (
+        <Notice tone="info" title="Workspace-wide — the client lens does not filter this page.">
+          These are every goal in the workspace, not only {lens.client.name}&rsquo;s.
+        </Notice>
+      )}
 
       {/* The "don't make me think" surface */}
       <form onSubmit={build} className="card p-5 space-y-3 border-accent-600/40">

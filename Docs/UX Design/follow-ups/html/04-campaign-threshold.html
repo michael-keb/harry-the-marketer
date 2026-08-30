@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Response threshold · Q1 Cold Outreach · Harry</title>
+  <link rel="stylesheet" href="../../HTML Prototype/css/harry.css">
+  <link rel="stylesheet" href="../follow-ups.css">
+</head>
+<body>
+  <div class="review-bar">
+    <strong>Review 4 / 6</strong>
+    <span>Per-campaign threshold. Saved value applies to future enrollments only. Crossing it never advances the playbook — reports only. Any reply resets the timer.</span>
+    <span class="intents">Quartz Egret</span>
+    <nav class="review-nav">
+      <a href="03-reports-replies.html">← Prev</a>
+      <a href="../index.html">Index</a>
+      <a href="05-campaign-graph-enroll.html">Next →</a>
+    </nav>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h3><a href="../index.html">Harry</a></h3>
+      <nav>
+        <a href="01-reports-follow-ups.html">Reports</a>
+        <a href="04-campaign-threshold.html" class="active">Campaigns</a>
+        <a href="06-leads-after-enroll.html">Leads</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <span class="breadcrumb">Campaigns / Q1 Cold Outreach</span>
+        <button class="btn btn-ghost" type="button">Pause campaign</button>
+        <div class="avatar">MC</div>
+      </header>
+      <div class="content">
+        <h1>Q1 Cold Outreach <span class="badge badge-success">Running</span></h1>
+        <p class="caption">Playbook next step after a quiet lead: Nudge</p>
+
+        <div class="tabs" style="margin-top:1rem">
+          <button class="tab" type="button">Playbook</button>
+          <button class="tab" type="button">Schedule</button>
+          <a class="tab" href="06-leads-after-enroll.html" style="text-decoration:none">Leads</a>
+          <button class="tab" type="button">Sending from</button>
+          <button class="tab active" type="button">Settings</button>
+          <button class="tab" type="button">Activity</button>
+          <button class="tab" type="button">Manage</button>
+        </div>
+
+        <section class="panel">
+          <h2>When a lead has gone quiet</h2>
+          <p class="caption" style="margin-bottom:0.85rem">
+            Used by the Follow-ups report to mark someone non-responsive.
+            It does not move them through the playbook. The engine still waits for the “no reply” edges you wrote.
+          </p>
+
+          <div class="field" style="max-width:22rem">
+            <label for="threshold">Mark as non-responsive after</label>
+            <div class="row" style="align-items:center">
+              <input id="threshold" type="number" min="1" value="5" style="width:5rem">
+              <select style="width:8rem" aria-label="Unit">
+                <option selected>days</option>
+                <option>hours</option>
+              </select>
+            </div>
+          </div>
+
+          <dl class="threshold-preview" style="max-width:36rem;margin-top:0.5rem">
+            <dt>Applies to</dt>
+            <dd>Leads enrolled after you save. The 1,186 already in this campaign keep the 5-day rule they started with.</dd>
+            <dt>A reply</dt>
+            <dd>Any reply — interested, not now, out of office, uncategorised — resets that lead’s timer.</dd>
+            <dt>On the report</dt>
+            <dd>The Follow-ups graph and schedule list recompute from this value. The playbook does not.</dd>
+          </dl>
+
+          <div class="callout callout-info" style="max-width:36rem;margin-top:1rem">
+            This campaign’s send cadence is every 3 days. Five days is after the next planned send, so a lead can still be “in window” on the report while a playbook follow-up is already due.
+          </div>
+
+          <div class="note-gap" style="max-width:36rem">
+            Brief gap (undecided): no warning yet if the threshold is shorter than cadence, or longer than a legal contact window.
+            Shown here as a calm note, not a block — decide whether to reject, warn, or allow.
+          </div>
+
+          <div style="margin-top:1rem">
+            <button class="btn btn-primary" type="button">Save settings</button>
+            <span class="caption" style="margin-left:0.75rem">Last saved by MC · 12 Aug 2026</span>
+          </div>
+        </section>
+
+        <section class="panel" style="max-width:36rem">
+          <h2>Share of leads that get follow-ups</h2>
+          <p class="caption">Existing field — not yet active. Kept here so the new threshold is not confused with it.</p>
+          <div class="field" style="margin-top:0.6rem">
+            <label for="pct">Per cent</label>
+            <input id="pct" type="number" value="100" disabled style="width:6rem">
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
