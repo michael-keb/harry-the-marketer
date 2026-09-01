@@ -155,6 +155,36 @@ test('TWILIO_* env auto-creates a workspace SMS account', async () => {
   envLive.TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER
 })
 
+test('SMS-only campaign without a mailbox stays running and sends', async () => {
+  const account = addSandboxSms('+61400000777')
+  const lead = seedLead(db, owner.id, 'sms-only@acme.test')
+  db.prepare(
+    `UPDATE leads SET phone = ?, sms_opt_in_at = datetime('now'), sms_opt_in_source = 'test' WHERE id = ?`
+  ).run('+61400000888', lead.id)
+  const campaign = seedCampaign(db, owner.id, 'SMS only no mailbox', null)
+  db.prepare(
+    `UPDATE campaigns SET status = 'running', channel_mode = 'sms', mermaid = ? WHERE id = ?`
+  ).run(`flowchart TD
+  S([Start]) --> A[Send sms: Short hello]
+  A --> W([Won])
+`, campaign.id)
+  db.prepare(
+    'INSERT INTO campaign_channel_accounts (campaign_id, channel_account_id) VALUES (?, ?)'
+  ).run(campaign.id, account.id)
+  db.prepare('INSERT INTO campaign_leads (campaign_id, lead_id) VALUES (?, ?)').run(campaign.id, lead.id)
+  db.prepare("UPDATE users SET send_from = '00:00', send_to = '23:59', send_days = 'everyday', send_timezone = 'UTC' WHERE id = ?").run(owner.id)
+
+  await tick()
+
+  const after = db.prepare('SELECT status, status_reason FROM campaigns WHERE id = ?').get(campaign.id)
+  assert.equal(after.status, 'running', 'SMS-only campaign must not pause for a missing mailbox')
+  const out = db.prepare(
+    "SELECT * FROM messages WHERE campaign_id = ? AND channel = 'sms' AND direction = 'out'"
+  ).get(campaign.id)
+  assert.ok(out, 'engine should have sent an SMS without an email mailbox')
+  assert.equal(out.to_email, '+61400000888')
+})
+
 test('engine sends an SMS step when opt-in and sandbox account exist', async () => {
   const account = addSandboxSms('+61400000555')
   const lead = seedLead(db, owner.id, 'engine-sms@acme.test')

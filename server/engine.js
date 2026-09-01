@@ -1286,9 +1286,12 @@ async function processWaiting(ctx, cl) {
   // have left campaign.mailbox_id, and Gmail thread ids are per-account. Syncing
   // the campaign's primary mailbox against another account's thread_id silently
   // finds nothing, so replies never reach the Inbox.
+  // SMS-only campaigns have no mailbox; inbound arrives via the SMS webhook.
   try {
     const mailbox = mailboxFor(ctx, cl)
-    await syncInbound({ mailbox, user: ctx.user, campaign: ctx.campaign, lead: { id: cl.lead_id }, threadId: cl.thread_id })
+    if (mailbox) {
+      await syncInbound({ mailbox, user: ctx.user, campaign: ctx.campaign, lead: { id: cl.lead_id }, threadId: cl.thread_id })
+    }
   } catch (err) {
     console.warn('[engine] inbound sync failed:', err.message)
   }
@@ -1407,8 +1410,14 @@ async function processWaiting(ctx, cl) {
 
 export async function processCampaign(campaign) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(campaign.user_id)
-  const mailbox = db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
-  if (!mailbox) {
+  // SMS-only campaigns send from a channel account, not an email mailbox.
+  // Launch already allows START without one (`launchBlockers`); pausing here
+  // stranded every SMS plan on the first tick with "mailbox missing".
+  const smsOnly = String(campaign.channel_mode || '').toLowerCase() === 'sms'
+  const mailbox = campaign.mailbox_id
+    ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(campaign.mailbox_id)
+    : null
+  if (!mailbox && !smsOnly) {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id)
     logEvent(user.id, { campaignId: campaign.id, type: 'campaign_paused', detail: 'mailbox missing — reconnect and resume' })
     return
@@ -1430,13 +1439,15 @@ export async function processCampaign(campaign) {
   // mailbox, and every plan sending from it stops together.
   // Only worth asking if this mailbox is not already stopped — and the alert
   // fires once, when the hold goes on, not every twenty seconds for as long as
-  // it stays on.
-  const alreadyHeld = holds.some((h) => h.scope === 'mailbox' && h.scope_id === mailbox.id)
-  if (!alreadyHeld) {
-    const brake = brakeReason(mailbox, rules)
-    if (brake) {
-      ctx.holds = [...holds, placeHold(user.id, { scope: 'mailbox', id: mailbox.id, reason: brake, source: 'bounce_brake' })]
-      notify(user.id, { title: 'Sending stopped to protect your address', text: brake, link: '/app/connections' })
+  // it stays on. SMS-only campaigns have no mailbox to brake.
+  if (mailbox) {
+    const alreadyHeld = holds.some((h) => h.scope === 'mailbox' && h.scope_id === mailbox.id)
+    if (!alreadyHeld) {
+      const brake = brakeReason(mailbox, rules)
+      if (brake) {
+        ctx.holds = [...holds, placeHold(user.id, { scope: 'mailbox', id: mailbox.id, reason: brake, source: 'bounce_brake' })]
+        notify(user.id, { title: 'Sending stopped to protect your address', text: brake, link: '/app/connections' })
+      }
     }
   }
 

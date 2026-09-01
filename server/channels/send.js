@@ -335,7 +335,7 @@ export function smsAccountFor(campaign) {
        JOIN channel_accounts a ON a.id = cca.channel_account_id
       WHERE cca.campaign_id = ? AND a.channel = 'sms' AND COALESCE(a.deleted_at, '') = ''
         AND a.status = 'connected' AND COALESCE(a.is_suspended, 0) = 0
-      ORDER BY cca.id LIMIT 1`
+      ORDER BY CASE a.provider WHEN 'sandbox' THEN 1 ELSE 0 END, cca.id LIMIT 1`
   ).get(campaign.id)
   if (attached) return attached
   const workspace = db.prepare(
