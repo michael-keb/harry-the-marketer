@@ -13,7 +13,10 @@
 //   A --> B                        (unconditional)
 // Supports `A -->|label| B` and `A -- label --> B`, comments (%%), and quoted labels.
 
-const DUR_RE = /^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$/i
+// Seconds exist for rehearsing a playbook end to end without waiting a day.
+// The engine ticks about every 20s, so anything shorter than that lands on the
+// next tick rather than at the instant asked for.
+const DUR_RE = /^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$/i
 const CLOCK_RE = /^(\d{1,2}):(\d{2})$/
 
 function normalizeClock(hhmm) {
@@ -30,7 +33,7 @@ export function parseDuration(text) {
   if (!m) return null
   const n = Number(m[1])
   const unit = m[2][0].toLowerCase()
-  const ms = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 }[unit]
+  const ms = { s: 1000, m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 }[unit]
   return ms ? Math.round(n * ms) : null
 }
 

@@ -42,6 +42,7 @@ A -- reply: interested --> B   branch on the reply's classified intent
 A -- reply --> B               any reply (catch-all)
 A -- no reply 3d --> C         timeout if they never answer
 W2[Wait: 30d]                  pause, then continue
+30s · 5m · 2h · 3d · 1w        how long to wait — seconds to weeks
 D{Reply?}                      optional decision diamond
 Won([Won: call booked])        terminal — also Lost / Unsubscribed`
 

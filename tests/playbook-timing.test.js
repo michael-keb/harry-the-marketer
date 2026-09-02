@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  parseCondition, parsePlaybook, collectTimingIssues,
+  parseCondition, parseDuration, parsePlaybook, collectTimingIssues,
 } from '../server/playbook.js'
 
 test('no reply 3d at 09:30 → ms + exactTime', () => {
@@ -68,4 +68,30 @@ test('plain no-reply / after still parse without timing fields', () => {
   assert.deepEqual(parseCondition('after 2h'), {
     kind: 'after', ms: 2 * 3600e3, raw: 'after 2h',
   })
+})
+
+test('seconds are a duration unit, in every spelling', () => {
+  for (const text of ['30s', '30 s', '30sec', '30secs', '30 second', '30 seconds']) {
+    assert.equal(parseDuration(text), 30_000, text)
+  }
+})
+
+test('adding seconds left the other units alone', () => {
+  assert.equal(parseDuration('5m'), 5 * 60e3)
+  assert.equal(parseDuration('5min'), 5 * 60e3)
+  assert.equal(parseDuration('2h'), 2 * 3600e3)
+  assert.equal(parseDuration('3d'), 3 * 86400e3)
+  assert.equal(parseDuration('1w'), 7 * 86400e3)
+})
+
+test('a seconds wait drives edges and wait nodes', () => {
+  assert.deepEqual(parseCondition('no reply 45s'), {
+    kind: 'no_reply', ms: 45_000, raw: 'no reply 45s',
+  })
+  const g = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send: hello]
+    A --> W[Wait: 30s]
+    W --> D([Won])
+  `)
+  assert.equal(g.nodes.W.ms, 30_000)
 })
