@@ -142,6 +142,20 @@ function threadTranscript(thread) {
     .slice(-8000)
 }
 
+// The message we are actually replying to, separated from the history behind
+// it. Flattened into one transcript it reads as background and the playbook
+// instruction wins, which is how a question like "can I have more information"
+// used to be answered with another introduction.
+function splitLatestInbound(thread) {
+  const list = Array.isArray(thread) ? thread : []
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i]?.direction !== 'out') {
+      return { history: list.slice(0, i), latest: list[i] }
+    }
+  }
+  return { history: list, latest: null }
+}
+
 export function mergeFields(text, lead) {
   return String(text)
     .replaceAll('{{firstName}}', lead.first_name || 'there')
@@ -171,7 +185,7 @@ const HONESTY_RULES =
 // its angle and voice and only moves what has to move for this recipient.
 // `refine` is a one-off note ("shorter, lead with the ROI number") from someone
 // rewriting a sample by hand, and outranks the instruction where they collide.
-export async function composeEmail({ instruction, lead, businessContext, thread, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject, workspaceId }) {
+export async function composeEmail({ instruction, lead, businessContext, thread, intent, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject, workspaceId }) {
   try {
     const text = await callModel({
       workspaceId,
@@ -191,13 +205,25 @@ export async function composeEmail({ instruction, lead, businessContext, thread,
         `Rules: plain text only. 50-120 words for the body. No placeholders like [Name] — use the lead data given. ` +
         `Personalize from the research profile when one is provided — reference something specific and true. ` +
         `One clear ask. Sign off with the sender's first name only. ` +
-        `If there is an existing thread, write a natural continuation and keep the subject as a reply (Re: ...).`,
+        `If there is an existing thread, write a natural continuation and keep the subject as a reply (Re: ...).\n` +
+        `When they have written back, you are answering a person, not sending the next email in a plan. ` +
+        `Open by responding to what their latest message actually says — answer the question they asked, in specifics. ` +
+        `The playbook instruction is the goal to move toward once you have replied, not a script to recite: never ` +
+        `re-introduce yourself, restate what the company does, or repeat an ask they have already engaged with. ` +
+        `If answering them properly needs facts you have not been given, say plainly what you can and offer to cover ` +
+        `the rest on a call rather than inventing detail.`,
       user:
         `Lead: ${lead.first_name} ${lead.last_name}, ${lead.title || 'unknown title'} at ${lead.company || 'unknown company'} <${lead.email}>` +
         (lead.notes ? `\nNotes: ${lead.notes}` : '') +
         (lead.research ? `\nResearch profile:\n${String(lead.research).slice(0, 2500)}` : '') +
-        (thread?.length ? `\n\nThread so far:\n${threadTranscript(thread)}` : '') +
-        `\n\nPlaybook instruction for this email: ${instruction}` +
+        (() => {
+          const { history, latest } = splitLatestInbound(thread)
+          if (!latest) return thread?.length ? `\n\nThread so far:\n${threadTranscript(thread)}` : ''
+          return (history.length ? `\n\nEarlier in this thread:\n${threadTranscript(history)}` : '')
+            + `\n\nTHEIR LATEST MESSAGE — this is what you are replying to:\n${String(latest.body || '').slice(0, 4000)}`
+            + (intent ? `\n\nTheir reply was classified as: ${intent}` : '')
+        })() +
+        `\n\nGoal for this email, from the campaign playbook: ${instruction}` +
         (refine ? `\n\nRevision note from the user — apply it over the instruction wherever the two disagree: ${String(refine).slice(0, 600)}` : '') +
         `\n\nWrite the email now.`,
       op: 'compose',

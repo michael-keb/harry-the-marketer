@@ -1023,6 +1023,7 @@ async function enterNode(ctx, cl, nodeId) {
           lead,
           businessContext: ctx.user.business_context,
           thread,
+          intent: cl.intent || '',
           senderName: mailbox.display_name || ctx.user.name || mailbox.email,
           meetingLink: ctx.user.meeting_link,
           consentLink,
