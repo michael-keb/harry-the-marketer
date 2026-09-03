@@ -36,23 +36,24 @@ test('the workspace rules come back with what is set, what is in force, and the 
   assert.deepEqual(body.effective.windows, [{ days: [1, 2, 3, 4, 5], from: '09:00', to: '17:00' }])
   assert.equal(body.describes, 'Weekdays 09:00–17:00')
   assert.deepEqual(body.quietFloor, { from: '06:00', to: '21:00' })
-  assert.match(body.note, /never looser/)
+  assert.match(body.note, /Each campaign sets its own hours/)
 })
 
-test('a plan can narrow the workspace hours', async () => {
+test('a plan sets its own hours — the workspace window is a default, not a ceiling', async () => {
   const { status, body } = await api.put('/api/send-rules', {
     scope: 'campaign', id: 1,
     rules: { windows: [{ days: [1, 2, 3], from: '08:00', to: '11:00' }] },
   })
   assert.equal(status, 200)
-  assert.deepEqual(body.effective.windows, [{ days: [1, 2, 3], from: '09:00', to: '11:00' }],
-    'the 08:00 start is not granted — the workspace opens at 09:00')
+  assert.deepEqual(body.effective.windows, [{ days: [1, 2, 3], from: '08:00', to: '11:00' }],
+    'the 08:00 start is granted even though the workspace default opens at 09:00')
+  assert.match(body.note, /this campaign's own/)
 })
 
-test('a plan that narrows to nothing is saved, and says so plainly', async () => {
+test('a plan that draws its hours inside quiet hours is saved, and says so plainly', async () => {
   const { body } = await api.put('/api/send-rules', {
     scope: 'campaign', id: 1,
-    rules: { windows: [{ days: [6], from: '19:00', to: '20:00' }] },
+    rules: { windows: [{ days: [6], from: '20:00', to: '21:00' }] },
   })
   assert.deepEqual(body.effective.windows, [])
   assert.match(body.warning, /nothing can send/)

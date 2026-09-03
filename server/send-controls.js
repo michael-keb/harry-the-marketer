@@ -71,8 +71,10 @@ function rulesView(wsId, scope, id) {
     // Narrowing is the rule the whole stack rests on, so it is stated on the
     // screen rather than left for someone to discover.
     note: scope === 'workspace'
-      ? 'These are the outer limits. A plan or a mailbox can be stricter than this, never looser.'
-      : 'This can only narrow your workspace settings. Anything wider is ignored.',
+      ? 'The workspace defaults. Each campaign sets its own hours in its Sending settings; quiet hours and the brakes hold everywhere.'
+      : scope === 'campaign'
+        ? `These hours are this campaign's own. Quiet hours still hold: nothing goes before ${effective.quietHours.from} or after ${effective.quietHours.to} where they are.`
+        : 'This can only narrow the campaign it sends for. Anything wider is ignored.',
   }
 }
 
@@ -120,7 +122,9 @@ export function registerSendControls(api) {
     // every send. Saying so at the moment of saving is the difference between
     // a control and a trap.
     if (!view.effective.windows.length) {
-      view.warning = 'These hours do not overlap your workspace hours, so nothing can send. Widen one of them.'
+      view.warning = scope === 'campaign'
+        ? `These hours fall entirely inside quiet hours (before ${view.effective.quietHours.from} or after ${view.effective.quietHours.to}), so nothing can send. Move them.`
+        : 'These hours leave no time open, so nothing can send. Widen them.'
     }
     logEvent(req.wsId, {
       campaignId: scope === 'campaign' ? id : null,

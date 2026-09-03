@@ -189,9 +189,21 @@ test('the campaign sending window is enforced, not just stored', () => {
   assert.match(outside.reason, /09:00–10:00/, 'and it says which hours are actually in force')
 })
 
-test('a campaign window that misses the workspace window stops sending and says so', () => {
+test('a campaign window outside the workspace default is its own, held only by quiet hours', () => {
+  // Sending is restricted per campaign: the workspace 09:00–17:00 is a default,
+  // not a ceiling, so an evening plan gets its evening — up to quiet hours.
   db.prepare('UPDATE campaigns SET schedule = ? WHERE id = 1').run(
     JSON.stringify({ days: [1, 2, 3, 4, 5], start_hour: '19:00', end_hour: '21:00' })
+  )
+  const evening = decide({ at: Date.parse('2026-01-15T08:30:00Z') }) // Thu 19:30 Sydney
+  assert.equal(evening.ok, true)
+  const late = decide({ at: Date.parse('2026-01-15T09:30:00Z') })    // Thu 20:30 Sydney
+  assert.equal(late.ok, false, 'quiet hours from 20:00 still hold')
+})
+
+test('a campaign window drawn entirely inside quiet hours stops sending and says so', () => {
+  db.prepare('UPDATE campaigns SET schedule = ? WHERE id = 1').run(
+    JSON.stringify({ days: [1, 2, 3, 4, 5], start_hour: '20:00', end_hour: '21:00' })
   )
   const out = decide()
   assert.equal(out.gate, 'no_window')

@@ -7,7 +7,7 @@
 //
 // Two rules shape the page as a whole:
 //
-//   * It is a set of pages, not one scroll. Seven areas, each its own address
+//   * It is a set of pages, not one scroll. A handful of areas, each its own address
 //     under /app/settings/…, so "where do I change that?" is answered by a menu
 //     rather than by a search of two thousand pixels — and so a link can point
 //     at the thing it means.
@@ -26,19 +26,18 @@ import { EditableSection, Readout } from '../settings/common.jsx'
 // items — the standing rule is that a new feature should not cost a new thing to
 // think about, and 203 of the backlog's 210 endpoints keep it.
 import BlockListSection from '../settings/BlockListSection.jsx'
-import SendControlsSection from '../settings/SendControlsSection.jsx'
 import WebhooksSection from '../settings/WebhooksSection.jsx'
 import ClientsSection from '../settings/ClientsSection.jsx'
 import TeamActivity from '../settings/TeamActivity.jsx'
 import IntegrationsSection from '../settings/IntegrationsSection.jsx'
 import BillingSection from '../settings/BillingSection.jsx'
 
-// The order is the order someone meets them: who you are, what goes out, who is
-// off limits, who gets told, who else is here, what is plugged in, and finally
-// the account itself.
+// The order is the order someone meets them: who you are, who is off limits,
+// who gets told, who else is here, what is plugged in, and finally the account
+// itself. Nothing here governs sending: hours, pace and approval are decided on
+// each campaign's Settings tab, so there is exactly one place to look.
 const AREAS = [
   { id: 'briefing', label: 'Briefing', blurb: 'What the agent knows about you, and the agreement people sign.' },
-  { id: 'sending', label: 'Sending', blurb: 'Whether you see each email first, and every limit on when one may leave.' },
   { id: 'never-contact', label: 'Never contact', blurb: 'Addresses and domains nothing will ever be sent to.' },
   { id: 'alerts', label: 'Alerts', blurb: 'Where Harry tells you something happened — your channel, and your systems.' },
   { id: 'team', label: 'Team & clients', blurb: 'Who shares this workspace, and which brands it is scoped into.' },
@@ -92,24 +91,8 @@ export default function Settings({ user, onSaved }) {
         </>
       )}
 
-      {areaId === 'sending' && (
-        <>
-          <SendingSection user={user} onSaved={onSaved} />
-          {/* Directly under Sending: the same subject, one level down. Sending
-              is the two decisions everyone makes (do I see each email, and do I
-              send at a human pace); this is every lever underneath them. */}
-          <SendControlsSection />
-          <p className="text-sm text-slate-500">
-            Addresses nothing is ever sent to live under{' '}
-            <Link className="underline hover:text-slate-700" to="/app/settings/never-contact">Never contact</Link> —
-            it is the first place to look when an email did not go out.
-          </p>
-        </>
-      )}
-
-      {/* Suppression is its own area rather than a block under Sending: it is a
-          searchable list that grows, and it is what someone opens when asking
-          "why did this not go out?". */}
+      {/* Suppression is its own area: it is a searchable list that grows, and it
+          is what someone opens when asking "why did this not go out?". */}
       {areaId === 'never-contact' && <BlockListSection />}
 
       {areaId === 'alerts' && (
@@ -289,7 +272,7 @@ function TeamSection() {
     e.preventDefault()
     try {
       await api.post('/api/team/invite', { email: inviteEmail })
-      toast(`Invited ${inviteEmail} — they join this workspace the first time they sign in`)
+      toast(`Invited ${inviteEmail} — send them ${window.location.origin}/login and they join this workspace when they sign in`)
       setInviteEmail('')
       loadTeam()
     } catch (err) { toast(err.message, 'error') }
@@ -309,8 +292,10 @@ function TeamSection() {
       ) : (
         <>
           <p className="text-sm text-slate-600">
-            Invite a teammate — or your coach or assessor — by email. When they sign in with that address they work in
-            this workspace and can review and approve every email before it goes out.
+            Invite a teammate — or your coach or assessor — by email. No email is sent: send them the link yourself.
+            When they sign in with that address they work in this workspace and can review and approve every email
+            before it goes out. Use the address of the Google account they will sign in with; Gmail aliases with a
+            plus-tag or extra dots are matched to the account.
           </p>
           <form onSubmit={invite} className="flex gap-2">
             <input className="input flex-1" type="email" required placeholder="coach@company.com"
@@ -326,7 +311,18 @@ function TeamSection() {
                 <li key={m.id} className="py-2.5 flex items-center gap-3 text-sm">
                   <span className="text-ink-900">{m.email}</span>
                   <Badge value={m.status === 'active' ? 'connected' : 'waiting'} />
-                  <span className="text-xs text-slate-500">invited {timeAgo(m.invitedAt)}</span>
+                  <span className="text-xs text-slate-500">
+                    {m.status === 'active' ? `joined · invited ${timeAgo(m.invitedAt)}` : `invited ${timeAgo(m.invitedAt)} · has not signed in with this address yet`}
+                  </span>
+                  {m.status !== 'active' && (
+                    <button type="button" className="text-xs text-accent-700 hover:underline cursor-pointer"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(`${window.location.origin}/login`)
+                          toast('Sign-in link copied — send it to them')
+                        } catch { toast(`${window.location.origin}/login`, 'error') }
+                      }}>Copy sign-in link</button>
+                  )}
                   <button className="ml-auto text-xs text-slate-600 hover:text-red-600 cursor-pointer"
                     onClick={async () => {
                       if (!confirm(`Remove ${m.email} from the workspace?`)) return
@@ -339,140 +335,6 @@ function TeamSection() {
         </>
       )}
     </section>
-  )
-}
-
-// ---- sending ----------------------------------------------------------------
-
-function Switch({ on, onClick, label }) {
-  return (
-    <button type="button" role="switch" aria-checked={on} aria-label={label} onClick={onClick}
-      className={`mt-0.5 h-6 w-11 shrink-0 rounded-full transition-colors cursor-pointer ${on ? 'bg-accent-500' : 'bg-slate-300'}`}>
-      <span className={`block size-5 rounded-full bg-white transition-transform ${on ? 'translate-x-5' : 'translate-x-0.5'}`} />
-    </button>
-  )
-}
-
-function SendingSection({ user, onSaved }) {
-  const toast = useToast()
-  const [busy, setBusy] = useState(false)
-  const [mailboxes, setMailboxes] = useState([])
-  const on = user.requireApproval
-  const sending = user.sending || {}
-
-  useEffect(() => {
-    api.get('/api/mailboxes').then((r) => setMailboxes(r.mailboxes)).catch(() => { /* shown on its own page */ })
-  }, [user])
-
-  const save = async (patch, message) => {
-    setBusy(true)
-    try {
-      // The timezone rides along with every save: nobody should have to pick
-      // their own out of a list of four hundred.
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''
-      await api.put('/api/settings', { sending: { ...sending, timezone, ...patch } })
-      if (message) toast(message)
-      onSaved()
-    } catch (err) { toast(err.message, 'error') } finally { setBusy(false) }
-  }
-
-  const toggleApproval = async () => {
-    if (on && !confirm('Let the agent send emails without showing them to you first?')) return
-    setBusy(true)
-    try {
-      await api.put('/api/settings', { requireApproval: !on })
-      toast(on ? 'Emails will now send without asking you' : 'Nothing will send without your OK')
-      onSaved()
-    } catch (err) { toast(err.message, 'error') } finally { setBusy(false) }
-  }
-
-  const gmail = mailboxes.filter((m) => m.provider === 'gmail')
-
-  return (
-    // Every control here commits the moment it is touched — there is nothing to
-    // press Save on, so the button says Done. The state is legible either way.
-    <EditableSection
-      id="sending"
-      title="Sending"
-      description="Whether each email waits for you, and the pace it goes out at."
-      instant
-      busy={busy}
-    >
-      <div className="flex items-start gap-4">
-        <div className="min-w-0 flex-1">
-          <div className="text-sm text-slate-700">Show me every email before it sends</div>
-          <p className="text-xs text-slate-500 mt-1">
-            {on
-              ? 'The agent researches, writes and times each email, then waits in your Inbox under "Needs your OK". Your name is on it, so you send it.'
-              : 'The agent sends on its own. Faster, but you find out what went out afterwards — and unattended sending is what makes outreach feel like spam.'}
-          </p>
-        </div>
-        <Switch on={on} onClick={toggleApproval} label="Show me every email before it sends" />
-      </div>
-
-      <div className="border-t border-slate-200 pt-5 space-y-3">
-        <div className="flex items-start gap-4">
-          <div className="min-w-0 flex-1">
-            <div className="text-sm text-slate-700">Send at a human pace</div>
-            <p className="text-xs text-slate-500 mt-1">
-              {sending.paced
-                ? 'One email at a time per mailbox, with a random gap, only during the hours below. A new mailbox starts at 10 a day and works up. Sandbox mailboxes ignore all of this so you can still test in seconds.'
-                : 'Emails go out as fast as the engine can send them. Twenty at once, at 3am, from a week-old mailbox is the pattern spam filters are built to catch.'}
-            </p>
-          </div>
-          <Switch on={Boolean(sending.paced)} label="Send at a human pace"
-            onClick={() => save({ paced: !sending.paced }, sending.paced ? 'Pacing off — emails send as soon as they are ready' : 'Pacing on')} />
-        </div>
-
-        {sending.paced && (
-          <>
-            {/* Saved on blur, not per keystroke — a time input fires onChange
-                for every digit, and half a time is not a setting. */}
-            <div className="flex items-end gap-3 flex-wrap">
-              <div>
-                <label className="block text-xs text-slate-600 mb-1" htmlFor="send-from">Send between</label>
-                <input id="send-from" type="time" className="input w-auto" defaultValue={sending.from || '08:30'}
-                  onBlur={(e) => e.target.value !== sending.from && save({ from: e.target.value }, 'Sending hours updated')} />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-600 mb-1" htmlFor="send-to">and</label>
-                <input id="send-to" type="time" className="input w-auto" defaultValue={sending.to || '17:30'}
-                  onBlur={(e) => e.target.value !== sending.to && save({ to: e.target.value }, 'Sending hours updated')} />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-600 mb-1" htmlFor="send-days">on</label>
-                <select id="send-days" className="input w-auto" value={sending.days || 'weekdays'}
-                  onChange={(e) => save({ days: e.target.value })}>
-                  <option value="weekdays">weekdays</option>
-                  <option value="everyday">every day</option>
-                </select>
-              </div>
-            </div>
-            <p className="text-xs text-slate-500">
-              Times are in {sending.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone} — taken from this browser, not asked for.
-            </p>
-          </>
-        )}
-
-        {gmail.length > 0 && (
-          <ul className="space-y-1.5 pt-1">
-            {gmail.map((m) => (
-              <li key={m.id} className="text-xs text-slate-500">
-                <span className="text-slate-700">{m.email}</span>
-                {' — '}
-                {m.sending?.warmingUp
-                  ? <span className="text-amber-700">warming up: {m.sending.cap} a day for now (limit {m.dailyLimit})</span>
-                  : <>up to {m.dailyLimit} a day</>}
-                {', '}{m.remainingToday} left today
-              </li>
-            ))}
-            <li className="text-xs text-slate-400">
-              Change a mailbox's daily limit under <a className="underline hover:text-slate-600" href="/app/connections?area=email">Connections → Email</a>.
-            </li>
-          </ul>
-        )}
-      </div>
-    </EditableSection>
   )
 }
 

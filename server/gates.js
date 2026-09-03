@@ -287,7 +287,7 @@ export function resolveSend({
     const send = sendSchedule(rules, rules.recipientLocal && theirTz ? theirTz : senderTz)
 
     if (!rules.windows.length) {
-      return block('no_window', 'your plan\'s hours and your workspace hours do not overlap — nothing can send until one of them changes', null, 'human')
+      return block('no_window', 'this plan\'s hours leave no time open outside quiet hours — nothing can send until they move', null, 'human')
     }
 
     const blackout = (() => {

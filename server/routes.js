@@ -1,6 +1,6 @@
 // REST API for leads, mailboxes, campaigns, inbox, dashboard.
 import express from 'express'
-import { db, logEvent, touch, kvGet } from './db.js'
+import { db, logEvent, touch, kvGet, acceptInvite, declineInvite } from './db.js'
 import { requireUser, workspace } from './auth.js'
 import { googleConfigured, microsoftConfigured, auth0Configured, devLoginEnabled, env } from './env.js'
 import { telemetryRecent, telemetryStats, telemetryFailures } from './telemetry.js'
@@ -10,7 +10,8 @@ import { tick, campaignCtx, routeReply } from './engine.js'
 import { spendStatus } from './ai-spend.js'
 import { aiStatus, CORE_INTENTS, planGoal, goalPlaybook, qualifyLead, researchLead, generatePlaybook, previewPlaybookEmails, composeStepSample, exampleLead } from './ai.js'
 import { setSendInstruction, sanitizeInstruction } from '../shared/playbook-edit.js'
-import { pendingDrafts, pendingCount, discardStaleDraft } from './drafts.js'
+import { canonicalEmail } from '../shared/email.js'
+import { pendingDrafts, pendingCount, discardStaleDraft, approvalRequired, approvalOverride } from './drafts.js'
 import { leadStages, lastInbounds } from './stages.js'
 import { consentFor, ensureConsent, consentUrl, ownerTerms } from './consent.js'
 import { post as postWebhook, webhookKind } from './alerts.js'
@@ -416,12 +417,17 @@ api.get('/campaigns/:id', (req, res) => {
   ).get(c.id)
 
   const mailbox = c.mailbox_id ? db.prepare('SELECT * FROM mailboxes WHERE id = ? AND deleted_at IS NULL').get(c.mailbox_id) : null
+  const owner = db.prepare('SELECT require_approval FROM users WHERE id = ?').get(req.wsId)
 
   res.json({
     ...campaignSummary(c), mermaid: c.mermaid,
     validation: { valid: graph.valid, errors: graph.errors, warnings: graph.warnings },
     leads, nodeStats, goal: linkedGoal || null,
     sending: sendingStatus(req.wsId, mailbox, c),
+    // What this campaign does with each email, and whether that is its own
+    // decision (true/false) or the workspace default (null).
+    requireApproval: approvalRequired(owner, c),
+    requireApprovalOverride: approvalOverride(c),
   })
 })
 
@@ -623,7 +629,12 @@ api.post('/campaigns/:id/preview-messages/:nodeId', async (req, res) => {
 api.put('/campaigns/:id', (req, res) => {
   const c = getCampaign(req, res)
   if (!c) return
-  const { name, mermaid, mailboxId, status, approvedCopy: copy } = req.body || {}
+  const { name, mermaid, mailboxId, status, approvedCopy: copy, requireApproval } = req.body || {}
+  // true / false is this campaign's own decision; null hands it back to the
+  // workspace default. Anything else leaves it alone.
+  const approval = requireApproval === undefined ? c.require_approval
+    : requireApproval === null ? null
+      : (requireApproval ? 1 : 0)
   if (mailboxId !== undefined && mailboxId !== null) {
     const mb = db.prepare('SELECT id FROM mailboxes WHERE id = ? AND user_id = ? AND deleted_at IS NULL').get(mailboxId, req.wsId)
     if (!mb) return res.status(400).json({ error: 'Mailbox not found' })
@@ -653,8 +664,14 @@ api.put('/campaigns/:id', (req, res) => {
       logEvent(req.wsId, { campaignId: c.id, type: 'campaign_launched', detail: c.name })
     }
   }
-  db.prepare('UPDATE campaigns SET name = ?, mermaid = ?, mailbox_id = ?, status = ?, updated_at = datetime(\'now\') WHERE id = ?')
-    .run(name ?? c.name, mermaid ?? c.mermaid, mailboxId === undefined ? c.mailbox_id : mailboxId, status ?? c.status, c.id)
+  db.prepare('UPDATE campaigns SET name = ?, mermaid = ?, mailbox_id = ?, status = ?, require_approval = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    .run(name ?? c.name, mermaid ?? c.mermaid, mailboxId === undefined ? c.mailbox_id : mailboxId, status ?? c.status, approval, c.id)
+  if (requireApproval !== undefined && approval !== c.require_approval) {
+    logEvent(req.wsId, {
+      campaignId: c.id, type: 'campaign_approval',
+      detail: approval === null ? 'follows the workspace default' : approval ? 'every email waits for your OK' : 'sends without asking',
+    })
+  }
 
   // Copy the user tailored and signed off on, saved in the same click as the
   // diagram it belongs to — an approved email and the step it came from are one
@@ -1142,7 +1159,7 @@ api.post('/goals', async (req, res) => {
       logEvent(req.wsId, { campaignId, type: 'campaign_launched', detail: `${plan.name} (autopilot)` })
       steps.push(`Launched from ${mailbox.email}`)
       tick().catch((err) => console.error('[goals] autopilot tick failed', err))
-      steps.push(owner.require_approval
+      steps.push(approvalRequired(owner, db.prepare('SELECT * FROM campaigns WHERE id = ?').get(campaignId))
         ? 'Engine started — the first emails are being written and will wait in your Inbox for approval'
         : 'Engine started — first emails are going out')
     } else if (!mailbox) {
@@ -1235,14 +1252,43 @@ api.post('/team/invite', (req, res) => {
   if (req.wsRole !== 'owner') return res.status(403).json({ error: 'Only the workspace owner can invite members' })
   const email = String(req.body?.email || '').trim().toLowerCase()
   if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter a valid email address' })
-  if (email === req.user.email) return res.status(400).json({ error: 'That is your own email — you already own this workspace' })
+  // Matched the way sign-in will match it: a Gmail +tag or dotted alias of
+  // the owner's own address is still the owner (shared/email.js).
+  const canonical = canonicalEmail(email)
+  if (canonical === canonicalEmail(req.user.email)) {
+    return res.status(400).json({ error: 'That is your own email — you already own this workspace' })
+  }
+  const dup = db.prepare('SELECT email FROM team_members WHERE owner_id = ? AND canonical_email = ?').get(req.wsId, canonical)
+  if (dup) {
+    return res.status(409).json({
+      error: dup.email === email ? `${email} is already invited` : `${email} reaches the same inbox as ${dup.email}, who is already invited`,
+    })
+  }
   try {
-    db.prepare("INSERT INTO team_members (owner_id, email) VALUES (?, ?)").run(req.wsId, email)
+    db.prepare('INSERT INTO team_members (owner_id, email, canonical_email) VALUES (?, ?, ?)').run(req.wsId, email, canonical)
   } catch (err) {
     if (String(err).includes('UNIQUE')) return res.status(409).json({ error: `${email} is already invited` })
     throw err
   }
   logEvent(req.wsId, { type: 'member_invited', detail: email })
+  res.json({ ok: true })
+})
+
+// The invitee's side. Someone who already owns a workspace is not moved into
+// the inviter's automatically (see resolveWorkspace); they see the invite as
+// pending and say yes or no here. Either way the answer belongs to the person
+// the invite names — acceptInvite/declineInvite refuse anyone else's id.
+api.post('/team/accept', (req, res) => {
+  const row = acceptInvite(req.user, Number(req.body?.id))
+  if (!row) return res.status(404).json({ error: 'Invitation not found' })
+  logEvent(row.owner_id, { type: 'member_joined', detail: req.user.email })
+  res.json({ ok: true })
+})
+
+api.post('/team/decline', (req, res) => {
+  const row = declineInvite(req.user, Number(req.body?.id))
+  if (!row) return res.status(404).json({ error: 'Invitation not found' })
+  logEvent(row.owner_id, { type: 'member_declined', detail: req.user.email })
   res.json({ ok: true })
 })
 

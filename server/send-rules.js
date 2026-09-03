@@ -7,11 +7,12 @@
 //
 //   **A narrower scope may only restrict a wider one.**
 //
-// Campaign hours intersect workspace hours, never extend them. A campaign cap
-// can be lower than the workspace cap, never higher. This is what makes the
-// whole stack safe to hand to a user: no lever anywhere, at any scope, can make
-// sending more aggressive than the workspace allows — so the workspace settings
-// are a real ceiling rather than a suggestion.
+// A campaign cap can be lower than the workspace cap, never higher; a mailbox
+// window sits inside the campaign's. The one deliberate exception is the
+// campaign's hours: the workspace window is the *default* a campaign starts
+// from, not a ceiling over it. Sending is restricted per campaign — there is
+// no workspace screen for hours any more — so a campaign that has set its own
+// gets exactly those, held only by quiet hours, which no scope can lift.
 //
 // Timezone is the one field that overrides rather than narrows: it is a frame
 // of reference, not a permission.
@@ -281,10 +282,12 @@ export function snapshotDefaults(owner) {
   return pickKeys(rules, SNAPSHOT_KEYS)
 }
 
-// Workspace → campaign → mailbox, each one narrowing the last. The campaign's
-// own `schedule` column is folded in as well: it predates this file, it is what
-// the campaign Settings page has always written, and until now nothing enforced
-// it. Reading it here is what turns that setting from decoration into a rule.
+// Workspace → campaign → mailbox, each one narrowing the last — except that a
+// campaign's own hours replace the workspace window rather than intersect it
+// (see the header). The campaign's `schedule` column is folded in as well: it
+// predates this file, it is what the campaign Settings page has always written,
+// and until now nothing enforced it. Reading it here is what turns that setting
+// from decoration into a rule.
 //
 // Snapshot semantics (Coral Marten): when campaign.defaults_snapshot is a
 // non-empty JSON object, that object is the workspace *preference* base for
@@ -299,8 +302,14 @@ export function effectiveRules({ owner, campaign = null, mailbox = null }) {
   if (snapshot) rules = applySnapshotBase(rules, snapshot)
 
   if (campaign) {
-    rules = narrow(rules, legacyCampaignSchedule(campaign))
+    const legacy = legacyCampaignSchedule(campaign)
     const campaignStored = storedRules(owner.id, 'campaign', campaign.id)
+    // Its own hours: open the whole week inside quiet hours first, so the
+    // narrowing below lands on the campaign's window and not on the default's.
+    if (legacy?.windows?.length || (Array.isArray(campaignStored.windows) && campaignStored.windows.length)) {
+      rules = { ...rules, windows: openWeek(rules.quietHours) }
+    }
+    rules = narrow(rules, legacy)
     rules = narrow(rules, campaignStored)
     // Campaign preference overrides win per-key over the (snapshotted) workspace.
     rules = overlayDefaults(rules, campaignStored)
@@ -339,6 +348,12 @@ export function validateDefaultsForLaunch(snapshot, campaignOverrides = {}) {
 
 // `campaigns.schedule` as written by the existing Settings page:
 // { timezone, days: [0..6], start_hour, end_hour, min_gap_minutes }.
+// Every day, from the start of quiet hours to their end — the widest window a
+// campaign may draw inside.
+export function openWeek(quiet = QUIET_DEFAULT) {
+  return [{ days: [0, 1, 2, 3, 4, 5, 6], from: quiet?.from || QUIET_DEFAULT.from, to: quiet?.to || QUIET_DEFAULT.to }]
+}
+
 export function legacyCampaignSchedule(campaign) {
   const stored = parse(campaign?.schedule)
   if (!stored.start_hour && !stored.end_hour && !Array.isArray(stored.days)) return null

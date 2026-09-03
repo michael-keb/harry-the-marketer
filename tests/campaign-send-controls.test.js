@@ -11,6 +11,7 @@ const { register: registerCampaigns } = await import('../server/parity/campaigns
 const {
   storedRules, effectiveRules, legacyScheduleToStoredRules, syncCampaignScheduleColumn, saveRules,
 } = await import('../server/send-rules.js')
+const { approvalRequired } = await import('../server/drafts.js')
 
 const user = seedUser(db, 'owner@example.com')
 db.prepare(
@@ -133,11 +134,45 @@ test('sync helpers round-trip schedule and rules', () => {
   assert.equal(row.min_gap_minutes, 3)
 })
 
-test('effective rules merge workspace ceiling with campaign narrowing', () => {
+test('a campaign with no hours of its own inherits the workspace default', () => {
+  const rules = effectiveRules({ owner: owner(), campaign: campaign(1) })
+  assert.deepEqual(rules.windows, [{ days: [1, 2, 3, 4, 5], from: '09:00', to: '17:00' }])
+})
+
+test('a campaign that sets its own hours gets exactly those, not the default clipped', () => {
   saveRules(user.id, 'campaign', 1, {
-    windows: [{ days: [1, 2, 3, 4, 5], from: '08:00', to: '11:00' }],
+    windows: [{ days: [0, 6], from: '08:00', to: '19:00' }],
   }, 'test')
   const rules = effectiveRules({ owner: owner(), campaign: campaign(1) })
-  assert.deepEqual(rules.windows, [{ days: [1, 2, 3, 4, 5], from: '09:00', to: '11:00' }],
-    '08:00 start is not granted — workspace opens at 09:00')
+  assert.deepEqual(rules.windows, [{ days: [0, 6], from: '08:00', to: '19:00' }],
+    'weekend hours outside the weekday default are granted — sending is restricted per campaign')
+})
+
+test('quiet hours are the one thing a campaign cannot draw over', () => {
+  saveRules(user.id, 'campaign', 1, {
+    windows: [{ days: [1, 2, 3, 4, 5], from: '05:00', to: '23:00' }],
+  }, 'test')
+  const rules = effectiveRules({ owner: owner(), campaign: campaign(1) })
+  assert.deepEqual(rules.windows, [{ days: [1, 2, 3, 4, 5], from: '07:00', to: '20:00' }])
+})
+
+test('approval is decided per campaign, and inherits the workspace default until it is', () => {
+  db.prepare('UPDATE users SET require_approval = 1 WHERE id = ?').run(user.id)
+  assert.equal(approvalRequired(owner(), campaign(1)), true, 'inherits: on')
+  db.prepare('UPDATE campaigns SET require_approval = 0 WHERE id = 1').run()
+  assert.equal(approvalRequired(owner(), campaign(1)), false, 'this campaign runs unattended')
+  assert.equal(approvalRequired(owner(), campaign(2)), true, 'the other one still waits')
+  db.prepare('UPDATE users SET require_approval = 0 WHERE id = ?').run(user.id)
+  db.prepare('UPDATE campaigns SET require_approval = 1 WHERE id = 2').run()
+  assert.equal(approvalRequired(owner(), campaign(2)), true, 'a campaign can insist on approval on its own')
+  db.prepare('UPDATE campaigns SET require_approval = NULL WHERE id IN (1, 2)').run()
+  db.prepare('UPDATE users SET require_approval = 1 WHERE id = ?').run(user.id)
+})
+
+test('duplicate carries the approval decision with the configuration', async () => {
+  db.prepare('UPDATE campaigns SET require_approval = 0 WHERE id = 1').run()
+  const dup = await campApi.post('/api/campaigns/1/duplicate', { name: 'Plan A unattended copy' })
+  assert.equal(dup.status, 200)
+  assert.equal(campaign(dup.body.id).require_approval, 0)
+  db.prepare('UPDATE campaigns SET require_approval = NULL WHERE id = 1').run()
 })

@@ -50,7 +50,6 @@ const NAV_COMMANDS = [
   { id: 'nav:connections-messages', title: 'Go to Connections → Messages', to: '/app/connections?area=messages', keywords: 'sms whatsapp telegram smsflow twilio' },
   { id: 'nav:mailboxes-attention', title: 'Go to Connections → Needs attention', to: '/app/connections?area=email&health=attention', keywords: 'broken sending failing smtp mailboxes' },
   { id: 'nav:settings', title: 'Go to Settings', to: '/app/settings/briefing', keywords: 'profile briefing voice preferences' },
-  { id: 'nav:settings-sending', title: 'Go to Settings → Sending', to: '/app/settings/sending', keywords: 'send controls hours pacing caps limits quiet hours holds bounces' },
   { id: 'nav:settings-block', title: 'Go to Settings → Never contact', to: '/app/settings/never-contact', keywords: 'block list suppression unsubscribe do not email blocked domains' },
   { id: 'nav:settings-alerts', title: 'Go to Settings → Alerts', to: '/app/settings/alerts', keywords: 'slack teams notifications channel' },
   { id: 'nav:settings-clients', title: 'Go to Settings → Clients', to: '/app/settings/team', keywords: 'agency accounts api keys team invite coach' },

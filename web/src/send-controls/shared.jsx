@@ -1,5 +1,6 @@
-// Shared send-control UI — workspace ceiling and per-campaign narrowing use the
-// same building blocks so the two surfaces never drift apart.
+// Shared send-control UI. Sending is decided per campaign (see
+// CampaignSendControls.jsx); these building blocks are kept scope-agnostic so a
+// mailbox-level surface can reuse them without drifting.
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useToast } from '../ui.jsx'
@@ -162,7 +163,7 @@ export function HoursGroup({ rules, effective, inherited, set, save, cancel, bus
       id={campaign ? 'campaign-send-hours' : 'send-hours'}
       title="When it may send"
       summary={campaign
-        ? 'The hours and days for this campaign — can only narrow your workspace default.'
+        ? 'The hours and days for this campaign, the dates it is shut, and whose clock counts.'
         : 'The hours and days, the dates you are shut, and whose clock counts.'}
       onCancel={cancel}
       onSave={() => save(savePayload, 'Sending hours saved')}
@@ -173,8 +174,8 @@ export function HoursGroup({ rules, effective, inherited, set, save, cancel, bus
     >
       {campaign && inherited?.windows?.length > 0 && (
         <p className="text-xs text-slate-500">
-          Workspace allows {inherited.windows.map((w) => `${dayLabel(w.days)} ${w.from}–${w.to}`).join(', ')}.
-          This campaign can only be stricter.
+          Until this campaign sets its own hours it uses the default:{' '}
+          {inherited.windows.map((w) => `${dayLabel(w.days)} ${w.from}–${w.to}`).join(', ')}.
         </p>
       )}
 

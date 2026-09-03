@@ -714,7 +714,7 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
   const ceiling = lifetimeCeiling(ctx, cl)
   if (ceiling) { finishLead(ctx, cl, 'completed', ceiling); return false }
 
-  const gated = approvalRequired(ctx.user)
+  const gated = approvalRequired(ctx.user, ctx.campaign)
   let draft = openDraft(cl.campaign_id, cl.lead_id)
   if (draft && draft.node_id !== nodeId) {
     discardStaleDraft(draft)
@@ -958,7 +958,7 @@ async function enterNode(ctx, cl, nodeId) {
       // An existing draft is always used, even if approvals were switched off
       // since — otherwise turning the gate off would strand it in the queue and
       // send a second, different email in its place.
-      const gated = approvalRequired(ctx.user)
+      const gated = approvalRequired(ctx.user, ctx.campaign)
       let draft = openDraft(cl.campaign_id, cl.lead_id)
       if (draft && draft.node_id !== nodeId) {
         discardStaleDraft(draft) // the lead was rerouted while this one queued

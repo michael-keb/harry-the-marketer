@@ -157,7 +157,7 @@ authRouter.get('/api/auth/me', (req, res) => {
     alertWebhook: owner?.alert_webhook ?? '',
     consentTerms: owner?.consent_terms ?? '',
     sheet: { id: owner?.sheet_id ?? '', url: owner?.sheet_url ?? '', syncedAt: owner?.sheet_synced_at ?? '' },
-    workspace: { role: ws.role, ownerEmail: ws.ownerEmail, shared: ws.wsId !== user.id },
+    workspace: { role: ws.role, ownerEmail: ws.ownerEmail, shared: ws.wsId !== user.id, pendingInvite: ws.pendingInvite || null },
     billing: billingStatus(owner || user),
   })
 })

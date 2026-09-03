@@ -529,7 +529,7 @@ export default function CampaignDetail({ user }) {
 
       {tab === 'settings' && (
         <div className="space-y-4">
-          <CampaignSendControls campaignId={id} campaignState={detail.state} onSaved={refresh} />
+          <CampaignSendControls campaignId={id} campaignState={detail.state} campaign={legacy} onSaved={refresh} />
           <BehaviourPanel campaign={campaign} onSaved={refresh} />
         </div>
       )}

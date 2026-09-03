@@ -5,7 +5,20 @@
 // change it if you want, and hit send. Your name is on it, so you sign it off.
 import { db, logEvent } from './db.js'
 
-export const approvalRequired = (owner) => Boolean(owner?.require_approval)
+// Whether an email must wait for a human. Each campaign decides for itself;
+// one that has never been told inherits the workspace default, which is on.
+export const approvalRequired = (owner, campaign = null) => {
+  if (campaign && campaign.require_approval !== null && campaign.require_approval !== undefined) {
+    return Boolean(campaign.require_approval)
+  }
+  return Boolean(owner?.require_approval)
+}
+
+// The campaign's own answer, or null when it inherits.
+export const approvalOverride = (campaign) =>
+  (campaign?.require_approval === null || campaign?.require_approval === undefined)
+    ? null
+    : Boolean(campaign.require_approval)
 
 // The one open draft for a lead in a campaign, if there is one.
 export function openDraft(campaignId, leadId) {

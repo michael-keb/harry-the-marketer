@@ -25,8 +25,9 @@ moment — then stops and waits for a human. Approvals live in the **Inbox**, un
 read it, edit it if you want, hit send. Approving hands the email to the same engine path an
 unattended send would take, so what you approved is exactly what goes out.
 
-It is on by default, for existing workspaces too. Settings → Sending turns it off if you want the
-agent to send unattended; a draft already waiting is still the email that goes, never a second one.
+It is on by default, for existing workspaces too. Each campaign decides for itself under its
+Settings → Sending — this launch waits for your OK, that one runs unattended; a draft already
+waiting is still the email that goes, never a second one.
 Invite your coach or assessor in Settings → Team and they can approve too.
 
 Approving means *yes, send this* — not *send this instant*. The sending rhythm still picks the

@@ -1103,8 +1103,8 @@ export function register(api) {
     const schedule = { timezone, days, start_hour: startHour, end_hour: endHour, min_gap_minutes: minGap }
     db.prepare("UPDATE campaigns SET schedule = ?, updated_at = datetime('now') WHERE id = ?")
       .run(JSON.stringify(schedule), c.id)
-    // Campaign schedule also narrows send_rules — keep both stores in step so
-    // Settings → Sending and Campaign → Sending window cannot disagree.
+    // Campaign schedule is also a send_rules document — keep both stores in
+    // step so the campaign's Sending settings and the engine cannot disagree.
     const priorRules = storedRules(req.wsId, 'campaign', c.id)
     saveRules(req.wsId, 'campaign', c.id, { ...priorRules, ...legacyScheduleToStoredRules(schedule) }, req.user?.email || '')
     // Schedule save re-snapshots defaults while the campaign is still a never-
@@ -1443,13 +1443,14 @@ export function register(api) {
         `INSERT INTO campaigns
            (user_id, name, status, mailbox_id, mermaid, client_id, parent_campaign_id, owner_email,
             status_reason, status_at, schedule, settings, track_opens, track_clicks,
-            stop_on_reply, stop_on_source_reply, tracking_domain, reply_to, channel_mode)
-         VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            stop_on_reply, stop_on_source_reply, tracking_domain, reply_to, channel_mode, require_approval)
+         VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         source.user_id, newName, source.mailbox_id, source.mermaid, source.client_id,
         parentId, source.owner_email, nowIso(), source.schedule || '{}', source.settings || '{}',
         source.track_opens, source.track_clicks, source.stop_on_reply, source.stop_on_source_reply,
-        source.tracking_domain || '', source.reply_to || '', channelModeOf(source)
+        source.tracking_domain || '', source.reply_to || '', channelModeOf(source),
+        source.require_approval ?? null
       )
       const newId = info.lastInsertRowid
       for (const row of db.prepare('SELECT mailbox_id FROM campaign_mailboxes WHERE campaign_id = ?').all(source.id)) {

@@ -572,7 +572,7 @@ function ApproveFolder({ queue, wide, refs, announce, refresh, update, draftId, 
         <EmptyState
           icon="check"
           title="Sending without asking"
-          hint="Emails go out as soon as the agent writes them. Turn approvals back on in Settings if you'd rather read each one first."
+          hint="Emails go out as soon as the agent writes them. Turn approvals on under a campaign's Settings → Sending if you'd rather read each one first."
         />
       </div>
     )

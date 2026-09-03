@@ -50,6 +50,47 @@ function initialsOf(user) {
   return String(user?.email || '?').slice(0, 2).toUpperCase()
 }
 
+// Someone with a workspace of their own has been invited to another. The
+// server will not move them silently (see resolveWorkspace), so the invite is
+// put in front of them here — one sentence, a yes and a no — instead of
+// sitting as "waiting" on the owner's Team page with nobody told why.
+function PendingInviteBanner({ invite, onChanged }) {
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const answer = async (verb) => {
+    setBusy(verb)
+    setError('')
+    try {
+      await api.post(`/api/team/${verb}`, { id: invite.id })
+      await onChanged?.()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
+  const who = invite.ownerName ? `${invite.ownerName} (${invite.ownerEmail})` : invite.ownerEmail
+  return (
+    <div className="border-b border-amber-200 bg-amber-50 px-6 py-3 text-sm text-amber-900 lg:px-11" role="status">
+      <div className="mx-auto flex max-w-[1160px] flex-wrap items-center gap-x-4 gap-y-2">
+        <span className="flex-1 min-w-60">
+          <span className="font-medium">{who}</span> invited you to their workspace as a {invite.role}. Joining means you
+          work in their leads, campaigns and inbox instead of your own — your own data stays put.
+        </span>
+        <span className="flex gap-2">
+          <button type="button" className="btn-primary" disabled={Boolean(busy)} onClick={() => answer('accept')}>
+            {busy === 'accept' ? 'Joining…' : 'Join workspace'}
+          </button>
+          <button type="button" className="btn-ghost" disabled={Boolean(busy)} onClick={() => answer('decline')}>
+            {busy === 'decline' ? 'Declining…' : 'Decline'}
+          </button>
+        </span>
+        {error && <span className="basis-full text-red-700">{error}</span>}
+      </div>
+    </div>
+  )
+}
+
 export default function App({ user, onUserChanged }) {
   const location = useLocation()
   const [navOpen, setNavOpen] = useState(false)
@@ -195,6 +236,9 @@ export default function App({ user, onUserChanged }) {
       </aside>
 
       <main className="flex-1 overflow-y-auto pt-14 md:pt-0">
+        {user.workspace?.pendingInvite && (
+          <PendingInviteBanner invite={user.workspace.pendingInvite} onChanged={onUserChanged} />
+        )}
         {/* Keyed on the client as well as the path: switching the lens has to
             re-ask the server, and remounting is the one way to be sure every
             page does — including the ones that fetch in a hook we do not own. */}

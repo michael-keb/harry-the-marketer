@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { ROOT } from './env.js'
+import { canonicalEmail } from '../shared/email.js'
 import { applyParitySchema } from './parity/schema.js'
 
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data')
@@ -354,34 +355,78 @@ export function kvGet(key) {
 
 // Resolve which workspace a user works in: their own, unless their email was
 // invited to another owner's team (first invite wins).
+//
+// Membership is matched on the canonical form of the address (shared/email.js)
+// because the sign-in provider returns the account's real address, not the
+// alias the owner typed. Rows are looked up by canonical_email, which the
+// invite route writes and the boot-time backfill below fills for older rows.
 export function resolveWorkspace(user) {
+  const own = { wsId: user.id, role: 'owner', ownerEmail: user.email, pendingInvite: null }
+  const canonical = canonicalEmail(user.email)
+  if (!canonical) return own
+  // The raw address is checked too, so a row written without its canonical
+  // form (an older build, a seed script) still finds its person.
   const membership = db.prepare(
-    "SELECT * FROM team_members WHERE email = ? ORDER BY id LIMIT 1"
-  ).get(user.email)
-  if (!membership || membership.owner_id === user.id) {
-    return { wsId: user.id, role: 'owner', ownerEmail: user.email }
-  }
+    'SELECT * FROM team_members WHERE canonical_email = ? OR lower(email) = ? ORDER BY id LIMIT 1'
+  ).get(canonical, String(user.email || '').trim().toLowerCase())
+  if (!membership || membership.owner_id === user.id) return own
   if (membership.status === 'invited') {
     // An invite may claim a colleague joining fresh — never someone with a
     // workspace of their own. Without this check, inviting any existing
     // user's address silently moved their next session into the inviter's
     // workspace: their own leads and campaigns vanished and they were
     // operating — and sending — inside a stranger's data. A person who owns
-    // anything keeps their workspace; the invite stays pending.
-    const ownsData = db.prepare(
-      `SELECT EXISTS(SELECT 1 FROM campaigns WHERE user_id = @id)
-           OR EXISTS(SELECT 1 FROM leads WHERE user_id = @id)
-           OR EXISTS(SELECT 1 FROM mailboxes WHERE user_id = @id) AS owns`
-    ).get({ id: user.id }).owns
-    if (ownsData) return { wsId: user.id, role: 'owner', ownerEmail: user.email }
+    // anything keeps their workspace, and the invite is surfaced to them as
+    // pending so they can accept it deliberately (acceptInvite) instead of it
+    // waiting in silence with neither side told why.
+    if (ownsWorkspaceData(user.id)) {
+      const owner = db.prepare('SELECT id, email, name FROM users WHERE id = ?').get(membership.owner_id)
+      if (!owner) return own
+      return {
+        ...own,
+        pendingInvite: { id: membership.id, ownerEmail: owner.email, ownerName: owner.name || '', role: membership.role },
+      }
+    }
     db.prepare("UPDATE team_members SET status = 'active' WHERE id = ?").run(membership.id)
-  }
-  if (membership.status !== 'active' && membership.status !== 'invited') {
-    return { wsId: user.id, role: 'owner', ownerEmail: user.email }
+  } else if (membership.status !== 'active') {
+    return own
   }
   const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(membership.owner_id)
-  if (!owner) return { wsId: user.id, role: 'owner', ownerEmail: user.email }
-  return { wsId: owner.id, role: membership.role, ownerEmail: owner.email }
+  if (!owner) return own
+  return { wsId: owner.id, role: membership.role, ownerEmail: owner.email, pendingInvite: null }
+}
+
+function ownsWorkspaceData(userId) {
+  return Boolean(db.prepare(
+    `SELECT EXISTS(SELECT 1 FROM campaigns WHERE user_id = @id)
+         OR EXISTS(SELECT 1 FROM leads WHERE user_id = @id)
+         OR EXISTS(SELECT 1 FROM mailboxes WHERE user_id = @id) AS owns`
+  ).get({ id: userId }).owns)
+}
+
+// The invite addressed to this user, whether or not it has been acted on.
+// Only the person the invite names can accept or decline it.
+function invitationFor(user, id) {
+  const row = db.prepare('SELECT * FROM team_members WHERE id = ?').get(id)
+  if (!row || row.canonical_email !== canonicalEmail(user.email)) return null
+  return row
+}
+
+// A user who already owns a workspace chooses to work in the inviter's
+// instead. Their own data is untouched; their sessions simply resolve to the
+// owner's workspace from here on (until the owner removes them).
+export function acceptInvite(user, id) {
+  const row = invitationFor(user, id)
+  if (!row) return null
+  db.prepare("UPDATE team_members SET status = 'active' WHERE id = ?").run(row.id)
+  return row
+}
+
+export function declineInvite(user, id) {
+  const row = invitationFor(user, id)
+  if (!row) return null
+  db.prepare('DELETE FROM team_members WHERE id = ?').run(row.id)
+  return row
 }
 
 // Column migrations for existing databases (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -433,6 +478,9 @@ for (const stmt of [
   "ALTER TABLE campaigns ADD COLUMN email_subject TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE campaigns ADD COLUMN defaults_snapshot TEXT NOT NULL DEFAULT '{}'",
   "ALTER TABLE campaigns ADD COLUMN launched_at TEXT DEFAULT ''",
+  // Approval is decided per campaign: this launch waits for a human, that one
+  // runs unattended. NULL inherits the workspace default (on).
+  'ALTER TABLE campaigns ADD COLUMN require_approval INTEGER',
   // Retry with backoff for TRANSIENT per-lead send failures (server/engine.js).
   // A transient Gmail 5xx/429 or Twilio blip used to strand a lead in state
   // 'error', which the tick never re-selects. These keep the lead selectable and
@@ -458,6 +506,18 @@ for (const stmt of [
   "ALTER TABLE campaigns ADD COLUMN purpose TEXT NOT NULL DEFAULT 'commercial'",
 ]) {
   try { db.exec(stmt) } catch { /* column already exists */ }
+}
+
+// Team invites are matched on the canonical address (shared/email.js). Older
+// rows carry only the address as typed; fill in the canonical form once so
+// resolveWorkspace can look members up by it on every request.
+try { db.exec("ALTER TABLE team_members ADD COLUMN canonical_email TEXT NOT NULL DEFAULT ''") } catch { /* exists */ }
+db.exec('CREATE INDEX IF NOT EXISTS idx_team_members_canonical ON team_members(canonical_email)')
+{
+  const fill = db.prepare('UPDATE team_members SET canonical_email = ? WHERE id = ?')
+  for (const row of db.prepare("SELECT id, email FROM team_members WHERE canonical_email = ''").all()) {
+    fill.run(canonicalEmail(row.email), row.id)
+  }
 }
 
 // Monthly AI spend ledger (Docs/AI-SPEND.md). One row per workspace per UTC month.
