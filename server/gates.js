@@ -425,18 +425,25 @@ export function resolveSend({
 // The absolute trigger matters more than the rate for a small sender: at twenty
 // emails a day a percentage of the last fifty is a week behind the problem,
 // which is a week of sending to a list that is already hurting the domain.
-export function bounceStats(mailboxId, sample) {
+// `since` is the moment a person last lifted this mailbox's brake. Bounces
+// before it were already judged and waived; only bounces after it count, so
+// lifting the brake holds until a genuinely new address bounces rather than
+// being undone by the next tick re-reading the same three.
+export function bounceStats(mailboxId, sample, since = "") {
   const recent = db.prepare(
     `SELECT l.status FROM messages m JOIN leads l ON l.id = m.lead_id
      WHERE m.mailbox_id = ? AND m.direction = 'out'
      ORDER BY m.id DESC LIMIT ?`
   ).all(mailboxId, sample)
   const bounced = recent.filter((r) => r.status === 'bounced').length
+  // Distinct addresses: one dead address written to three times is one
+  // bounce, and the message the user reads says "addresses".
   const today = db.prepare(
-    `SELECT COUNT(*) n FROM messages m JOIN leads l ON l.id = m.lead_id
+    `SELECT COUNT(DISTINCT m.lead_id) n FROM messages m JOIN leads l ON l.id = m.lead_id
      WHERE m.mailbox_id = ? AND m.direction = 'out'
-       AND m.created_at >= datetime('now', '-1 day') AND l.status = 'bounced'`
-  ).get(mailboxId).n
+       AND m.created_at >= datetime('now', '-1 day') AND l.status = 'bounced'
+       AND m.created_at > ?`
+  ).get(mailboxId, String(since || "")).n
   return {
     sample: recent.length,
     bounced,
@@ -449,7 +456,7 @@ export function bounceStats(mailboxId, sample) {
 // stays a pure question and can be asked by the monitoring page too.
 export function brakeReason(mailbox, rules) {
   const brakes = rules.brakes || {}
-  const stats = bounceStats(mailbox.id, brakes.bounceSample || 50)
+  const stats = bounceStats(mailbox.id, brakes.bounceSample || 50, mailbox.brake_waived_at)
   if (brakes.bounceAbsolute > 0 && stats.last24h >= brakes.bounceAbsolute) {
     return `${stats.last24h} address${stats.last24h === 1 ? '' : 'es'} bounced from ${mailbox.email} in the last day — sending stopped so the domain does not take the damage`
   }

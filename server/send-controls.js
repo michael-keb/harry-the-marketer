@@ -178,6 +178,12 @@ export function registerSendControls(api) {
       scope: req.params.scope, id: Number(req.params.id) || 0, by: req.user?.email || '',
     })
     if (!released) return res.status(404).json({ error: 'No hold there' })
+    // A lifted bounce brake stays lifted: stamp the mailbox so the brake only
+    // counts bounces from here on, not the ones this person just waived.
+    if (released.source === 'bounce_brake' && released.scope === 'mailbox') {
+      db.prepare("UPDATE mailboxes SET brake_waived_at = datetime('now') WHERE id = ? AND user_id = ?")
+        .run(released.scope_id, req.wsId)
+    }
     res.json({ released: true, was: describeHold(released) })
   })
 

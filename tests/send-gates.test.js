@@ -484,6 +484,59 @@ test('a rate needs a sample worth believing before it stops anything', () => {
   assert.equal(brakeReason(mailbox(), strict), null, 'one bounce out of one send is not a 100% problem')
 })
 
+test('one dead address written to three times is one bounce, not three', () => {
+  const rules = workspaceRules(owner())
+  db.prepare("INSERT INTO leads (id, user_id, email, status) VALUES (40, 1, 'gone@dead.com', 'bounced')").run()
+  for (let i = 0; i < 3; i += 1) {
+    db.prepare(
+      `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, body, to_email)
+       VALUES (1, 1, 40, 1, 'out', 'hi', 'gone@dead.com')`
+    ).run()
+  }
+  assert.equal(brakeReason(mailbox(), rules), null, 'three sends to one address is one bounce')
+
+  db.prepare("INSERT INTO leads (id, user_id, email, status) VALUES (41, 1, 'also@dead.com', 'bounced')").run()
+  db.prepare(
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, body, to_email)
+     VALUES (1, 1, 41, 1, 'out', 'hi', 'also@dead.com')`
+  ).run()
+  assert.match(brakeReason(mailbox(), rules), /2 addresses bounced/)
+})
+
+test('lifting the brake sticks until a new address bounces', () => {
+  const rules = workspaceRules(owner())
+  for (const [id, email] of [[40, 'gone@dead.com'], [41, 'also@dead.com']]) {
+    db.prepare("INSERT OR IGNORE INTO leads (id, user_id, email, status) VALUES (?, 1, ?, 'bounced')").run(id, email)
+    db.prepare(
+      `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, body, to_email)
+       VALUES (1, 1, ?, 1, 'out', 'hi', ?)`
+    ).run(id, email)
+  }
+  assert.match(brakeReason(mailbox(), rules), /2 addresses bounced/, 'the brake is on')
+
+  // A person lifts it. The stamp sits a minute ahead of the rows already
+  // written so the ordering does not depend on which second this runs in.
+  db.prepare("UPDATE mailboxes SET brake_waived_at = datetime('now', '+1 minute') WHERE id = 1").run()
+  assert.equal(brakeReason(mailbox(), rules), null, 'the bounces already waived do not re-arm it')
+
+  // One genuinely new address bounces after the lift: under the threshold.
+  db.prepare("INSERT INTO leads (id, user_id, email, status) VALUES (42, 1, 'new@dead.com', 'bounced')").run()
+  db.prepare(
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, body, to_email, created_at)
+     VALUES (1, 1, 42, 1, 'out', 'hi', 'new@dead.com', datetime('now', '+2 minutes'))`
+  ).run()
+  assert.equal(brakeReason(mailbox(), rules), null, 'one new bounce is under the threshold')
+
+  // A second new one: the brake comes back, counting only what is new.
+  db.prepare("INSERT INTO leads (id, user_id, email, status) VALUES (43, 1, 'newer@dead.com', 'bounced')").run()
+  db.prepare(
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, body, to_email, created_at)
+     VALUES (1, 1, 43, 1, 'out', 'hi', 'newer@dead.com', datetime('now', '+2 minutes'))`
+  ).run()
+  assert.match(brakeReason(mailbox(), rules), /2 addresses bounced/, 'only the two new ones count')
+  db.prepare("UPDATE mailboxes SET brake_waived_at = '' WHERE id = 1").run()
+})
+
 // ---- the engine, not just the resolver --------------------------------------
 
 // The gates above are unit-tested against `resolveSend`. This proves the engine

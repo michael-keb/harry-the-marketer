@@ -410,6 +410,9 @@ for (const stmt of [
   "ALTER TABLE users ADD COLUMN send_days TEXT DEFAULT 'weekdays'",
   "ALTER TABLE users ADD COLUMN send_timezone TEXT DEFAULT ''",
   'ALTER TABLE mailboxes ADD COLUMN next_send_at INTEGER NOT NULL DEFAULT 0',
+  // When a person lifts the bounce brake. The brake then only counts bounces
+  // newer than this, so lifting it is not undone by the next tick (gates.js).
+  "ALTER TABLE mailboxes ADD COLUMN brake_waived_at TEXT DEFAULT ''",
   // Send controls: the recipient's own clock, so quiet hours can be theirs
   // rather than ours. Blank means unknown, and unknown is never guessed at —
   // it falls back to the sender's window (server/gates.js).
