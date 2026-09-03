@@ -114,7 +114,7 @@ export function encodeHeaderWord(value) {
   return `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`
 }
 
-export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body, html, threadId, inReplyTo, listUnsubscribe, workspaceId }) {
+export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body, html, threadId, inReplyTo, references, messageId, listUnsubscribe, workspaceId }) {
   const wsId = workspaceId ?? mailbox?.user_id
   if (!wsId) {
     throw new Error('gmailSend requires workspaceId — refusing to send without a suppression check')
@@ -147,8 +147,12 @@ export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body,
   // break threading, which is worse than trusting documented behaviour.
   if (ccList.length) headers.splice(2, 0, `Cc: ${ccList.join(', ')}`)
   if (bccList.length) headers.splice(ccList.length ? 3 : 2, 0, `Bcc: ${bccList.join(', ')}`)
+  // The recipient threads on these, not on Gmail's threadId (which only
+  // groups the sender's copy). Gmail keeps a Message-ID we supply in raw MIME,
+  // which is how the next reply can reference this one.
+  if (messageId) headers.push(`Message-ID: ${messageId}`)
   if (inReplyTo) {
-    headers.push(`In-Reply-To: ${inReplyTo}`, `References: ${inReplyTo}`)
+    headers.push(`In-Reply-To: ${inReplyTo}`, `References: ${references || inReplyTo}`)
   }
   if (listUnsubscribe) {
     headers.push(`List-Unsubscribe: <${listUnsubscribe}>`)
@@ -172,7 +176,7 @@ export async function gmailSend(mailbox, { to, cc = [], bcc = [], subject, body,
   const raw = b64url(mime)
   const payload = threadId ? { raw, threadId } : { raw }
   const result = await gmailFetch(mailbox, 'messages/send', { method: 'POST', body: JSON.stringify(payload) })
-  return { messageId: result.id, threadId: result.threadId }
+  return { messageId: result.id, threadId: result.threadId, rfcMessageId: messageId || '' }
 }
 
 // ---- read -------------------------------------------------------------------

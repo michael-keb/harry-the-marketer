@@ -91,8 +91,12 @@ function escapeHtml(s) {
 // redirector. The setting changed what Reports *said* and nothing about what
 // left the building — which for a privacy control is the worst way to be wrong.
 //
-// The unsubscribe link is deliberately NOT optional. Suppression and the right
-// to leave are not campaign preferences — and it is built from the same
+// The unsubscribe link is not a campaign preference: every unsolicited email
+// carries it. `unsubscribe: false` exists for one case only — a reply inside a
+// conversation the recipient has already written back into, where a bulk-mail
+// footer under "does Tuesday work?" reads as spam and the person has the
+// obvious way out of replying. First touches and no-reply follow-ups never
+// pass it. The link is built from the same
 // `trackingDomain` as everything else, so a custom domain moves the opt-out
 // link with the rest rather than leaving one link pointing at a second host.
 //
@@ -100,7 +104,7 @@ function escapeHtml(s) {
 // `sanitizeSignature()` in server/parity/mailboxes.js. It goes in raw, below
 // the body and ABOVE the unsubscribe line, because Docs/email-accounts/update.md
 // AC 7 is explicit that a signature must not displace the opt-out.
-export function buildHtmlBody({ body, token, trackOpens = true, trackClicks = true, trackingDomain = '', signature = '', unsubscribeText = '' }) {
+export function buildHtmlBody({ body, token, trackOpens = true, trackClicks = true, trackingDomain = '', signature = '', unsubscribeText = '', unsubscribe = true }) {
   const escaped = String(body)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const linked = trackClicks
@@ -121,10 +125,12 @@ export function buildHtmlBody({ body, token, trackOpens = true, trackClicks = tr
     `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222">` +
     `<div>${linked.replace(/\n/g, '<br>')}</div>` +
     (sig ? `<div class="harry-signature">${sig}</div>` : '') +
-    `<br><div style="font-size:11px;color:#999">` +
-    // The campaign's own wording becomes the visible opt-out label, so the
-    // previewed sentence ships; the href stays the real unsubscribe URL.
-    `<a href="${unsubscribeUrl(token, trackingDomain)}" style="color:#999">${escapeHtml(String(unsubscribeText || '').trim()) || 'Unsubscribe'}</a></div>` +
+    (unsubscribe
+      ? `<br><div style="font-size:11px;color:#999">` +
+        // The campaign's own wording becomes the visible opt-out label, so the
+        // previewed sentence ships; the href stays the real unsubscribe URL.
+        `<a href="${unsubscribeUrl(token, trackingDomain)}" style="color:#999">${escapeHtml(String(unsubscribeText || '').trim()) || 'Unsubscribe'}</a></div>`
+      : '') +
     (trackOpens ? `<img src="${pixelUrl(token, trackingDomain)}" width="1" height="1" alt="" style="display:none">` : '') +
     `</body></html>`
   )

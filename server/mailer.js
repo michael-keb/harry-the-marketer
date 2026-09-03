@@ -201,6 +201,25 @@ export async function sendEmail({ mailbox, user, campaign, lead, nodeId, subject
   let threadId = existing?.thread_id || ''
   const trackingToken = newTrackingToken()
 
+  // Threading is the recipient's mail client's job, and it does it from RFC
+  // Message-IDs — not from Gmail's threadId, which only groups our own copy.
+  // So: reply to the newest message in the thread and cite the whole chain.
+  const prior = threadId
+    ? db.prepare(
+      `SELECT direction, rfc_message_id FROM messages
+        WHERE user_id = ? AND thread_id = ? ORDER BY id`
+    ).all(user.id, threadId)
+    : []
+  const chain = prior.map((m) => m.rfc_message_id).filter(Boolean)
+  const inReplyTo = chain.length ? chain[chain.length - 1] : ''
+  const references = chain.join(' ')
+  // Once they have written back, this is correspondence, not a campaign
+  // email: a reply carries no opt-out footer and no List-Unsubscribe. First
+  // touches and no-reply follow-ups keep both (tracking.js says why).
+  const conversational = prior.some((m) => m.direction === 'in')
+  const rfcMessageId = `<htm-${trackingToken}@${String(mailbox.email || '').split('@')[1] || 'harrythemarketer.com'}>`
+  let sentRfcId = ''
+
   // The mailbox's own settings, applied here because this is the one line every
   // agent send passes through — the same reason suppression and the touch
   // ledger live here rather than at each call site.
@@ -229,7 +248,7 @@ export async function sendEmail({ mailbox, user, campaign, lead, nodeId, subject
         subject,
         // The opt-out line rides along with the transport, like the
         // List-Unsubscribe header — `messages` keeps the email as written.
-        body: withOptOutFooter(outgoing, trackingToken, trackDomain, unsubText),
+        body: conversational ? outgoing : withOptOutFooter(outgoing, trackingToken, trackDomain, unsubText),
         // The campaign's own tracking settings, honoured on the wire rather
         // than only in what Reports reports. `track_opens`/`track_clicks`
         // default to 1 in the schema, so a campaign that has never been
@@ -243,13 +262,18 @@ export async function sendEmail({ mailbox, user, campaign, lead, nodeId, subject
           trackingDomain: trackDomain,
           signature: htmlSignature,
           unsubscribeText: unsubText,
+          unsubscribe: !conversational,
         }),
-        listUnsubscribe: unsubscribeUrl(trackingToken, trackDomain),
+        listUnsubscribe: conversational ? undefined : unsubscribeUrl(trackingToken, trackDomain),
         threadId: threadId || undefined,
+        inReplyTo: inReplyTo || undefined,
+        references: references || undefined,
+        messageId: rfcMessageId,
         workspaceId: user.id,
       })
       providerMessageId = result.messageId
       threadId = result.threadId
+      sentRfcId = result.rfcMessageId || rfcMessageId
       recordTelemetry('send', { op: 'gmail', ok: true, ms: Date.now() - t0 })
     } catch (err) {
       recordTelemetry('send', { op: 'gmail', ok: false, ms: Date.now() - t0, detail: String(err.message || err) })
@@ -263,7 +287,7 @@ export async function sendEmail({ mailbox, user, campaign, lead, nodeId, subject
         cc,
         bcc,
         subject,
-        body: withOptOutFooter(outgoing, trackingToken, trackDomain, unsubText),
+        body: conversational ? outgoing : withOptOutFooter(outgoing, trackingToken, trackDomain, unsubText),
         html: plain ? undefined : buildHtmlBody({
           body,
           token: trackingToken,
@@ -272,13 +296,17 @@ export async function sendEmail({ mailbox, user, campaign, lead, nodeId, subject
           trackingDomain: trackDomain,
           signature: htmlSignature,
           unsubscribeText: unsubText,
+          unsubscribe: !conversational,
         }),
-        listUnsubscribe: unsubscribeUrl(trackingToken, trackDomain),
+        listUnsubscribe: conversational ? undefined : unsubscribeUrl(trackingToken, trackDomain),
         threadId: threadId || undefined,
+        inReplyTo: inReplyTo || undefined,
+        references: references || undefined,
         workspaceId: user.id,
       })
       providerMessageId = result.messageId
       threadId = result.threadId
+      sentRfcId = result.rfcMessageId || ''
       recordTelemetry('send', { op: 'outlook', ok: true, ms: Date.now() - t0 })
     } catch (err) {
       recordTelemetry('send', { op: 'outlook', ok: false, ms: Date.now() - t0, detail: String(err.message || err) })
@@ -288,17 +316,18 @@ export async function sendEmail({ mailbox, user, campaign, lead, nodeId, subject
   } else {
     providerMessageId = `sbx-msg-${crypto.randomBytes(6).toString('hex')}`
     threadId = threadId || `sbx-thr-${crypto.randomBytes(6).toString('hex')}`
+    sentRfcId = rfcMessageId
     recordTelemetry('send', { op: 'sandbox', ok: true, ms: Date.now() - t0 })
   }
 
   db.prepare(
-    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, cc_emails, bcc_emails, provider_message_id, thread_id, node_id, is_read, tracking_token, send_status)
-     VALUES (?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'sent')`
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, cc_emails, bcc_emails, provider_message_id, thread_id, node_id, is_read, tracking_token, send_status, rfc_message_id)
+     VALUES (?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'sent', ?)`
     // The signed body, not the composed one: what is recorded has to be what
     // was sent, and the two manual-reply routes already store their signed
     // `outgoing` for the same reason.
   ).run(user.id, campaign.id, lead.id, mailbox.id, subject, outgoing, mailbox.email, lead.email,
-    cc.join(', '), bcc.join(', '), providerMessageId, threadId, nodeId, trackingToken)
+    cc.join(', '), bcc.join(', '), providerMessageId, threadId, nodeId, trackingToken, sentRfcId)
   bumpQuota(mailbox)
   // The touch ledger, written here for the same reason suppression is checked
   // here: this is the one line every send passes through. A frequency cap that
@@ -360,9 +389,9 @@ export async function syncInbound({ mailbox, user, campaign, lead, threadId }) {
       continue
     }
     const inserted = db.prepare(
-      `INSERT OR IGNORE INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
-       VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
-    ).run(user.id, campaign.id, lead.id, mailbox.id, msg.subject, msg.body.slice(0, 20000), msg.fromEmail, msg.toEmail, msg.providerMessageId, threadId).changes
+      `INSERT OR IGNORE INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id, rfc_message_id)
+       VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?, ?)`
+    ).run(user.id, campaign.id, lead.id, mailbox.id, msg.subject, msg.body.slice(0, 20000), msg.fromEmail, msg.toEmail, msg.providerMessageId, threadId, msg.messageIdHeader || '').changes
     // Emit the reply event from the engine path too — the LEAD_REPLIED webhook
     // used to miss active-campaign replies because only the 5-minute upkeep sweep
     // logged them. The unique (user_id, provider_message_id) index means exactly
@@ -394,11 +423,12 @@ export function simulateReply({ user, campaignLead, text }) {
     .get(campaignLead.thread_id)
   const subject = lastOut?.subject ? (lastOut.subject.startsWith('Re:') ? lastOut.subject : `Re: ${lastOut.subject}`) : 'Re:'
   db.prepare(
-    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id)
-     VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, from_email, to_email, provider_message_id, thread_id, rfc_message_id)
+     VALUES (?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     user.id, campaign.id, lead.id, mailbox.id, subject, text, lead.email, mailbox.email,
-    `sbx-msg-${crypto.randomBytes(6).toString('hex')}`, campaignLead.thread_id
+    `sbx-msg-${crypto.randomBytes(6).toString('hex')}`, campaignLead.thread_id,
+    `<sbx-${crypto.randomBytes(6).toString('hex')}@sandbox.local>`
   )
   logEvent(user.id, { campaignId: campaign.id, leadId: lead.id, type: 'reply', detail: text.slice(0, 120) })
 }

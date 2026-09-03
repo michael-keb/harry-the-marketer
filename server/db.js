@@ -392,6 +392,10 @@ for (const stmt of [
   "ALTER TABLE messages ADD COLUMN tracking_token TEXT DEFAULT ''",
   "ALTER TABLE messages ADD COLUMN opened_at TEXT DEFAULT ''",
   "ALTER TABLE messages ADD COLUMN clicked_at TEXT DEFAULT ''",
+  // RFC 5322 Message-ID, in and out. The recipient's mail client threads on
+  // In-Reply-To/References, which need this; Gmail's own threadId only threads
+  // the sender's side (mailer.js).
+  "ALTER TABLE messages ADD COLUMN rfc_message_id TEXT DEFAULT ''",
   "CREATE INDEX IF NOT EXISTS idx_messages_token ON messages(tracking_token)",
   // The standing rule: nothing sends without your OK. On by default, including
   // for workspaces that existed before approvals did.

@@ -97,7 +97,7 @@ function recipients(list) {
     .map((address) => ({ emailAddress: { address } }))
 }
 
-export async function outlookSend(mailbox, { to, cc = [], bcc = [], subject, body, html, threadId, inReplyTo, listUnsubscribe, workspaceId }) {
+export async function outlookSend(mailbox, { to, cc = [], bcc = [], subject, body, html, threadId, inReplyTo, references, listUnsubscribe, workspaceId }) {
   const wsId = workspaceId ?? mailbox?.user_id
   if (!wsId) throw new Error('outlookSend requires workspaceId')
   for (const address of [...recipients(to), ...recipients(cc), ...recipients(bcc)].map((r) => r.emailAddress.address)) {
@@ -107,7 +107,7 @@ export async function outlookSend(mailbox, { to, cc = [], bcc = [], subject, bod
   }
 
   const headers = []
-  if (inReplyTo) headers.push({ name: 'In-Reply-To', value: inReplyTo }, { name: 'References', value: inReplyTo })
+  if (inReplyTo) headers.push({ name: 'In-Reply-To', value: inReplyTo }, { name: 'References', value: references || inReplyTo })
   if (listUnsubscribe) headers.push({ name: 'List-Unsubscribe', value: `<${listUnsubscribe}>` })
 
   const message = {
@@ -127,6 +127,8 @@ export async function outlookSend(mailbox, { to, cc = [], bcc = [], subject, bod
   return {
     messageId: draft.id,
     threadId: threadId || draft.conversationId || '',
+    // Graph assigns the RFC id; we cannot supply one, so read it back.
+    rfcMessageId: draft.internetMessageId || '',
   }
 }
 
