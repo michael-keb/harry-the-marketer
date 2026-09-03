@@ -260,6 +260,12 @@ export function workspaceRules(owner) {
   const stored = storedRules(owner.id, 'workspace', 0)
   // Narrowing for permission ceilings; overlay for Coral Marten preferences.
   const merged = overlayDefaults(narrow(base, stored), stored)
+  // The defaults are where a workspace starts, not a floor it can never go
+  // under. narrow() rightly keeps a campaign or mailbox inside the workspace,
+  // but applied here it made the 14-day touch gap unlowerable — a stored 0
+  // (which validate() allows, meaning no gap) came back as 14. The workspace
+  // owns its own frequency.
+  if (stored?.frequency) merged.frequency = { ...merged.frequency, ...stored.frequency }
   merged.windows = clampWindows(merged.windows, merged.quietHours)
   merged.timezone = merged.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
   merged.paced = owner?.paced === undefined ? true : Boolean(owner.paced)

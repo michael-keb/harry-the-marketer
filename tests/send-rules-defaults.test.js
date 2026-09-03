@@ -212,3 +212,21 @@ test('saveRules audit trail includes preference keys', () => {
   assert.equal(after.replyHandling.email.noReplySwitchTo, 'sms')
   assert.equal(after.defaultDelays.noReplyMs, WORKSPACE_DEFAULTS.defaultDelays.noReplyMs)
 })
+
+// ---- frequency: the workspace owns its baseline ------------------------------
+
+test('the workspace can set its touch gap below the default, including off', () => {
+  assert.equal(workspaceRules(owner()).frequency.personDays, WORKSPACE_DEFAULTS.frequency.personDays)
+  saveRules(1, 'workspace', 0, { frequency: { personDays: 0, companyPerWeek: 3, oneChannelPerDay: true } })
+  assert.equal(workspaceRules(owner()).frequency.personDays, 0, '0 means no gap and must survive the merge')
+  saveRules(1, 'workspace', 0, { frequency: { personDays: 3, companyPerWeek: 3, oneChannelPerDay: true } })
+  assert.equal(workspaceRules(owner()).frequency.personDays, 3, 'below the default, not clamped up to it')
+})
+
+test('a campaign still cannot loosen the workspace gap, only tighten it', () => {
+  saveRules(1, 'workspace', 0, { frequency: { personDays: 3, companyPerWeek: 3, oneChannelPerDay: true } })
+  saveRules(1, 'campaign', 1, { frequency: { personDays: 1, companyPerWeek: 3, oneChannelPerDay: true } })
+  assert.equal(effectiveRules({ owner: owner(), campaign: campaign() }).frequency.personDays, 3, 'a campaign cannot go under the workspace')
+  saveRules(1, 'campaign', 1, { frequency: { personDays: 30, companyPerWeek: 3, oneChannelPerDay: true } })
+  assert.equal(effectiveRules({ owner: owner(), campaign: campaign() }).frequency.personDays, 30, 'tightening still works')
+})
