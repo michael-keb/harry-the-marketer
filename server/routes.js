@@ -880,6 +880,7 @@ api.post('/drafts/:id/approve', async (req, res) => {
   db.prepare(
     "UPDATE drafts SET status = 'approved', subject = ?, body = ?, edited = ?, reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?"
   ).run(subject, body, edited, req.user.email, draft.id)
+  unparkForDraft(draft)
   logEvent(req.wsId, {
     campaignId: draft.campaign_id, leadId: draft.lead_id, type: 'approved',
     detail: `${req.user.email} approved${edited ? ' (edited)' : ''}: ${subject}`,
@@ -896,6 +897,19 @@ api.post('/drafts/:id/approve', async (req, res) => {
     remaining: pendingCount(req.wsId),
   })
 })
+
+// A draft parked for a person — the purpose guardrail, or the AI being unable
+// to write the step — sits on a needs_attention lead the tick never selects, so
+// approving it used to change nothing: the email was approved and the lead was
+// still stuck. Approving IS the person's decision; put the lead back in play and
+// the next tick sends exactly this draft.
+function unparkForDraft(draft) {
+  db.prepare(
+    `UPDATE campaign_leads SET state = 'active', error = '', updated_at = datetime('now')
+      WHERE campaign_id = ? AND lead_id = ? AND state = 'needs_attention'
+        AND error IN ('purpose_blocked', 'ai_unavailable')`
+  ).run(draft.campaign_id, draft.lead_id)
+}
 
 // One click for a batch you've already read. Same code path, one at a time.
 api.post('/drafts/approve-all', async (req, res) => {

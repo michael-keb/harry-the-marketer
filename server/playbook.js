@@ -508,3 +508,50 @@ export const DEFAULT_PLAYBOOK = `flowchart TD
     Q -- reply: interested --> B
     Q -- no reply 4d --> F
 `
+
+// The whole plan in plain language, for the model that writes the next email.
+//
+// A step instruction on its own reads as a script — "close, propose booking" —
+// and a model given only that recites it, even when the person has just asked a
+// question. Given the entire flowchart, where this person is in it, how they got
+// here, and what the plan counts as winning, the model can do what a person
+// would: read the conversation and write the message that moves it toward the
+// outcome. Nodes keep their ids so the step under discussion can be named.
+export function describePlaybook(graph, nodeId = '') {
+  if (!graph?.valid) return ''
+  const label = (id) => {
+    const n = graph.nodes[id]
+    if (!n) return id
+    if (n.type === 'send') return `${id} (send ${n.channel || 'email'}: "${n.instruction || n.label}")`
+    if (n.type === 'wait') return `${id} (wait ${n.label.replace(/^wait\s*[:=]?\s*/i, '')})`
+    if (n.type === 'decision') return `${id} (decide: "${n.label}")`
+    if (n.type === 'terminal') return `${id} (END — ${n.label})`
+    if (n.type === 'start') return `${id} (start)`
+    return id
+  }
+  const cond = (e) => {
+    const c = e.cond || {}
+    if (c.kind === 'always') return 'then'
+    if (c.kind === 'reply') return c.intent ? `if they reply "${c.intent}"` : 'if they reply at all'
+    if (c.kind === 'no_reply') return `if no reply after ${e.label.replace(/^no\s*reply\s*/i, '')}`
+    if (c.kind === 'after') return `after ${e.label.replace(/^(after|wait)\s*[:=]?\s*/i, '')}`
+    return e.label || ''
+  }
+  const lines = ['THE PLAN (every step and branch):']
+  for (const n of Object.values(graph.nodes)) {
+    if (n.type === 'terminal') continue
+    const out = graph.edges.filter((e) => e.from === n.id)
+    const branches = out.map((e) => `${cond(e)} → ${label(e.to)}`).join('; ')
+    lines.push(`- ${label(n.id)}${branches ? ` — ${branches}` : ' — (no next step)'}`)
+  }
+  const ends = Object.values(graph.nodes).filter((n) => n.type === 'terminal')
+  if (ends.length) lines.push(`Outcomes: ${ends.map((n) => `${n.id} = "${n.label}"`).join('; ')}`)
+  if (nodeId && graph.nodes[nodeId]) {
+    const path = pathToNode(graph, nodeId)
+    const route = path?.length
+      ? ` — reached via ${path.map((e) => `${e.from} [${cond(e)}]`).join(' → ')} → ${nodeId}`
+      : ''
+    lines.push(`THIS PERSON IS NOW AT: ${label(nodeId)}${route}`)
+  }
+  return lines.join('\n')
+}

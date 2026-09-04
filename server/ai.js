@@ -5,7 +5,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { env } from './env.js'
 import { timed } from './telemetry.js'
-import { parsePlaybook, pathToNode } from './playbook.js'
+import { parsePlaybook, pathToNode, describePlaybook } from './playbook.js'
 import { chargeAi, refundAi, AiBudgetError } from './ai-spend.js'
 
 let client = null
@@ -139,7 +139,7 @@ function threadTranscript(thread) {
   return thread
     .map((m) => `--- ${m.direction === 'out' ? 'US' : 'THEM'} (${m.created_at})\nSubject: ${m.subject}\n${m.body}`)
     .join('\n\n')
-    .slice(-8000)
+    .slice(-20000)
 }
 
 // The message we are actually replying to, separated from the history behind
@@ -185,7 +185,7 @@ const HONESTY_RULES =
 // its angle and voice and only moves what has to move for this recipient.
 // `refine` is a one-off note ("shorter, lead with the ROI number") from someone
 // rewriting a sample by hand, and outranks the instruction where they collide.
-export async function composeEmail({ instruction, lead, businessContext, thread, intent, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject, workspaceId }) {
+export async function composeEmail({ instruction, lead, businessContext, thread, intent, senderName, meetingLink, consentLink, example, refine, campaignSubject, defaultSubject, workspaceId, playbook = null, stepId = '' }) {
   try {
     const text = await callModel({
       workspaceId,
@@ -223,7 +223,12 @@ export async function composeEmail({ instruction, lead, businessContext, thread,
             + `\n\nTHEIR LATEST MESSAGE — this is what you are replying to:\n${String(latest.body || '').slice(0, 4000)}`
             + (intent ? `\n\nTheir reply was classified as: ${intent}` : '')
         })() +
-        `\n\nGoal for this email, from the campaign playbook: ${instruction}` +
+        (playbook
+          ? `\n\n${playbook}` +
+            `\n\nThe step they are at says: "${instruction}". That is where the conversation stands in the plan — not a script. ` +
+            `Read the whole conversation above, decide what the right next message is to move this person toward the plan's outcome, and write that. ` +
+            `If their latest message asks something, answer it before anything else.`
+          : `\n\nGoal for this email, from the campaign playbook: ${instruction}`) +
         (refine ? `\n\nRevision note from the user — apply it over the instruction wherever the two disagree: ${String(refine).slice(0, 600)}` : '') +
         `\n\nWrite the email now.`,
       op: 'compose',
@@ -253,7 +258,7 @@ export async function composeEmail({ instruction, lead, businessContext, thread,
   } catch (err) {
     lastError = String(err.message || err)
     console.warn('[ai] compose fell back to template:', lastError)
-    return { ...templateCompose({ instruction, lead, thread, senderName, consentLink, example, campaignSubject, defaultSubject }), via: 'template' }
+    return { ...templateCompose({ instruction, lead, thread, senderName, consentLink, example, campaignSubject, defaultSubject }), via: 'template', reason: lastError }
   }
 }
 
@@ -327,7 +332,7 @@ export function freshReplyText(body) {
   return fresh || text
 }
 
-export async function classifyReply({ intents, replyText, thread, businessContext, workspaceId }) {
+export async function classifyReply({ intents, replyText, thread, businessContext, workspaceId, playbook = null }) {
   const vocabulary = [...new Set([...(intents || []), ...CORE_INTENTS])]
   const fresh = freshReplyText(replyText)
   const heuristic = heuristicClassify(fresh, vocabulary)
@@ -341,6 +346,7 @@ export async function classifyReply({ intents, replyText, thread, businessContex
         `Business context: ${businessContext || '(none)'}. ` +
         `Pick exactly one intent from the allowed list. "other" means none fit well and a human should look.`,
       user:
+        (playbook ? `${playbook}\n\n` : '') +
         (thread?.length ? `Thread so far:\n${threadTranscript(thread)}\n\n` : '') +
         `Reply to classify (quoted history removed):\n"""\n${fresh.slice(0, 4000)}\n"""\n\nAllowed intents: ${vocabulary.join(' | ')}`,
       op: 'classify',
@@ -759,6 +765,8 @@ export async function previewPlaybookEmails({ graph, lead, businessContext, send
           meetingLink,
           consentLink: '',
           workspaceId,
+          playbook: describePlaybook(graph, node.id),
+          stepId: node.id,
         })
       return { node, path, composed, thread }
     }))
@@ -815,6 +823,8 @@ export async function composeStepSample({
     example: basedOn?.body ? basedOn : null,
     refine,
     workspaceId,
+    playbook: describePlaybook(graph, nodeId),
+    stepId: nodeId,
   })
   return {
     ...stepFacts(graph, node, path),
@@ -905,6 +915,10 @@ export function heuristicClassify(replyText, vocabulary) {
     intent = 'not interested'; confidence = 0.8
   } else if (has('not right now', 'not now', 'maybe later', 'next quarter', 'circle back', 'reach out in', 'busy at the moment')) {
     intent = 'not now'; confidence = 0.75
+  } else if (text.includes('?') && has('tell me more', 'send me more', 'more information', 'more info', 'more details') && vocabulary.includes('question')) {
+    // "Can you send me more information?" is a request, not a yes. Read as
+    // interest it once marked a lead Won because nothing outranked the phrase.
+    intent = 'question'; confidence = 0.7
   } else if (has('interested', 'sounds good', 'tell me more', "let's talk", 'book a call', 'schedule', 'demo', 'happy to chat', 'send me more', 'yes please', 'sure,')) {
     intent = 'interested'; confidence = 0.8
   } else if (text.includes('?')) {

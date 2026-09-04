@@ -3,9 +3,9 @@
 // replies/timeouts at branch points, classifying replies with the AI agent,
 // and following the matching edge.
 import { db, logEvent, touch, kvSet } from './db.js'
-import { parsePlaybook, nodeIntents } from './playbook.js'
+import { parsePlaybook, nodeIntents, describePlaybook } from './playbook.js'
 import { composeEmail, classifyReply, researchLead } from './ai.js'
-import { guardComposed } from './purpose.js'
+import { guardComposed, isNonCommercial } from './purpose.js'
 import { syncInbound } from './mailer.js'
 import { sendMessage, smsAccountFor, smsEligibility, smsAllowedForWorkspace } from './channels/send.js'
 import { composeSms } from './channels/compose.js'
@@ -230,6 +230,40 @@ function setLead(cl, fields) {
 
 function parkWaiting(cl, fields) {
   setLead(cl, { ...fields, state: 'waiting', waiting_since: new Date().toISOString() })
+}
+
+// Is there a real person at the other end? Sandbox mailboxes and sandbox SMS
+// accounts deliver to nobody, and the rehearsal relies on template copy and
+// keyword classification working there. Everywhere else, degraded AI means a
+// person decides — never a template send, never a keyword-routed outcome.
+function realRecipient(ctx) {
+  if (ctx.mailbox) return ctx.mailbox.provider !== 'sandbox'
+  const account = smsAccountFor(ctx.campaign)
+  return !account || account.provider !== 'sandbox'
+}
+
+// Degraded mode is a person's job, not a template's. When the AI could not
+// write this step — allowance exhausted, provider down, no key — the composer
+// falls back to a template that renders the playbook step nearly verbatim.
+// That copy is fine for a sandbox, where nobody receives it, and never fine for
+// a real inbox: the first live run of this product emailed a prospect the words
+// "close - propose booking the haircut this week, offer two windows". So a real
+// recipient gets a parked draft and a person, never the template. Approving
+// the draft (server/routes.js) puts the lead back in play.
+function parkForAi(ctx, cl, nodeId, { subject, body, lead, reason = '' }) {
+  const why = String(reason || 'the AI is unavailable').slice(0, 160)
+  createDraft({ userId: ctx.user.id, campaignId: cl.campaign_id, leadId: cl.lead_id, nodeId, subject, body })
+  logEvent(ctx.user.id, {
+    campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'ai_unavailable',
+    detail: `could not write this step — ${why}; a rough draft is parked for a person`,
+  })
+  notify(ctx.user.id, {
+    title: 'Harry could not write this email',
+    text: `${why}. A rough draft for ${lead?.email || 'this lead'} is waiting in the Inbox — review it before anything sends.`,
+    link: '/app/inbox',
+  })
+  setLead(cl, { state: 'needs_attention', error: 'ai_unavailable' })
+  return false
 }
 
 function lastOutbound(cl) {
@@ -781,8 +815,14 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
       meetingLink: ctx.user.meeting_link,
       example: approved || null,
       workspaceId: ctx.user.id,
+      playbook: describePlaybook(ctx.graph, nodeId),
+      stepId: nodeId,
     })
     body = composed.body
+
+    if (composed.via !== 'ai' && account.provider !== 'sandbox') {
+      return parkForAi(ctx, cl, nodeId, { subject: 'SMS', body, lead, reason: composed.reason })
+    }
 
     // Purpose guardrail applies to SMS too — the default no-reply path switches
     // email→SMS, so a non-commercial plan's later touches must not skip the check.
@@ -1020,8 +1060,13 @@ async function enterNode(ctx, cl, nodeId) {
         }
         // Once they've said yes, every following email carries the agreement
         // link so the "yes" ends up on the record without anyone chasing it.
+        // The agreement link exists for the non-commercial asks (an assessment,
+        // a placement, a role) and for a workspace that wrote its own terms. A
+        // commercial plan has nothing to put on record — a haircut pitch once
+        // carried "confirm what you're agreeing to", which reads as phishing.
         let consentLink = ''
-        if (cl.intent === 'interested') {
+        const wantsConsent = isNonCommercial(ctx.campaign.purpose || 'commercial') || String(ctx.user.consent_terms || '').trim()
+        if (cl.intent === 'interested' && wantsConsent) {
           const consent = ensureConsent({ owner: ctx.user, leadId: lead.id, campaignId: cl.campaign_id })
           if (consent.status === 'sent') consentLink = consentUrl(consent.token)
         }
@@ -1046,6 +1091,8 @@ async function enterNode(ctx, cl, nodeId) {
           campaignSubject: ctx.campaign.email_subject || '',
           defaultSubject,
           workspaceId: ctx.user.id,
+          playbook: describePlaybook(ctx.graph, nodeId),
+          stepId: nodeId,
         })
         const forced = resolveComposeSubject({
           exampleSubject: approved?.subject,
@@ -1055,6 +1102,10 @@ async function enterNode(ctx, cl, nodeId) {
         })
         subject = forced || composed.subject
         body = composed.body
+
+        if (composed.via !== 'ai' && mailbox.provider !== 'sandbox') {
+          return parkForAi(ctx, cl, nodeId, { subject, body, lead, reason: composed.reason })
+        }
 
         // Purpose guardrail: under assessment/experience/role, a composed message
         // that offers a service parks for a human rather than sending.
@@ -1195,7 +1246,7 @@ async function enterNode(ctx, cl, nodeId) {
 // correction. Marking the inbound message with the chosen intent takes it out
 // of the "unclassified" query the tick runs, and stamping `intent_set_by`
 // records that a human owns this value — see `processWaiting`.
-export async function routeReply(ctx, cl, intent, message, { setBy = '' } = {}) {
+export async function routeReply(ctx, cl, intent, message, { setBy = '', via = 'ai' } = {}) {
   // The classifier may read a reply as an unsubscribe; it may never act on
   // that reading. Acting means suppression — irreversible for the lead's own
   // footer click and heavy even when reversible — and the classifier has been
@@ -1214,6 +1265,29 @@ export async function routeReply(ctx, cl, intent, message, { setBy = '' } = {}) 
     notify(ctx.user.id, {
       title: 'Possible unsubscribe — your call',
       text: `A reply from ${[who?.first_name, who?.last_name].filter(Boolean).join(' ') || who?.email || 'a lead'} reads like an unsubscribe. Confirm it to opt them out, or reclassify it — no email goes out while they wait.`,
+      link: '/app/inbox',
+    })
+    return true
+  }
+
+  // A keyword guess may not route a real person. When the AI cannot classify
+  // (allowance exhausted, provider down), the fallback matches phrases — and
+  // "can you send me more information?" matched "send me more", branched on
+  // "interested", and marked a lead Won with nothing booked. The same rule as
+  // for unsubscribe, made general: the machine's weak reading is shown to a
+  // person, and the person routes. Sandbox recipients keep keyword routing so
+  // the rehearsal still walks every branch.
+  if (via === 'heuristic' && !setBy && realRecipient(ctx)) {
+    if (message) db.prepare('UPDATE messages SET intent = ? WHERE id = ?').run(intent, message.id)
+    setLead(cl, { intent, state: 'needs_attention', error: 'ai_unavailable' })
+    logEvent(ctx.user.id, {
+      campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'needs_attention',
+      detail: `AI unavailable — this reply reads like "${intent}" by keyword only; confirm the intent to route it`,
+    })
+    const who = db.prepare('SELECT * FROM leads WHERE id = ?').get(cl.lead_id)
+    notify(ctx.user.id, {
+      title: 'A reply needs your reading',
+      text: `Harry could not classify a reply from ${[who?.first_name, who?.last_name].filter(Boolean).join(' ') || who?.email || 'a lead'} (AI unavailable). It looks like "${intent}" — confirm or correct it and the plan continues.`,
       link: '/app/inbox',
     })
     return true
@@ -1349,14 +1423,15 @@ async function processWaiting(ctx, cl) {
       return
     }
     const intents = nodeIntents(ctx.graph, cl.node_id)
-    const { intent } = await classifyReply({
+    const { intent, via } = await classifyReply({
       intents,
       replyText: unprocessed.body,
       thread: threadMessages(cl).filter((m) => m.id !== unprocessed.id),
       businessContext: ctx.user.business_context,
       workspaceId: ctx.user.id,
+      playbook: describePlaybook(ctx.graph, cl.node_id),
     })
-    await routeReply(ctx, cl, intent, unprocessed)
+    await routeReply(ctx, cl, intent, unprocessed, { via })
     return
   }
 

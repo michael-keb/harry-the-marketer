@@ -78,6 +78,10 @@ function planOf(wsId) {
 }
 
 export function monthlyAllowanceCents(wsId) {
+  // An operator override for a self-hosted or pre-billing deployment, where
+  // the plan table has nothing to say. Cents, like everything else here.
+  const override = Number(process.env.AI_MONTHLY_ALLOWANCE_CENTS)
+  if (Number.isFinite(override) && override > 0) return override
   const plan = planOf(wsId)
   return ALLOWANCE_CENTS[plan] ?? ALLOWANCE_CENTS.trial
 }

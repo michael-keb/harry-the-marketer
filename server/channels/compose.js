@@ -33,6 +33,8 @@ export async function composeSms({
   meetingLink,
   example,
   workspaceId,
+  playbook = null,
+  stepId = '',
 }) {
   const hint = String(instruction || '').trim() || 'Short friendly check-in'
   try {
@@ -45,8 +47,10 @@ export async function composeSms({
       meetingLink,
       example: example ? { subject: '', body: example.body || example } : null,
       workspaceId,
+      playbook,
+      stepId,
     })
-    return { body: clip(composed.body || composed.subject || hint) }
+    return { body: clip(composed.body || composed.subject || hint), via: composed.via, reason: composed.reason || '' }
   } catch {
     return {
       body: clip(fillTokens(
@@ -54,6 +58,8 @@ export async function composeSms({
         lead,
         { senderName, meetingLink },
       )),
+      via: 'template',
+      reason: 'compose failed',
     }
   }
 }

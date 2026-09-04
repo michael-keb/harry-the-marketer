@@ -229,3 +229,29 @@ gaps; all are now fixed. **Suite after review fixes: 1511 pass / 0 fail.**
    `tests/campaigns-audit.test.js`.
 4. **`skipUndeliverable` left a node without clearing its step slots** — the
    one leave-a-node path fix #3 missed. `clearStepSlots` added there too.
+
+---
+
+## Live-run addendum (same day): what the first real campaign found
+
+A real campaign (one lead, the operator's own inbox) was run against production
+after the graph fixes shipped. It found five more defects; all fixed and tested
+(`tests/reply-thread-matching.test.js`, `tests/ai-degraded-mode.test.js`).
+
+| # | Defect | Fix |
+|---|--------|-----|
+| 1 | **Replies filed against the wrong lead and campaign.** Inbound was matched by From address first; mail clients reply from the base address, never a plus-alias, so `hello+haircut@` replies landed on `hello@`'s enrolment elsewhere. Also broke phone aliases, second addresses, assistants. | `upkeep.js`: the provider thread resolves the conversation first; From address is the last resort. |
+| 2 | **Raw playbook instruction emailed to a recipient.** With the AI allowance exhausted, `composeEmail` fell back to a template that renders the step text verbatim, and the engine sent it. | Real recipients never get template copy: the step parks as a draft (`ai_unavailable`) for a person. Sandbox keeps the template so the rehearsal works. Approving the draft un-parks the lead (`routes.js unparkForDraft`, which also fixes the purpose-guardrail park that had no resume path). |
+| 3 | **A question marked the lead Won.** Keyword fallback matched "send me more" in "can you send me more information?" and fired the `interested` edge into a terminal. | Keyword classifications may not route a real recipient — parked for a person, like unsubscribe. Also "send me more … ?" now reads as `question`. |
+| 4 | **A legal consent link in a haircut email.** `ensureConsent` fired on every `interested`. | Only for non-commercial purposes or a workspace with its own consent terms. |
+| 5 | **Sub-minute timers burned a sequence to Lost in 90s** while the recipient was still reading. | Validator warns on no-reply timers under 60s (sandbox-only shorthand). |
+
+**Composer change (design, not a defect):** the model now receives the whole
+plan — every step, branch and outcome, plus where this person is and how they
+got there (`playbook.describePlaybook`) — and the full conversation (transcript
+cap raised 8k → 20k chars). The step text is framed as where the conversation
+stands, not a script to recite. The classifier gets the same plan for context.
+
+**Operator note:** `AI_MONTHLY_ALLOWANCE_CENTS` overrides the plan-based AI
+allowance for pre-billing deployments. Production is currently on the $5 trial
+ceiling and exhausted, which is what triggered defects 2 and 3.
