@@ -11,7 +11,8 @@ setup('channels-smsflow')
 const { db } = await import('../server/db.js')
 const { env: envLive } = await import('../server/env.js')
 const { sealSecret } = await import('../server/secrets.js')
-const { smsflowWebhookToken, SMSFLOW_SID } = await import('../server/channels/smsflow.js')
+const { smsflowWebhookToken, mapSmsflowStatus, SMSFLOW_SID } = await import('../server/channels/smsflow.js')
+const { jobs, resetSmsStatusBackoff } = await import('../server/upkeep.js')
 const {
   sendSms, ensureEnvSmsAccount, smsAllowedForWorkspace,
 } = await import('../server/channels/send.js')
@@ -28,10 +29,29 @@ test.after(() => api.close())
 // SMSFlow calls go to api.smsflow.com.au; tests must never touch the network.
 const realFetch = global.fetch
 const sent = []
-function mockSmsflowFetch({ status = 'queued', messageId } = {}) {
-  global.fetch = async (url, opts) => {
-    if (!String(url).includes('api.smsflow.com.au')) return realFetch(url, opts)
-    sent.push({ url: String(url), body: JSON.parse(opts.body) })
+const polled = []
+function mockSmsflowFetch({ status = 'queued', messageId, lookup = {}, balance = 47, failStatus = 0 } = {}) {
+  global.fetch = async (url, opts = {}) => {
+    const href = String(url)
+    if (!href.includes('api.smsflow.com.au')) return realFetch(url, opts)
+    if (href.includes('/account/balance')) {
+      if (failStatus) return { ok: false, status: failStatus, json: async () => ({ error: 'Unauthenticated' }) }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ account_id: 'acc_test', credit_balance: balance, last_purchase_date: '2026-09-01 11:07:41' }),
+      }
+    }
+    if (href.includes('/sms/status/')) {
+      const id = decodeURIComponent(href.split('/sms/status/')[1].split('?')[0])
+      polled.push(id)
+      if (failStatus) return { ok: false, status: failStatus, json: async () => ({ error: 'Unauthenticated' }) }
+      if (!(id in lookup)) return { ok: false, status: 404, json: async () => ({ error: 'Not found' }) }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ status: lookup[id], destination: '+61400000000', delivery_time: '2026-09-01 11:07:41', credits_used: 1 }),
+      }
+    }
+    sent.push({ url: href, body: JSON.parse(opts.body) })
     return {
       ok: true,
       status: 200,
@@ -275,4 +295,139 @@ test('smsflow status callback updates the outbound send_status', async () => {
   } finally {
     await new Promise((r) => server.close(r))
   }
+})
+
+test('mapSmsflowStatus folds free-text carrier statuses into Harry vocabulary', () => {
+  assert.equal(mapSmsflowStatus('Sent and confirmed from carrier'), 'delivered')
+  assert.equal(mapSmsflowStatus('Delivered'), 'delivered')
+  assert.equal(mapSmsflowStatus('Queued'), 'sent')
+  assert.equal(mapSmsflowStatus('Sent'), 'sent')
+  assert.equal(mapSmsflowStatus('Failed - invalid number'), 'failed')
+  assert.equal(mapSmsflowStatus('Rejected by carrier'), 'failed')
+  assert.equal(mapSmsflowStatus('Expired'), 'failed')
+  assert.equal(mapSmsflowStatus(''), '')
+})
+
+test('balance endpoint reports SMSFlow credits and clears last_error', async () => {
+  mockSmsflowFetch({ balance: 47 })
+  const account = addSmsflowAccount(owner.id, '+61422777002')
+  db.prepare("UPDATE channel_accounts SET last_error = 'old failure' WHERE id = ?").run(account.id)
+  const res = await api.get(`/api/channel-accounts/${account.id}/balance`)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.creditBalance, 47)
+  assert.equal(res.body.accountId, 'acc_test')
+  const row = db.prepare('SELECT last_error FROM channel_accounts WHERE id = ?').get(account.id)
+  assert.equal(row.last_error, '')
+})
+
+test('balance endpoint surfaces a bad key as a provider error and records it', async () => {
+  mockSmsflowFetch({ failStatus: 401 })
+  const account = addSmsflowAccount(owner.id, '+61422777003')
+  const res = await api.get(`/api/channel-accounts/${account.id}/balance`)
+  assert.equal(res.status, 502)
+  assert.equal(res.body.error, 'provider_error')
+  assert.match(res.body.message, /401/)
+  const row = db.prepare('SELECT last_error FROM channel_accounts WHERE id = ?').get(account.id)
+  assert.match(row.last_error, /401/)
+
+  const sandbox = db.prepare(
+    `INSERT INTO channel_accounts (workspace_id, channel, provider, display_name, phone_number, account_sid, auth_token, status)
+     VALUES (?, 'sms', 'sandbox', 'Sandbox', '+61400000100', 'sandbox', '', 'connected')`
+  ).run(owner.id)
+  const notSmsflow = await api.get(`/api/channel-accounts/${sandbox.lastInsertRowid}/balance`)
+  assert.equal(notSmsflow.status, 422)
+})
+
+function seedOutboundSms(account, providerId, { ageMinutes = 5, status = 'sent' } = {}) {
+  const info = db.prepare(
+    `INSERT INTO messages
+       (user_id, campaign_id, lead_id, channel_account_id, channel, direction,
+        subject, body, from_email, to_email, provider_message_id, thread_id, send_status, created_at)
+     VALUES (?, NULL, NULL, ?, 'sms', 'out', '', 'hi', ?, '+61400000000', ?, 'sms:1:+61400000000', ?,
+             datetime('now', ?))`
+  ).run(owner.id, account.id, account.phone_number, providerId, status, `-${ageMinutes} minutes`)
+  return Number(info.lastInsertRowid)
+}
+
+test('sms_receipts upkeep polls unreceipted texts and settles delivered / failed', async () => {
+  resetSmsStatusBackoff()
+  polled.length = 0
+  const account = addSmsflowAccount(owner.id, '+61422777004')
+  const delivered = seedOutboundSms(account, 'POLL-OK-1')
+  const failed = seedOutboundSms(account, 'POLL-FAIL-1')
+  const stillSent = seedOutboundSms(account, 'POLL-SENT-1')
+  const tooFresh = seedOutboundSms(account, 'POLL-FRESH-1', { ageMinutes: 0 })
+  const alreadyDone = seedOutboundSms(account, 'POLL-DONE-1', { status: 'delivered' })
+  const tooOld = seedOutboundSms(account, 'POLL-OLD-1', { ageMinutes: 72 * 60 })
+  mockSmsflowFetch({
+    lookup: {
+      'POLL-OK-1': 'Sent and confirmed from carrier',
+      'POLL-FAIL-1': 'Failed',
+      'POLL-SENT-1': 'Sent',
+    },
+  })
+
+  const first = await jobs.reconcileSmsStatus({ accountId: account.id })
+  assert.equal(first.checked, 3)
+  assert.equal(first.updated, 2)
+  assert.deepEqual([...polled].sort(), ['POLL-FAIL-1', 'POLL-OK-1', 'POLL-SENT-1'])
+  const status = (id) => db.prepare('SELECT send_status FROM messages WHERE id = ?').get(id).send_status
+  assert.equal(status(delivered), 'delivered')
+  assert.equal(status(failed), 'failed')
+  assert.equal(status(stillSent), 'sent')
+  assert.equal(status(tooFresh), 'sent')
+  assert.equal(status(alreadyDone), 'delivered')
+  assert.equal(status(tooOld), 'sent')
+
+  // The unsettled one is on backoff: an immediate second pass asks nothing.
+  polled.length = 0
+  const second = await jobs.reconcileSmsStatus({ accountId: account.id })
+  assert.equal(second.checked || 0, 0)
+  assert.deepEqual(polled, [])
+
+  // Once the backoff has elapsed it is asked again, and a receipt settles it.
+  // Five minutes on, the text that was too fresh has also come of age.
+  mockSmsflowFetch({ lookup: { 'POLL-SENT-1': 'Delivered' } })
+  polled.length = 0
+  const third = await jobs.reconcileSmsStatus({ accountId: account.id, now: Date.now() + 5 * 60_000 })
+  assert.deepEqual([...polled].sort(), ['POLL-FRESH-1', 'POLL-SENT-1'])
+  assert.equal(third.updated, 1)
+  assert.equal(status(stillSent), 'delivered')
+  assert.equal(status(tooFresh), 'sent')
+})
+
+test('sms_receipts stops asking after a 404 and records a bad key on the account', async () => {
+  resetSmsStatusBackoff()
+  const account = addSmsflowAccount(owner.id, '+61422777005')
+  const unknown = seedOutboundSms(account, 'POLL-404-1')
+  mockSmsflowFetch({ lookup: {} })
+  polled.length = 0
+  await jobs.reconcileSmsStatus({ accountId: account.id })
+  assert.deepEqual(polled, ['POLL-404-1'])
+  polled.length = 0
+  await jobs.reconcileSmsStatus({ accountId: account.id, now: Date.now() + 2 * 3600_000 })
+  assert.deepEqual(polled, [], 'a 404 is not retried inside the window')
+  assert.equal(db.prepare('SELECT send_status FROM messages WHERE id = ?').get(unknown).send_status, 'sent')
+
+  resetSmsStatusBackoff()
+  seedOutboundSms(account, 'POLL-401-1')
+  seedOutboundSms(account, 'POLL-401-2')
+  mockSmsflowFetch({ failStatus: 401 })
+  polled.length = 0
+  await jobs.reconcileSmsStatus({ accountId: account.id })
+  assert.equal(polled.length, 1, 'one 401 is enough — the pass stops for that account')
+  const row = db.prepare('SELECT last_error FROM channel_accounts WHERE id = ?').get(account.id)
+  assert.match(row.last_error, /401/)
+})
+
+test('sync-status endpoint runs the receipt poll for one sender', async () => {
+  resetSmsStatusBackoff()
+  const account = addSmsflowAccount(owner.id, '+61422777006')
+  const id = seedOutboundSms(account, 'SYNC-1')
+  mockSmsflowFetch({ lookup: { 'SYNC-1': 'Sent and confirmed from carrier' } })
+  const res = await api.post(`/api/channel-accounts/${account.id}/sync-status`, {})
+  assert.equal(res.status, 200)
+  assert.equal(res.body.checked, 1)
+  assert.equal(res.body.updated, 1)
+  assert.equal(db.prepare('SELECT send_status FROM messages WHERE id = ?').get(id).send_status, 'delivered')
 })

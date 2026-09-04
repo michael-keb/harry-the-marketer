@@ -31,6 +31,7 @@ import { outlookRecentInbound } from './microsoft.js'
 import { sendEmail, SuppressedError, classifyBounce, markBounce } from './mailer.js'
 import { canSendNow } from './pacing.js'
 import { openDueRuns, dispatchSeedSends } from './deliverability-runs.js'
+import { smsflowMessageStatus } from './channels/smsflow.js'
 
 const isoNow = () => new Date().toISOString()
 
@@ -671,6 +672,86 @@ async function pullUnmatched() {
   return { did: parts.join(', ') }
 }
 
+// ---- SMS delivery receipts ---------------------------------------------------
+
+// SMSFlow reports delivery by POSTing to the webhook URL, when it manages to.
+// Its webhook has been seen to skip messages minutes apart (Docs/SMS), so a
+// text can sit at 'sent' forever with the carrier having long since confirmed
+// or refused it. This pulls the status for recent outbound texts that have no
+// receipt yet, backing off per message so a text the carrier never confirms
+// costs a handful of calls over two days rather than one every tick.
+const SMS_STATUS_MIN_AGE_MS = 2 * 60_000
+const SMS_STATUS_MAX_AGE_MS = 48 * 3600_000
+const SMS_STATUS_FIRST_RETRY_MS = 2 * 60_000
+const SMS_STATUS_MAX_RETRY_MS = 60 * 60_000
+const SMS_STATUS_PER_PASS = 20
+const smsStatusNextCheck = new Map() // message id → { at, wait }
+
+export function resetSmsStatusBackoff() {
+  smsStatusNextCheck.clear()
+}
+
+async function reconcileSmsStatus({ now = Date.now(), accountId = null } = {}) {
+  const accounts = db.prepare(
+    `SELECT * FROM channel_accounts
+      WHERE channel = 'sms' AND provider = 'smsflow' AND status = 'connected'
+        AND COALESCE(deleted_at, '') = '' ${accountId ? 'AND id = ?' : ''}`
+  ).all(...(accountId ? [accountId] : []))
+  if (!accounts.length) return {}
+
+  const since = new Date(now - SMS_STATUS_MAX_AGE_MS).toISOString().replace('T', ' ').slice(0, 19)
+  const until = new Date(now - SMS_STATUS_MIN_AGE_MS).toISOString().replace('T', ' ').slice(0, 19)
+  let checked = 0
+  let updated = 0
+  for (const account of accounts) {
+    const pending = db.prepare(
+      `SELECT id, provider_message_id, send_status FROM messages
+        WHERE channel = 'sms' AND direction = 'out' AND channel_account_id = ?
+          AND send_status IN ('sent', 'queued') AND COALESCE(provider_message_id, '') != ''
+          AND created_at BETWEEN ? AND ?
+        ORDER BY created_at DESC LIMIT 200`
+    ).all(account.id, since, until)
+    let budget = SMS_STATUS_PER_PASS
+    for (const msg of pending) {
+      if (budget <= 0) break
+      const back = smsStatusNextCheck.get(msg.id)
+      if (back && back.at > now) continue
+      budget -= 1
+      checked += 1
+      let result
+      try {
+        result = await smsflowMessageStatus(account, msg.provider_message_id)
+      } catch (err) {
+        // A 404 means SMSFlow no longer knows the id — stop asking. Anything
+        // else (network, 5xx, bad key) is retried on the normal backoff.
+        const wait = err?.status === 404 ? SMS_STATUS_MAX_AGE_MS : Math.min((back?.wait || SMS_STATUS_FIRST_RETRY_MS) * 2, SMS_STATUS_MAX_RETRY_MS)
+        smsStatusNextCheck.set(msg.id, { at: now + wait, wait })
+        if (err?.status === 401 || err?.status === 403) {
+          db.prepare('UPDATE channel_accounts SET last_error = ? WHERE id = ?')
+            .run(String(err.message || err).slice(0, 300), account.id)
+          break
+        }
+        continue
+      }
+      if (result.mapped === 'delivered' || result.mapped === 'failed') {
+        db.prepare("UPDATE messages SET send_status = ? WHERE id = ? AND send_status IN ('sent', 'queued')")
+          .run(result.mapped, msg.id)
+        smsStatusNextCheck.delete(msg.id)
+        updated += 1
+      } else {
+        const wait = Math.min((back?.wait || SMS_STATUS_FIRST_RETRY_MS) * 2, SMS_STATUS_MAX_RETRY_MS)
+        smsStatusNextCheck.set(msg.id, { at: now + wait, wait })
+      }
+    }
+  }
+  // Forget ids that have aged out of the window so the map cannot grow forever.
+  if (smsStatusNextCheck.size > 5000) {
+    for (const [id, back] of smsStatusNextCheck) if (back.at < now - SMS_STATUS_MAX_AGE_MS) smsStatusNextCheck.delete(id)
+  }
+  if (!checked) return {}
+  return { did: `${checked} SMS receipt(s) polled, ${updated} settled`, checked, updated }
+}
+
 // ---- the whole pass ----------------------------------------------------------
 
 export async function runUpkeep() {
@@ -690,6 +771,7 @@ export async function runUpkeep() {
     // both absorb their own failure, so neither can stop a campaign sending.
     job('deliverability_runs', openDueRuns),
     job('deliverability_seeds', dispatchSeedSends),
+    job('sms_receipts', reconcileSmsStatus),
   ])
   return [first, ...results].filter((r) => r.did).map((r) => r.did)
 }
@@ -708,4 +790,5 @@ export const jobs = {
   ingestRecentInbound,
   openDueRuns,
   dispatchSeedSends,
+  reconcileSmsStatus,
 }

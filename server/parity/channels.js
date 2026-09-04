@@ -8,10 +8,11 @@ import { db } from '../db.js'
 import { env, twilioEnvConfigured, smsflowEnvConfigured } from '../env.js'
 import { sealSecret } from '../secrets.js'
 import {
-  handler, invalid, notFound, forbidden, str, int, bool, owned, audit,
+  HttpError, handler, invalid, notFound, forbidden, str, int, bool, owned, audit,
 } from './http.js'
 import { toE164 } from '../channels/phone.js'
-import { smsflowWebhookUrl, SMSFLOW_SID } from '../channels/smsflow.js'
+import { smsflowWebhookUrl, smsflowBalance, SMSFLOW_SID } from '../channels/smsflow.js'
+import { jobs as upkeepJobs } from '../upkeep.js'
 import {
   ensureEnvSmsAccount, smsAllowedForWorkspace, smsProviderConfigured, smsProviderSend,
 } from '../channels/send.js'
@@ -187,6 +188,33 @@ export function register(api) {
     )
     audit(req, { type: 'sms_test_send', detail: `→ ${to}` })
     return { ok: true, to, providerMessageId: result.providerMessageId }
+  }))
+
+  // Credits left on the SMSFlow key. A wrong or revoked key surfaces here as a
+  // 401 from SMSFlow rather than as a silent send failure on the next tick.
+  api.get('/channel-accounts/:id/balance', handler(async (req) => {
+    const row = owned('channel_accounts', req.params.id, req.wsId, 'channel account')
+    if (row.deleted_at || row.channel !== 'sms') throw notFound('channel account')
+    if (row.provider !== 'smsflow') throw invalid('provider', 'Only SMSFlow accounts report a credit balance')
+    try {
+      const balance = await smsflowBalance(row)
+      if (row.last_error) db.prepare("UPDATE channel_accounts SET last_error = '' WHERE id = ?").run(row.id)
+      return { ok: true, ...balance }
+    } catch (err) {
+      const message = String(err?.message || err).slice(0, 300)
+      db.prepare('UPDATE channel_accounts SET last_error = ? WHERE id = ?').run(message, row.id)
+      throw new HttpError(502, { error: 'provider_error', message })
+    }
+  }))
+
+  // Pull delivery receipts for this sender's recent texts now, instead of
+  // waiting for the upkeep pass or a webhook that may never arrive.
+  api.post('/channel-accounts/:id/sync-status', handler(async (req) => {
+    const row = owned('channel_accounts', req.params.id, req.wsId, 'channel account')
+    if (row.deleted_at || row.channel !== 'sms') throw notFound('channel account')
+    if (row.provider !== 'smsflow') throw invalid('provider', 'Only SMSFlow accounts can be polled for delivery status')
+    const result = await upkeepJobs.reconcileSmsStatus({ accountId: row.id })
+    return { ok: true, checked: result.checked || 0, updated: result.updated || 0 }
   }))
 
   // Attach / detach SMS accounts on a campaign.

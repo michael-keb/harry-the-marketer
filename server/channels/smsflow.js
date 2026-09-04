@@ -13,7 +13,8 @@ import { env } from '../env.js'
 import { openSecret } from '../secrets.js'
 
 export const SMSFLOW_SID = 'smsflow'
-const SEND_URL = 'https://api.smsflow.com.au/v2/sms/send'
+const API_BASE = 'https://api.smsflow.com.au/v2'
+const SEND_URL = `${API_BASE}/sms/send`
 
 export function smsflowConfigured(account) {
   if (account?.provider === 'sandbox') return true
@@ -128,4 +129,68 @@ export function verifySmsflowToken(account, token) {
   const a = Buffer.from(expected)
   const b = Buffer.from(String(token))
   return a.length === b.length && crypto.timingSafeEqual(a, b)
+}
+
+// ---- read-side API -------------------------------------------------------------
+
+async function smsflowGet(account, path) {
+  if (!smsflowConfigured(account) || account?.provider === 'sandbox') {
+    throw new Error('SMSFlow account is not fully configured')
+  }
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { Authorization: `Bearer ${bearer(account)}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(15_000),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const detail = data?.error || data?.message || JSON.stringify(data).slice(0, 300)
+    const err = new Error(`SMSFlow ${res.status}: ${detail}`)
+    err.status = res.status
+    throw err
+  }
+  return data
+}
+
+/**
+ * SMSFlow's free-text delivery status ("Sent and confirmed from carrier",
+ * "Failed", "Queued" …) folded into Harry's four-word vocabulary. Shared by
+ * the status callback and the poll so both spell a delivery the same way.
+ */
+export function mapSmsflowStatus(raw) {
+  const status = String(raw || '').toLowerCase()
+  if (/fail|error|reject|expired|denied|undeliver|bounce/.test(status)) return 'failed'
+  if (/deliver|confirm/.test(status)) return 'delivered'
+  if (/sent|queued|pending|accepted|scheduled/.test(status)) return 'sent'
+  return status.slice(0, 40)
+}
+
+/**
+ * GET /sms/status/{message_id}. Delivery receipts come by webhook when SMSFlow
+ * manages to POST one; this is the pull for when it does not.
+ */
+export async function smsflowMessageStatus(account, messageId) {
+  const id = String(messageId || '').trim()
+  if (!id) throw new Error('SMSFlow message id is empty')
+  const data = await smsflowGet(account, `/sms/status/${encodeURIComponent(id)}`)
+  const body = data?.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : data
+  const raw = String(body?.status || '')
+  return {
+    status: raw,
+    mapped: mapSmsflowStatus(raw),
+    deliveryTime: String(body?.delivery_time || ''),
+    creditsUsed: Number(body?.credits_used) || 0,
+    destination: String(body?.destination || ''),
+  }
+}
+
+/** GET /account/balance — pre-paid credits left on the key. */
+export async function smsflowBalance(account) {
+  const data = await smsflowGet(account, '/account/balance')
+  const body = data?.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : data
+  const credits = Number(body?.credit_balance ?? body?.credits ?? body?.balance)
+  return {
+    accountId: String(body?.account_id || ''),
+    creditBalance: Number.isFinite(credits) ? credits : null,
+    lastPurchaseDate: String(body?.last_purchase_date || ''),
+  }
 }

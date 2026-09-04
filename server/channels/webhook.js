@@ -10,7 +10,7 @@ import { env, twilioEnvConfigured, smsflowEnvConfigured } from '../env.js'
 import { unsubscribeLead } from '../suppression.js'
 import { toE164, samePhone } from './phone.js'
 import { verifyTwilioSignature, smsKeyword, smsThreadId } from './twilio.js'
-import { smsflowSendSms, verifySmsflowToken } from './smsflow.js'
+import { smsflowSendSms, verifySmsflowToken, mapSmsflowStatus } from './smsflow.js'
 import { ensureEnvSmsAccount } from './send.js'
 import { openSecret } from '../secrets.js'
 
@@ -104,10 +104,7 @@ function looksLikeStatus({ pick, from, body }) {
 
 function applySmsStatus(sid, status, accountIds = []) {
   if (!sid) return
-  const mapped = /fail|error|reject|expired|denied/.test(status) ? 'failed'
-    : /deliver|confirm/.test(status) ? 'delivered'
-      : /sent|queued/.test(status) ? 'sent'
-        : String(status || '').slice(0, 40)
+  const mapped = mapSmsflowStatus(status)
   if (accountIds.length) {
     db.prepare(
       `UPDATE messages SET send_status = ?

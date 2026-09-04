@@ -27,6 +27,8 @@ export default function ChannelsSection() {
   // Keyed by account id: each row's test-send input is its own, so typing in
   // one no longer fills every row (and a Test send always uses that row's value).
   const [testTo, setTestTo] = useState({})
+  // Keyed by account id: the last credit balance SMSFlow reported for that key.
+  const [balances, setBalances] = useState({})
 
   const load = useCallback(() => {
     setError(null)
@@ -76,6 +78,31 @@ export default function ChannelsSection() {
       toast?.('Test SMS sent')
     } catch (err) {
       toast?.(err.message || 'Test send failed', 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function checkBalance(id) {
+    setBusy(true)
+    try {
+      const r = await api.get(`/api/channel-accounts/${id}/balance`)
+      setBalances((b) => ({ ...b, [id]: r }))
+      toast?.(r.creditBalance == null ? 'SMSFlow answered, but sent no balance' : `${r.creditBalance} SMSFlow credits left`)
+    } catch (err) {
+      toast?.(err.message || 'Could not reach SMSFlow', 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function syncStatus(id) {
+    setBusy(true)
+    try {
+      const r = await api.post(`/api/channel-accounts/${id}/sync-status`, {})
+      toast?.(r.checked ? `${r.checked} receipt(s) checked, ${r.updated} updated` : 'No texts waiting on a receipt')
+    } catch (err) {
+      toast?.(err.message || 'Could not fetch receipts', 'error')
     } finally {
       setBusy(false)
     }
@@ -153,7 +180,11 @@ export default function ChannelsSection() {
               </div>
               <p className="mt-1 text-xs text-slate-500">
                 From {a.phoneNumber || a.messagingServiceSid || '—'} · {a.sentToday} of {a.dailyLimit} today
+                {balances[a.id]?.creditBalance != null && ` · ${balances[a.id].creditBalance} credits left`}
               </p>
+              {a.lastError && (
+                <p className="mt-1 text-xs text-rose-700">{a.lastError}</p>
+              )}
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <input
                   className="input max-w-xs text-sm"
@@ -164,6 +195,16 @@ export default function ChannelsSection() {
                 <button type="button" className="btn-secondary text-sm" disabled={busy} onClick={() => testSend(a.id)}>
                   Test send
                 </button>
+                {a.provider === 'smsflow' && (
+                  <>
+                    <button type="button" className="btn-ghost text-sm" disabled={busy} onClick={() => checkBalance(a.id)}>
+                      Check balance
+                    </button>
+                    <button type="button" className="btn-ghost text-sm" disabled={busy} onClick={() => syncStatus(a.id)}>
+                      Fetch receipts
+                    </button>
+                  </>
+                )}
                 <button type="button" className="btn-ghost text-sm text-rose-700" disabled={busy} onClick={() => remove(a.id)}>
                   Remove
                 </button>
