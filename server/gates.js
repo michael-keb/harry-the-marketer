@@ -126,6 +126,30 @@ function isFirstTouch(campaignId, leadId) {
   ).get(campaignId, leadId)
 }
 
+// When would this campaign's FIRST email to `lead` be allowed under the person
+// cooling-off? Null when it may go now: the campaign has already written to
+// them (follow-ups are exempt), the mailbox is a sandbox, the rule is off, or
+// there is no recent touch. Mirrors the person_frequency gate in resolveSend
+// exactly, so the UI can warn at attach time with the same rule the engine
+// will enforce at send time — one truth, two surfaces. Without this, adding a
+// recently-contacted lead looked like it worked and the campaign silently
+// held for a fortnight with the reason buried in the activity trail.
+export function firstTouchDeferral({ ownerId, campaignId, mailbox, lead, personDays, at = Date.now() }) {
+  if (!lead || !Number(personDays)) return null
+  if (mailbox && mailbox.provider === 'sandbox') return null
+  if (!isFirstTouch(campaignId, lead.id)) return null
+  const last = lastTouch(ownerId, lead.id)
+  if (!last) return null
+  const until = last.sent_at + Number(personDays) * DAY_MS
+  if (until <= at) return null
+  const daysAgo = Math.max(0, Math.floor((at - last.sent_at) / DAY_MS))
+  return {
+    gate: 'person_frequency',
+    until,
+    reason: `contacted ${daysAgo} day${daysAgo === 1 ? '' : 's'} ago — the first email from this campaign waits until ${new Date(until).toISOString().slice(0, 10)}`,
+  }
+}
+
 // ---- the stack --------------------------------------------------------------
 
 export function resolveSend({

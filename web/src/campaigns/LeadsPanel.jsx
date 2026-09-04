@@ -224,6 +224,11 @@ export default function LeadsPanel({ campaign, steps = [], poolMailboxes = [], s
                       <td className="px-3 py-2.5">
                         <Badge value={l.state === 'finished' ? l.outcome || 'finished' : l.state} />
                         {l.intent && <div className="mt-1 text-[11px] text-slate-600">said: {l.intent}</div>}
+                        {l.coolingOffUntil && (
+                          <div className="mt-1 text-[11px] text-amber-700" title={l.coolingOffReason}>
+                            Cooling off — first email {new Date(l.coolingOffUntil).toLocaleDateString()} at the earliest
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2.5 text-xs text-slate-600">
                         {l.opens || l.clicks || l.replies
@@ -422,6 +427,23 @@ function ImportLeadsModal({ campaignId, onClose, onDone }) {
                 <li key={reason}>{nfmt(count)} {SKIP_REASONS[reason] || reason}</li>
               ))}
             </ul>
+          )}
+          {(result.coolingOff || []).length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2" role="status">
+              <p className="text-sm font-medium text-amber-800">
+                {nfmt(result.coolingOff.length)} lead{result.coolingOff.length === 1 ? ' is' : 's are'} in
+                the {result.personDays}-day cooling-off
+              </p>
+              <p className="mt-1 text-xs text-amber-800">
+                They heard from another campaign recently, so this campaign&apos;s first email to them waits:
+              </p>
+              <ul className="mt-1 space-y-0.5 text-xs text-amber-800">
+                {result.coolingOff.slice(0, 5).map((x) => (
+                  <li key={x.leadId}>{x.email} — from {new Date(x.until).toLocaleDateString()}</li>
+                ))}
+                {result.coolingOff.length > 5 && <li>…and {nfmt(result.coolingOff.length - 5)} more</li>}
+              </ul>
+            </div>
           )}
           <p className="text-xs text-slate-500">
             Suppression is unconditional in Harry: an unsubscribed or blocked address cannot be imported by any route.

@@ -60,7 +60,7 @@ import { campaignCtx, routeReply } from '../engine.js'
 // recomputed here. A campaign page that explains a hold with its own arithmetic
 // is a second implementation of pacing, and the two drift the first time a
 // send-control lands in one of them and not the other.
-import { resolveSend } from '../gates.js'
+import { resolveSend, firstTouchDeferral } from '../gates.js'
 import {
   saveRules, storedRules, legacyScheduleToStoredRules, copyCampaignSendRules,
 } from '../send-rules.js'
@@ -1828,8 +1828,29 @@ export function register(api) {
     })
     meter('campaigns.leads-import', Date.now() - t0, true,
       `batch=${parsed.length} added=${result.added.length} skipped=${result.skipped.length}`)
+    // The person cooling-off, surfaced at the moment of attaching rather than
+    // discovered after a fortnight of silence: any lead just added whose first
+    // email this campaign cannot send yet is named, with when it can.
+    const freqMailbox = c.mailbox_id
+      ? db.prepare('SELECT id, provider FROM mailboxes WHERE id = ?').get(c.mailbox_id)
+      : null
+    const personDays = Number(sendRules.effectiveRules({
+      owner: ownerOf(req.wsId), campaign: c, mailbox: freqMailbox,
+    })?.frequency?.personDays) || 0
+    const coolingOff = []
+    for (const leadId of result.added) {
+      const hold = firstTouchDeferral({
+        ownerId: req.wsId, campaignId: c.id, mailbox: freqMailbox, lead: { id: leadId }, personDays,
+      })
+      if (!hold) continue
+      const l = db.prepare('SELECT email FROM leads WHERE id = ?').get(leadId)
+      coolingOff.push({ leadId, email: l?.email || '', until: new Date(hold.until).toISOString(), reason: hold.reason })
+    }
     return {
       ok: true,
+      coolingOff,
+      coolingOffCount: coolingOff.length,
+      personDays,
       addedCount: result.added.length,
       skippedCount: result.skipped.length,
       skippedByReason: byReason,
@@ -1953,6 +1974,27 @@ export function register(api) {
     const offset = int(req.query, 'offset', { min: 0, fallback: 0 })
     const stages = leadStages(req.wsId)
     const { rows, total } = campaignLeadRows(c, filters, stages, { limit, offset })
+    // Attach-time truth on every row: a lead still awaiting its first email
+    // from this campaign, whose last touch anywhere is inside the person
+    // cooling-off, shows when that first email may actually go — instead of
+    // sitting "active" with the reason only in the activity trail.
+    const freqMailbox = c.mailbox_id
+      ? db.prepare('SELECT id, provider FROM mailboxes WHERE id = ?').get(c.mailbox_id)
+      : null
+    const personDays = Number(sendRules.effectiveRules({
+      owner: ownerOf(req.wsId), campaign: c, mailbox: freqMailbox,
+    })?.frequency?.personDays) || 0
+    for (const row of rows) {
+      if (row.lastSent || row.state === 'finished' || row.state === 'stopped') continue
+      const hold = firstTouchDeferral({
+        ownerId: req.wsId, campaignId: c.id, mailbox: freqMailbox,
+        lead: { id: row.leadId }, personDays,
+      })
+      if (hold) {
+        row.coolingOffUntil = new Date(hold.until).toISOString()
+        row.coolingOffReason = hold.reason
+      }
+    }
     // §5 asks for the filter combination as well as the duration, "which also
     // shows which filters people actually use".
     const used = Object.entries(filters).filter(([, v]) => v).map(([k]) => k)

@@ -18,7 +18,7 @@ import { consentFor, ensureConsent, consentUrl, ownerTerms } from './consent.js'
 import { post as postWebhook, webhookKind } from './alerts.js'
 import { createSheet, disconnectSheet, pushSheet } from './sheets.js'
 import { dailyCap, isWarmingUp, sendWindow, DEFAULT_WINDOW } from './pacing.js'
-import { resolveSend, sendingContext } from './gates.js'
+import { resolveSend, sendingContext, firstTouchDeferral } from './gates.js'
 import { registerSendControls } from './send-controls.js'
 import { registerParity } from './parity/index.js'
 import { REVIVE_MAILBOX_SQL } from './parity/schema.js'
@@ -740,12 +740,26 @@ api.post('/campaigns/:id/leads', (req, res) => {
   const leadIds = req.body?.leadIds
   if (!Array.isArray(leadIds) || !leadIds.length) return res.status(400).json({ error: 'leadIds required' })
   let added = 0
+  const addedIds = []
   const insert = db.prepare('INSERT OR IGNORE INTO campaign_leads (campaign_id, lead_id) VALUES (?, ?)')
   for (const id of leadIds) {
     const lead = db.prepare("SELECT id FROM leads WHERE id = ? AND user_id = ? AND status = 'active'").get(id, req.wsId)
-    if (lead) added += insert.run(c.id, lead.id).changes
+    if (lead && insert.run(c.id, lead.id).changes) { added += 1; addedIds.push(lead.id) }
   }
-  res.json({ added })
+  // Same attach-time cooling-off warning the parity import gives: a lead
+  // contacted recently by any campaign cannot receive this campaign's first
+  // email until the person cooling-off clears, and the caller is told now.
+  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(req.wsId)
+  const mailbox = c.mailbox_id ? db.prepare('SELECT id, provider FROM mailboxes WHERE id = ?').get(c.mailbox_id) : null
+  const personDays = Number(sendingContext({ owner, campaign: c, mailbox }).rules?.frequency?.personDays) || 0
+  const coolingOff = []
+  for (const leadId of addedIds) {
+    const hold = firstTouchDeferral({ ownerId: req.wsId, campaignId: c.id, mailbox, lead: { id: leadId }, personDays })
+    if (!hold) continue
+    const l = db.prepare('SELECT email FROM leads WHERE id = ?').get(leadId)
+    coolingOff.push({ leadId, email: l?.email || '', until: new Date(hold.until).toISOString(), reason: hold.reason })
+  }
+  res.json({ added, coolingOff })
 })
 
 // Removing one lead from a campaign. The bulk form of this
