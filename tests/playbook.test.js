@@ -130,3 +130,71 @@ test('Send sms: sets channel sms; bare Send: stays email', () => {
   assert.equal(g.nodes.B.channel, 'sms')
   assert.equal(g.nodes.B.instruction, 'Short nudge')
 })
+
+test('Send whatsapp is rejected with a channel-specific error', () => {
+  const g = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send whatsapp: hi]
+    A --> W([Won])
+  `)
+  assert.equal(g.valid, false)
+  assert.ok(g.errors.some((e) => /channel "whatsapp" is not supported yet/.test(e.message)))
+})
+
+test('Send with a non-keyword first word stays an email instruction (no colon needed)', () => {
+  // Regression: the channel alternation must stay a keyword list. A `(\\w+)`
+  // capture read "intro" as a channel and broke every colon-less Send label.
+  const g = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send intro email]
+    A --> W([Won])
+  `)
+  assert.deepEqual(g.errors, [])
+  assert.equal(g.nodes.A.channel, 'email')
+  assert.equal(g.nodes.A.instruction, 'intro email')
+})
+
+test('wait/start nodes cannot carry labeled edges', () => {
+  const g = parsePlaybook(`flowchart TD
+    S([Start]) --> W[Wait: 1d]
+    W -- no reply 3d --> A[Send: hi]
+    A --> T([Won])
+  `)
+  assert.equal(g.valid, false)
+  assert.ok(g.errors.some((e) => /Wait\/Start step/.test(e.message)))
+})
+
+test('reply before send is rejected; after-only decision is valid', () => {
+  const bad = parsePlaybook(`flowchart TD
+    S([Start]) --> D{Pick}
+    D -- reply: interested --> A[Send: hi]
+    A --> W([Won])
+  `)
+  assert.equal(bad.valid, false)
+  assert.ok(bad.errors.some((e) => /no message has been sent yet/.test(e.message)))
+
+  const ok = parsePlaybook(`flowchart TD
+    S([Start]) --> D{Pick}
+    D -- after 30s --> A[Send: hi]
+    A --> W([Won])
+  `)
+  assert.equal(ok.valid, true)
+})
+
+test('reply-before-send is caught even when a send path reaches the node first', () => {
+  // Regression: visited-state must be (node, sent-yet?). D is reached through
+  // the send path A first; the send-free path via the waits must still flag
+  // D's reply edge.
+  const g = parsePlaybook(`flowchart TD
+    S([Start]) --> D0{Route}
+    D0 -- after 1s --> A[Send: hi]
+    D0 -- after 2s --> W1[Wait: 1d]
+    A --> D{Reply?}
+    W1 --> D
+    D -- reply: interested --> B2[Send: yes]
+    B2 --> T([Won])
+  `)
+  assert.equal(g.valid, false)
+  assert.ok(
+    g.errors.some((e) => /Node "D" waits for a reply, but no message has been sent yet/.test(e.message)),
+    `errors: ${g.errors.map((e) => e.message).join(' | ')}`,
+  )
+})

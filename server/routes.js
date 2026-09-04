@@ -4,9 +4,10 @@ import { db, logEvent, touch, kvGet, acceptInvite, declineInvite } from './db.js
 import { requireUser, workspace } from './auth.js'
 import { googleConfigured, microsoftConfigured, auth0Configured, devLoginEnabled, env } from './env.js'
 import { telemetryRecent, telemetryStats, telemetryFailures } from './telemetry.js'
-import { parsePlaybook, DEFAULT_PLAYBOOK } from './playbook.js'
+import { parsePlaybook, DEFAULT_PLAYBOOK, channelModeConflicts } from './playbook.js'
 import { simulateReply, remainingQuota, sendEmail } from './mailer.js'
 import { tick, campaignCtx, routeReply } from './engine.js'
+import { clearStepSlots } from './step-timing.js'
 import { spendStatus } from './ai-spend.js'
 import { aiStatus, CORE_INTENTS, planGoal, goalPlaybook, qualifyLead, researchLead, generatePlaybook, previewPlaybookEmails, composeStepSample, exampleLead } from './ai.js'
 import { setSendInstruction, sanitizeInstruction } from '../shared/playbook-edit.js'
@@ -630,6 +631,22 @@ api.put('/campaigns/:id', (req, res) => {
   const c = getCampaign(req, res)
   if (!c) return
   const { name, mermaid, mailboxId, status, approvedCopy: copy, requireApproval } = req.body || {}
+  // The same channel-mode guard the parity sequence PUT applies — this legacy
+  // route also writes mermaid, and an email step saved into an sms-mode
+  // campaign strands every lead that reaches it. Invalid mermaid may still be
+  // saved on a draft (the editor shows the errors), but not onto a campaign
+  // that is running or being launched — the engine would only pause it anyway.
+  if (mermaid !== undefined && mermaid !== null) {
+    const nextGraph = parsePlaybook(mermaid)
+    const willRun = (status ?? c.status) === 'running'
+    if (!nextGraph.valid && willRun && status !== 'running') {
+      return res.status(400).json({ error: 'Fix playbook errors first — this campaign is running', validation: { errors: nextGraph.errors, warnings: nextGraph.warnings } })
+    }
+    if (nextGraph.valid) {
+      const conflict = channelModeConflicts(String(c.channel_mode || 'email').toLowerCase(), nextGraph)
+      if (conflict) return res.status(409).json({ error: conflict, code: 'channel_immutable' })
+    }
+  }
   // true / false is this campaign's own decision; null hands it back to the
   // workspace default. Anything else leaves it alone.
   const approval = requireApproval === undefined ? c.require_approval
@@ -657,6 +674,8 @@ api.put('/campaigns/:id', (req, res) => {
       const target = mermaid ?? c.mermaid
       const graph = parsePlaybook(target)
       if (!graph.valid) return res.status(400).json({ error: 'Fix playbook errors before launching', validation: { errors: graph.errors, warnings: graph.warnings } })
+      const conflict = channelModeConflicts(String(c.channel_mode || 'email').toLowerCase(), graph)
+      if (conflict) return res.status(409).json({ error: conflict, code: 'channel_immutable' })
       const effectiveMailbox = mailboxId ?? c.mailbox_id
       if (!effectiveMailbox) return res.status(400).json({ error: 'Pick a sending mailbox before launching' })
       const leadCount = db.prepare('SELECT COUNT(*) n FROM campaign_leads WHERE campaign_id = ?').get(c.id).n
@@ -753,6 +772,7 @@ api.delete('/campaigns/:id/leads/:leadId', (req, res) => {
     const drafts = db.prepare(
       "UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now') WHERE campaign_id = ? AND lead_id = ? AND status IN ('pending','approved')"
     ).run(`${req.user?.email || 'a workspace member'} (lead removed from campaign)`, c.id, cl.lead_id).changes
+    clearStepSlots(c.id, cl.lead_id)
     db.prepare('DELETE FROM campaign_leads WHERE id = ?').run(cl.id)
     return drafts
   })()

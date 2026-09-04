@@ -624,6 +624,7 @@ CREATE TABLE IF NOT EXISTS sender_billing_details (
     'ALTER TABLE campaign_leads ADD COLUMN mailbox_id INTEGER',
     "ALTER TABLE campaign_leads ADD COLUMN last_reply_at TEXT DEFAULT ''",
     "ALTER TABLE campaign_leads ADD COLUMN completed_at TEXT DEFAULT ''",
+    "ALTER TABLE campaign_leads ADD COLUMN waiting_since TEXT DEFAULT ''",
 
     // --- leads: global suppression and provenance.
     "ALTER TABLE leads ADD COLUMN unsubscribed_at TEXT DEFAULT ''",

@@ -138,29 +138,38 @@ test('cannot change send-node channel after launch (START → PAUSED → edit)',
   })
   assert.equal(refused.status, 409)
   assert.equal(refused.body.error, 'channel_immutable')
-  assert.match(refused.body.message, /Duplicate/i)
+  assert.match(refused.body.message, /SMS send steps|Duplicate/i)
 })
 
-test('draft never-launched campaigns may change channels and audit the change', async () => {
+test('draft email-mode campaigns reject SMS send steps at save time', async () => {
   const { campaign } = readyEmailCampaign('channel-draft')
-  const saved = await client.put(`/api/campaigns/${campaign.id}/sequence`, {
+  const refused = await client.put(`/api/campaigns/${campaign.id}/sequence`, {
     mermaid: SMS_CHANNEL_SWAPPED,
   })
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.error, 'channel_immutable')
+  assert.match(refused.body.message, /SMS send steps/)
+  assert.equal(
+    db.prepare('SELECT mermaid FROM campaigns WHERE id = ?').get(campaign.id).mermaid,
+    EMAIL_PLAYBOOK,
+    'campaign unchanged on conflict',
+  )
+})
+
+test('multi mode accepts both email and SMS send steps', async () => {
+  const mailbox = seedMailbox(db, owner.id, 'multi@example.com')
+  const campaign = seedCampaign(db, owner.id, 'multi-mode', mailbox.id)
+  db.prepare("UPDATE campaigns SET channel_mode = 'multi', mermaid = ? WHERE id = ?").run(EMAIL_PLAYBOOK, campaign.id)
+  stampDefaults(campaign.id)
+  db.prepare('INSERT INTO campaign_mailboxes (campaign_id, mailbox_id) VALUES (?, ?)').run(campaign.id, mailbox.id)
+  const mixed = `flowchart TD
+    S([Start]) --> A[Send: email intro]
+    A -- no reply 3d --> B[Send sms: nudge]
+    B -- reply --> W([Won])
+  `
+  const saved = await client.put(`/api/campaigns/${campaign.id}/sequence`, { mermaid: mixed })
   assert.equal(saved.status, 200)
   assert.equal(saved.body.ok, true)
-
-  const audits = db.prepare(
-    `SELECT * FROM campaign_channel_changes WHERE campaign_id = ? AND node_id = 'A'`
-  ).all(campaign.id)
-  assert.equal(audits.length, 1)
-  assert.equal(audits[0].from_channel, 'email')
-  assert.equal(audits[0].to_channel, 'sms')
-  assert.equal(audits[0].changed_by, owner.email)
-
-  const events = db.prepare(
-    "SELECT detail FROM events WHERE campaign_id = ? AND type = 'campaign_channel_change'"
-  ).all(campaign.id)
-  assert.ok(events.some((e) => /email -> sms/.test(e.detail)))
 })
 
 // ------------------------------------------------------- launch blockers ----

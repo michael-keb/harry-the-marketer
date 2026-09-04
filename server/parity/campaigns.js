@@ -40,7 +40,8 @@ function untracked(r, on, reason) {
     ? { ...r, tracked: true, reason: '' }
     : { ...r, value: null, tracked: false, reason }
 }
-import { parsePlaybook, nodeIntents, collectTimingIssues } from '../playbook.js'
+import { parsePlaybook, nodeIntents, collectTimingIssues, channelModeConflicts } from '../playbook.js'
+import { clearStepSlots } from '../step-timing.js'
 import { isNonCommercial, playbookCommercialHit, PURPOSES } from '../purpose.js'
 import { leadStages } from '../stages.js'
 import { dailyCap, remainingToday, isWarmingUp } from '../pacing.js'
@@ -492,17 +493,9 @@ function launchBlockers(campaign) {
   const hasSmsSend = sendNodes.some((n) => String(n.channel || '').toLowerCase() === 'sms')
 
   // Playbook channel vs campaign mode (Cedar Pike).
-  if (graph.valid && mode === 'email' && hasSmsSend) {
-    blockers.push({
-      field: 'playbook',
-      message: 'Email-mode campaigns cannot include SMS send steps — switch to multi or remove SMS steps',
-    })
-  }
-  if (graph.valid && mode === 'sms' && hasEmailSend) {
-    blockers.push({
-      field: 'playbook',
-      message: 'SMS-mode campaigns cannot include email send steps — switch to multi or remove email steps',
-    })
+  if (graph.valid) {
+    const conflict = channelModeConflicts(mode, graph)
+    if (conflict) blockers.push({ field: 'playbook', message: conflict })
   }
 
   if (mode === 'email' || mode === 'multi') {
@@ -1273,6 +1266,15 @@ export function register(api) {
       })
     }
 
+    const modeConflict = channelModeConflicts(channelModeOf(c), graph)
+    if (modeConflict) {
+      throw new HttpError(409, {
+        error: 'channel_immutable',
+        field: 'playbook',
+        message: modeConflict,
+      })
+    }
+
     // Channel freeze after launch (Cedar Pike): once launched_at is set (or the
     // campaign is running), send-node channels cannot change on existing node
     // ids. Duplicate the campaign for a new version instead. Draft never-
@@ -1581,6 +1583,7 @@ export function register(api) {
     tx(() => {
       db.prepare('DELETE FROM messages WHERE campaign_id = ?').run(c.id)
       db.prepare('DELETE FROM drafts WHERE campaign_id = ?').run(c.id)
+      db.prepare('DELETE FROM step_send_slots WHERE campaign_id = ?').run(c.id)
       db.prepare('DELETE FROM campaign_leads WHERE campaign_id = ?').run(c.id)
       db.prepare('DELETE FROM campaign_mailboxes WHERE campaign_id = ?').run(c.id)
       db.prepare('DELETE FROM node_examples WHERE campaign_id = ?').run(c.id)
@@ -1857,6 +1860,7 @@ export function register(api) {
         // tick can never find work for a lead that has just been removed.
         const drafts = db.prepare("UPDATE drafts SET status = 'declined', reviewed_by = ?, reviewed_at = datetime('now') WHERE campaign_id = ? AND lead_id = ? AND status IN ('pending','approved')")
           .run(req.user.email, c.id, id).changes
+        clearStepSlots(c.id, id)
         db.prepare('DELETE FROM campaign_leads WHERE id = ?').run(cl.id)
         outcomes.push({ leadId: id, removed: true, node: cl.node_id || '', draftsCancelled: drafts })
       }

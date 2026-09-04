@@ -488,6 +488,7 @@ for (const stmt of [
   // transient failure become the terminal 'error' state.
   'ALTER TABLE campaign_leads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0',
   "ALTER TABLE campaign_leads ADD COLUMN next_retry_at TEXT DEFAULT ''",
+  "ALTER TABLE campaign_leads ADD COLUMN waiting_since TEXT DEFAULT ''",
   // Refresh-token classification (server/google.js, server/microsoft.js): a
   // genuine invalid_grant/invalid_client sets status='error' AND this flag so the
   // reconnect banner can tell "revoked, reconnect me" from a transient 5xx that

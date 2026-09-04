@@ -138,6 +138,20 @@ export function getOrCreateStepSlot({
   return { at, reused: false, window: { from: padClock(parseClock(window.from)), to: padClock(parseClock(window.to)) } }
 }
 
+// Slot keys are the wait node's id, or `${nodeId}>${edge.to}` for timeout
+// edges — clearing a node clears both forms.
+export function clearStepSlots(campaignId, leadId, nodeId = null) {
+  if (nodeId === null) {
+    db.prepare('DELETE FROM step_send_slots WHERE campaign_id = ? AND lead_id = ?')
+      .run(campaignId, leadId)
+    return
+  }
+  db.prepare(
+    `DELETE FROM step_send_slots WHERE campaign_id = ? AND lead_id = ?
+       AND (node_id = ? OR node_id LIKE ?)`
+  ).run(campaignId, leadId, String(nodeId), `${nodeId}>%`)
+}
+
 // Walk forward until every provided schedule is open. Mirrors gates.nextOpenAll
 // without importing gates (avoids a cycle through send-rules).
 function nextOpenAll(schedules, at, tries = 40) {

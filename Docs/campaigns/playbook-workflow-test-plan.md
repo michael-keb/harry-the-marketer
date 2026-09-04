@@ -50,6 +50,12 @@ flowchart TD
   | Unsubscribe | unsubscribe | → U |
   | Not interested | not interested | *no edge* — lead parks as **needs attention** |
 
+- **Sandbox timing is not production timing.** A real mailbox enforces a
+  randomised gap of at least 45s between sends (`MIN_GAP_MS`, server/pacing.js)
+  and its daily cap spreads a large cohort over days — 165 leads at 50/day means
+  the last intro leaves on day 4, and each lead's `no reply` clock starts from
+  *its own* send, not from Start. Second-scale timers only behave on the
+  sandbox; treat every rehearsal duration as "sandbox-only shorthand".
 - **Approval.** Decided on the campaign's Settings tab. With it **on**, every
   send stops in Inbox → *Needs your OK* until you approve; with it **off** the
   send leaves on the next tick. Run the suite with it off, then re-run one case
@@ -86,7 +92,7 @@ rehearsal duration plus one tick (about a minute at most).
 | 1 | Happy path: A → B → W | Tick. Lead gets the intro. Simulate **Interested**. Tick. Simulate **Interested** again on the B email. | Lead finishes **Won: call booked**. Activity shows `sent A`, `reply`, `branched A → B`, `sent B`, `reply`, `branched B → W`, `finished won`. Inbox thread has intro, reply, proposal, reply. |
 | 2 | Question first: A → Q → B → W | Simulate **Question** on the intro. Tick. Simulate **Interested** on the Q email. Simulate **Interested** on B. | Lead goes A → Q → B → Won. The Q email answers the question, then proposes a call. |
 | 3 | Not now: A → N | Simulate **Not now** on the intro. | Lead state **waiting** at N with a wait-until 30 days out. Nothing else is sent. (N has no outgoing edge, so after 30 days the engine finishes the lead as *completed*; if you want re-engagement, add `N --> A2[Send: …]`.) |
-| 4 | Unsubscribe: A → U | Simulate **Unsubscribe** on the intro. | Lead finishes **Unsubscribed**. The address appears under Settings → Never contact. Re-attaching the lead to any campaign must not send to it. |
+| 4 | Unsubscribe: A → U | Simulate **Unsubscribe** on the intro. | The machine never opts someone out on its own reading: the lead parks as **needs attention** ("reads like an unsubscribe — confirm it"). Confirm it from the Inbox; only then does the lead finish **Unsubscribed** and the address appear under Settings → Never contact. Re-attaching the lead to any campaign must not send to it. |
 | 5 | Silent lead: A → F → L | Send nothing back. Wait for the A timer. Wait for the F timer. | After the first timer: `branched A → F`, nudge sent, thread has two outbound emails. After the second: lead finishes **Lost: no response**. |
 | 6 | Late interest: A → F → B → W | Let the A timer fire. Simulate **Interested** on the nudge. Simulate **Interested** on B. | F → B → Won. Confirms replies to the follow-up route the same as replies to the intro. |
 | 7 | Question on the nudge: A → F → Q → B | Let the A timer fire. Simulate **Question** on the nudge. Simulate **Interested** on Q. | F → Q → B. Then either finish with Interested (Won) or let the B timer fire (Lost). |
@@ -97,7 +103,12 @@ rehearsal duration plus one tick (about a minute at most).
 | 12 | Timer restarts on each send | Reach F. Note the projected time on the Schedule tab. | The F → L timer counts from when the nudge was sent, not from the intro. The projected Lost time is nudge-sent-time plus the F timer. |
 | 13 | Two leads, independent clocks | Start two leads a minute apart. Reply to one, ignore the other. | Each lead follows its own branch and its own timers; the reply on one never moves the other. |
 | 14 | Restart after Start/Stop | Mid-case 5, press **Stop**, wait past a timer, press **Start**. | Nothing sends while stopped. On Start the lead resumes where it was; a timer that expired while stopped fires on the first tick. |
-| 15 | Daily limit on the sandbox | Set the sandbox mailbox's daily limit to 2. Start three fresh leads. Tick. | Two intros go out, the third waits with *daily limit reached* on the campaign header, and goes the next day (or when you raise the limit and tick). |
+| 15 | Daily limit on the sandbox | Set the sandbox mailbox's daily limit to **3**. Start three fresh leads. Tick. | Two intros go out — the last ~30% of the day's allowance is **reserved for follow-ups**, so a limit of 3 allows 2 fresh approaches. The third waits with the reserve named on the campaign header, and goes when you raise the limit and tick (or the next day). |
+| 16 | Two replies before one tick | Reach A. Simulate **Question**, then immediately simulate **Interested**, before the next tick. Tick a few times. | The lead branches on the **older** reply first (Question → Q), then on the newer one at whatever node it has reached. No stale reply re-branches the lead out of order. |
+| 17 | Hand-corrected intent sticks | Reach A, simulate a reply the rules will misread (or any reply), then reclassify the intent by hand from the lead drawer before the tick classifies it. Tick a few times. | The lead follows **your** intent's edge and stays there; no later tick re-runs the classifier and re-routes it. |
+| 18 | Ladder never fires out of order | Give one node two timers, `no reply 30s --> F` and `no reply 2m --> G`. Send nothing. | The 30s edge fires first, always. G is only ever reached via its own elapsed 2m — never at 30s. If adaptive timing shifts due times before the freeze elapses, the lead re-freezes rather than firing an undue edge. Also: if the campaign's Behaviour reply-timeout is set, it **replaces both durations** — leave it unset when the playbook authors a ladder. |
+| 19 | Edit the playbook mid-wait | Reach F with the timer running. **Pause the campaign** (a running sequence is edit-locked), edit an unrelated part of the playbook, save, resume. Then pause again, delete F, save, resume. | The first save must not move the lead — `wait_until` froze when it entered F. The second save parks the lead as **needs attention** ("the step no longer exists"), never silently restarts or resends. |
+| 20 | Two mailboxes rotate | Attach a second sandbox mailbox. Start four fresh leads. Tick until all intros are out, then drive one lead to a follow-up. | Intros spread across both mailboxes by remaining daily capacity. Every follow-up in a thread leaves from the **same** mailbox that sent the intro — a conversation never changes sender. |
 
 ## Pass criteria
 
@@ -106,6 +117,8 @@ rehearsal duration plus one tick (about a minute at most).
 - The Activity tab explains every transition with a `branched` event naming the edge.
 - Nothing is sent to a Won, Lost, or Unsubscribed lead afterwards (tick a few more times and check the thread).
 - Approval on holds every send; approval off sends on the next tick.
+- A hand-corrected intent survives later ticks (case 17), and no lead is ever
+  branched twice for one human interaction (case 16).
 
 ## Afterwards
 
@@ -114,3 +127,8 @@ rehearsal duration plus one tick (about a minute at most).
   timeout (case 8) and `N` never re-engages (case 3).
 - Detach the sandbox mailbox and attach the real one before the campaign goes
   to real leads.
+- Before a real cohort: check Behaviour's reply-timeout override is **unset**
+  if the playbook authors a no-reply ladder (it replaces every rung with one
+  duration), and do the throughput arithmetic — cohort size ÷ daily cap gives
+  the date the last intro leaves, and every timer counts from that lead's own
+  send.

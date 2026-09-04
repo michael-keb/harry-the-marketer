@@ -21,7 +21,7 @@ import { notify } from './alerts.js'
 import { runUpkeep } from './upkeep.js'
 import { syncSheetsQuietly } from './sheets.js'
 import { env } from './env.js'
-import { scheduleStepTime, getOrCreateStepSlot } from './step-timing.js'
+import { scheduleStepTime, getOrCreateStepSlot, clearStepSlots } from './step-timing.js'
 
 // getOrCreateStepSlot is available for step-level random windows; scheduleStepTime
 // wraps it when an edge/node carries randomWindow + lead identity.
@@ -35,7 +35,15 @@ const SOFT_SMS_SKIP = new Set(['no_phone'])
 const HARD_SUPPRESSION = new Set(['unsubscribed', 'opted_out', 'bounced', 'blocked'])
 
 const nowMs = () => Date.now()
-const parseDbTime = (text) => (text ? Date.parse(text.replace(' ', 'T') + 'Z') : 0)
+export function parseDbTime(text) {
+  if (!text) return 0
+  let s = String(text).trim().replace(' ', 'T')
+  // SQLite datetimes carry no zone marker; they are UTC. ISO strings from
+  // toISOString already end in Z (or carry an offset) — leave those alone.
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(s)) s += 'Z'
+  const t = Date.parse(s)
+  return Number.isFinite(t) ? t : 0
+}
 
 // After a soft skip, prefer an unconditional edge; else the soonest timeout /
 // no-reply edge; else null (caller finishes as completed).
@@ -170,14 +178,13 @@ function noReplySwitchNote(ctx, fromNodeId, edge) {
 // have not elapsed. Filter to edges whose due-time has passed first, then apply
 // the switch preference within that set. `scheduled` is sorted by `at`, so the
 // filtered list stays soonest-first and `pool[0]` is the earliest due edge.
-function pickNoReplyEdge(ctx, fromNodeId, scheduled, now = nowMs()) {
+export function pickNoReplyEdge(ctx, fromNodeId, scheduled, now = nowMs()) {
   const due = scheduled.filter((s) => s.at <= now)
-  const pool = due.length ? due : scheduled
+  if (!due.length) return null
   const fromCh = channelOfNode(ctx.graph.nodes[fromNodeId]) || 'email'
   const switchTo = switchTargetChannel(ctx.campaign, fromCh)
-  if (!switchTo || !pool.length) return pool[0]
-  const match = pool.find((s) => channelOfNode(ctx.graph.nodes[s.edge.to]) === switchTo)
-  return match || pool[0]
+  if (!switchTo) return due[0]
+  return due.find((s) => channelOfNode(ctx.graph.nodes[s.edge.to]) === switchTo) || due[0]
 }
 
 function scheduleFrom(ctx, cl, nodeId, { delayMs = 0, exactTime = null, randomWindow = null, fromMs }) {
@@ -210,6 +217,7 @@ async function skipUndeliverable(ctx, cl, nodeId, detail) {
     campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched',
     detail: `${nodeId} --[skip]--> ${next}`,
   })
+  clearStepSlots(cl.campaign_id, cl.lead_id, nodeId)
   return enterNode(ctx, cl, next)
 }
 
@@ -218,6 +226,10 @@ function setLead(cl, fields) {
   db.prepare(`UPDATE campaign_leads SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
     .run(...cols.map((c) => fields[c]), cl.id)
   Object.assign(cl, fields)
+}
+
+function parkWaiting(cl, fields) {
+  setLead(cl, { ...fields, state: 'waiting', waiting_since: new Date().toISOString() })
 }
 
 function lastOutbound(cl) {
@@ -468,6 +480,7 @@ function handOff(ctx, cl, event) {
   // else, `waiting` included, reads as parked partway through a run that never
   // happened, and the child would never send.
   if (already) {
+    clearStepSlots(match.id, cl.lead_id)
     db.prepare(
       "UPDATE campaign_leads SET state = 'queued', node_id = '', outcome = '', error = '', wait_until = '', updated_at = datetime('now') WHERE id = ?"
     ).run(already.id)
@@ -861,7 +874,7 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
   if (out.length === 0) { finishLead(ctx, cl, 'completed', 'no next step after send'); return false }
   const always = out.find((e) => e.cond.kind === 'always')
   if (always && out.length === 1) return enterNode(ctx, cl, always.to)
-  setLead(cl, { state: 'waiting', wait_until: '' })
+  parkWaiting(cl, { wait_until: '' })
   return false
 }
 
@@ -909,11 +922,11 @@ async function enterNode(ctx, cl, nodeId) {
         randomWindow: node.randomWindow || null,
         fromMs: nowMs(),
       })
-      setLead(cl, { state: 'waiting', wait_until: new Date(scheduled.at).toISOString() })
+      parkWaiting(cl, { wait_until: new Date(scheduled.at).toISOString() })
       return false
     }
     case 'decision':
-      setLead(cl, { state: 'waiting', wait_until: '' })
+      parkWaiting(cl, { wait_until: '' })
       return false
     case 'send': {
       const channel = (node.channel || 'email').toLowerCase()
@@ -923,12 +936,14 @@ async function enterNode(ctx, cl, nodeId) {
         return false
       }
 
-      // Resolved per lead, not per campaign: everything below — the sender name
-      // in the copy, the daily cap the gate reads, the address it leaves from,
-      // and the pacing gap it closes afterwards — has to agree about which
-      // mailbox this is. Passing the campaign's mailbox to some of them and the
-      // pinned one to others is how a pin half-works.
       const mailbox = mailboxFor(ctx, cl)
+      if (!mailbox) {
+        setLead(cl, {
+          state: 'needs_attention',
+          error: 'the playbook has an email step but this campaign has no connected mailbox — attach one or remove the step',
+        })
+        return false
+      }
       const pinned = mailbox.id !== ctx.mailbox.id
       // The gate reads per-mailbox limits and warm-up state, so a pinned send
       // has to be judged against its own mailbox's rules rather than the
@@ -1165,7 +1180,7 @@ async function enterNode(ctx, cl, nodeId) {
       if (out.length === 0) { finishLead(ctx, cl, 'completed', 'no next step after send'); return false }
       const always = out.find((e) => e.cond.kind === 'always')
       if (always && out.length === 1) return enterNode(ctx, cl, always.to)
-      setLead(cl, { state: 'waiting', wait_until: '' })
+      parkWaiting(cl, { wait_until: '' })
       return false
     }
     default:
@@ -1263,6 +1278,7 @@ export async function routeReply(ctx, cl, intent, message, { setBy = '' } = {}) 
     campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched',
     detail: `${cl.node_id} --[reply: ${intent}]--> ${edge.to}`,
   })
+  clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
   await enterNode(ctx, cl, edge.to)
   return true
 }
@@ -1273,10 +1289,25 @@ async function processWaiting(ctx, cl) {
 
   // Wait nodes: purely time-based.
   if (node.type === 'wait') {
-    if (cl.wait_until && Date.parse(cl.wait_until) <= nowMs()) {
+    if (!cl.wait_until) {
+      const scheduled = scheduleFrom(ctx, cl, cl.node_id, {
+        delayMs: node.ms || 0,
+        exactTime: node.exactTime || null,
+        randomWindow: node.randomWindow || null,
+        fromMs: nowMs(),
+      })
+      parkWaiting(cl, { wait_until: new Date(scheduled.at).toISOString() })
+      logEvent(ctx.user.id, {
+        campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'retimed',
+        detail: 'this step changed under a waiting lead — timer restarted from now',
+      })
+      return
+    }
+    if (Date.parse(cl.wait_until) <= nowMs()) {
       const next = ctx.graph.edges.find((e) => e.from === cl.node_id && e.cond.kind === 'always')
       if (!next) { finishLead(ctx, cl, 'completed', 'wait node has no outgoing edge'); return }
       logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched', detail: `${cl.node_id} --[wait done]--> ${next.to}` })
+      clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
       await enterNode(ctx, cl, next.to)
     }
     return
@@ -1299,7 +1330,7 @@ async function processWaiting(ctx, cl) {
 
   // 2. Unprocessed inbound reply? Classify and branch.
   const unprocessed = db.prepare(
-    "SELECT * FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'in' AND intent = '' ORDER BY id DESC LIMIT 1"
+    "SELECT * FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'in' AND intent = '' ORDER BY id ASC LIMIT 1"
   ).get(cl.campaign_id, cl.lead_id)
   if (unprocessed) {
     // A person who corrected the classifier outranks it. Without this the
@@ -1339,8 +1370,14 @@ async function processWaiting(ctx, cl) {
   if (!timeoutEdges.length) return
 
   const outbound = lastOutbound(cl)
-  const since = parseDbTime(outbound?.created_at)
-  if (!since) return
+  let since = parseDbTime(outbound?.created_at)
+  if (!since) {
+    since = parseDbTime(cl.waiting_since)
+    if (!since) {
+      since = nowMs()
+      setLead(cl, { waiting_since: new Date(since).toISOString() })
+    }
+  }
 
   const branchTimeout = async (due, tuned = '') => {
     const switchNote = due.cond.kind === 'no_reply' ? noReplySwitchNote(ctx, cl.node_id, due) : ''
@@ -1348,6 +1385,7 @@ async function processWaiting(ctx, cl) {
       campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched',
       detail: `${cl.node_id} --[${due.label}]--> ${due.to}${tuned}${switchNote}`,
     })
+    clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
     setLead(cl, { wait_until: '' })
     await enterNode(ctx, cl, due.to)
   }
@@ -1392,6 +1430,10 @@ async function processWaiting(ctx, cl) {
     // Frozen wait is due — prefer the configured channel-switch edge when one
     // exists so Teal Lynx terminates the original branch on the opposite channel.
     const chosen = pickNoReplyEdge(ctx, cl.node_id, scheduled)
+    if (!chosen) {
+      setLead(cl, { wait_until: new Date(scheduled[0].at).toISOString() })
+      return
+    }
     const due = chosen.edge
     const tuned = due.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
     await branchTimeout(due, tuned)
@@ -1405,6 +1447,10 @@ async function processWaiting(ctx, cl) {
   if (soonest.at > nowMs()) return
 
   const chosen = pickNoReplyEdge(ctx, cl.node_id, scheduled)
+  if (!chosen) {
+    setLead(cl, { wait_until: new Date(scheduled[0].at).toISOString() })
+    return
+  }
   const tuned = chosen.edge.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
   await branchTimeout(chosen.edge, tuned)
 }
@@ -1427,6 +1473,17 @@ export async function processCampaign(campaign) {
   if (!graph.valid) {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id)
     logEvent(user.id, { campaignId: campaign.id, type: 'campaign_paused', detail: `playbook invalid: ${graph.errors[0]?.message || ''}` })
+    return
+  }
+  const hasEmailSend = Object.values(graph.nodes).some(
+    (n) => n.type === 'send' && String(n.channel || 'email').toLowerCase() === 'email',
+  )
+  if (hasEmailSend && !mailbox) {
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id)
+    logEvent(user.id, {
+      campaignId: campaign.id, type: 'campaign_paused',
+      detail: 'the playbook has an email step but this campaign has no connected mailbox — attach one or remove the step',
+    })
     return
   }
   // The rules merge reads three rows and the hold sweep writes one statement.

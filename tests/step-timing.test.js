@@ -11,7 +11,7 @@ process.env.NODE_ENV = 'test'
 const { db } = await import('../server/db.js')
 const {
   parseClock, validateRandomWindow, pickRandomInWindow,
-  getOrCreateStepSlot, scheduleStepTime,
+  getOrCreateStepSlot, scheduleStepTime, clearStepSlots,
 } = await import('../server/step-timing.js')
 const { localAt } = await import('../server/schedule.js')
 
@@ -113,4 +113,19 @@ test('invalid window is rejected', () => {
     }),
     /end must be at or after start/,
   )
+})
+
+test('clearStepSlots removes node and timeout-edge slots but not unrelated ids', () => {
+  db.prepare(
+    `INSERT INTO step_send_slots (campaign_id, lead_id, node_id, chosen_at, window_from, window_to, timezone, source)
+     VALUES (1, 1, 'A', 1000, '09:00', '11:00', 'UTC', 'step'),
+            (1, 1, 'A>B', 2000, '09:00', '11:00', 'UTC', 'step'),
+            (1, 1, 'AB', 3000, '09:00', '11:00', 'UTC', 'step'),
+            (1, 1, 'B', 4000, '09:00', '11:00', 'UTC', 'step')`
+  ).run()
+  clearStepSlots(1, 1, 'A')
+  const remaining = db.prepare('SELECT node_id FROM step_send_slots ORDER BY node_id').all().map((r) => r.node_id)
+  assert.deepEqual(remaining, ['AB', 'B'])
+  clearStepSlots(1, 1)
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM step_send_slots').get().n, 0)
 })

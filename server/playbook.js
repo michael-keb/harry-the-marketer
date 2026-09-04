@@ -115,9 +115,18 @@ function classifyNode(id, shape, label) {
   // Rectangles: Send / Wait actions.
   // Channel may be named: `Send sms: …`, `Send email: …`. Bare `Send:` is email
   // so every existing playbook keeps working unchanged.
+  // The alternation must list every channel word, supported or not: a keyword
+  // list means `Send intro email` keeps reading as an email send with that
+  // instruction (no colon needed), while `Send whatsapp: hi` is recognised as
+  // a channel ask — and refused below — instead of silently becoming an email.
   const send = text.match(/^send(?:\s+(email|sms|whatsapp|telegram))?\s*[:=]?\s*(.*)$/i)
   if (send) {
     const channel = (send[1] || 'email').toLowerCase()
+    // Planned channels the engine cannot send yet (Docs/messaging-channels-plan.md
+    // phases 2–3). Re-add here when they ship.
+    if (channel === 'whatsapp' || channel === 'telegram') {
+      return { id, type: 'unknown', label: text, unsupportedChannel: channel }
+    }
     let instruction = (send[2] || '').trim()
     let randomWindow = null
     // Trailing `; window HH:MM-HH:MM` is step-level send jitter, not copy.
@@ -275,10 +284,25 @@ export function parsePlaybook(source) {
   for (const n of all) {
     const out = edges.filter((e) => e.from === n.id)
     if (n.type === 'unknown') {
-      errors.push({ line: 0, message: `Node "${n.id}" ("${n.label}") is not a recognized action. Rectangles must be "Send: <instruction>" or "Wait: <duration>".` })
+      errors.push({
+        line: 0,
+        message: n.unsupportedChannel
+          ? `Node "${n.id}": channel "${n.unsupportedChannel}" is not supported yet — use "Send:" (email) or "Send sms:".`
+          : `Node "${n.id}" ("${n.label}") is not a recognized action. Rectangles must be "Send: <instruction>" or "Wait: <duration>".`,
+      })
     }
     if (n.type === 'wait' && n.ms === null) {
       errors.push({ line: 0, message: `Wait node "${n.id}" needs a duration, e.g. [Wait: 2d].` })
+    }
+    if (n.type === 'wait' || n.type === 'start') {
+      for (const e of out) {
+        if (e.cond.kind !== 'always') {
+          errors.push({
+            line: e.line,
+            message: `Node "${n.id}" is a Wait/Start step — its outgoing edge cannot carry a condition; move the condition to a Send or Decision step.`,
+          })
+        }
+      }
     }
     if (n.type === 'terminal' && out.length > 0) {
       warnings.push({ line: 0, message: `Terminal node "${n.id}" has outgoing edges; they will never run.` })
@@ -336,6 +360,33 @@ export function parsePlaybook(source) {
     if (!reachesTerminal) warnings.push({ line: 0, message: 'No terminal node (e.g. W([Won])) is reachable — leads will never finish.' })
     const reachesSend = all.some((n) => reachable.has(n.id) && n.type === 'send')
     if (!reachesSend) errors.push({ line: 0, message: 'The playbook never sends an email — add a node like A[Send: intro].' })
+
+    // Reply/no_reply edges before any send on a path strand leads forever.
+    // Visited state is (node, sent-yet?), not the node alone: a node reachable
+    // both after a send and along a send-free path must still be flagged for
+    // the send-free path, whichever order the walk finds them in.
+    const pathQueue = [{ id: startId, sentBefore: false }]
+    const pathSeen = new Set()
+    const flaggedEdges = new Set()
+    while (pathQueue.length) {
+      const { id, sentBefore } = pathQueue.shift()
+      const stateKey = `${id}|${sentBefore ? 1 : 0}`
+      if (pathSeen.has(stateKey)) continue
+      pathSeen.add(stateKey)
+      const n = nodes[id]
+      if (!n) continue
+      const nowSent = sentBefore || n.type === 'send'
+      for (const e of edges.filter((ed) => ed.from === id)) {
+        if ((e.cond.kind === 'reply' || e.cond.kind === 'no_reply') && !nowSent && !flaggedEdges.has(e)) {
+          flaggedEdges.add(e)
+          errors.push({
+            line: e.line,
+            message: `Node "${e.from}" waits for a reply, but no message has been sent yet on this path — add a Send step before it.`,
+          })
+        }
+        if (nodes[e.to]) pathQueue.push({ id: e.to, sentBefore: nowSent })
+      }
+    }
   }
 
   return { nodes, edges, startId, errors, warnings, valid: errors.length === 0 }
@@ -370,6 +421,18 @@ export function pathToNode(graph, nodeId) {
       queue.push(e.to)
     }
   }
+  return null
+}
+
+// A campaign's channel mode vs the channels its send nodes actually use.
+// Shared by launch blockers and BOTH mermaid write routes (parity sequence PUT
+// and the legacy campaign PUT) so no save path can smuggle an email step into
+// an sms-mode campaign or vice versa. Returns a human sentence, or null.
+export function channelModeConflicts(mode, graph) {
+  const sendNodes = Object.values(graph?.nodes || {}).filter((n) => n.type === 'send')
+  const has = (ch) => sendNodes.some((n) => String(n.channel || 'email').toLowerCase() === ch)
+  if (mode === 'email' && has('sms')) return 'Email-mode campaigns cannot include SMS send steps — switch to multi or remove SMS steps'
+  if (mode === 'sms' && has('email')) return 'SMS-mode campaigns cannot include email send steps — switch to multi or remove email steps'
   return null
 }
 

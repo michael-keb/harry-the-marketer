@@ -589,3 +589,49 @@ test('a campaign with no mailboxes says it cannot launch rather than returning a
   assert.deepEqual(body.data, [])
   assert.equal(body.canLaunch, false)
 })
+
+// =============================================================================
+// Channel-mode guard on the legacy PUT route — the parity sequence route is not
+// the only path that writes mermaid, and both must refuse the same conflicts.
+// =============================================================================
+
+test('legacy PUT refuses an email step saved into an sms-mode campaign', async () => {
+  const campaign = seedCampaign('Legacy sms guard', { status: 'running' })
+  db.prepare("UPDATE campaigns SET channel_mode = 'sms' WHERE id = ?").run(campaign.id)
+  const res = await put(`/api/campaigns/${campaign.id}`, {
+    mermaid: `flowchart TD
+      S([Start]) --> A[Send: email step in sms plan]
+      A --> W([Won])
+    `,
+  })
+  assert.equal(res.status, 409)
+  const body = await json(res)
+  assert.equal(body.code, 'channel_immutable')
+  assert.match(body.error, /SMS-mode campaigns cannot include email/)
+  assert.equal(
+    db.prepare('SELECT mermaid FROM campaigns WHERE id = ?').get(campaign.id).mermaid,
+    PLAYBOOK, 'campaign unchanged on conflict',
+  )
+})
+
+test('legacy PUT refuses invalid mermaid on a running campaign, allows it on a draft', async () => {
+  const running = seedCampaign('Legacy invalid running', { status: 'running' })
+  const bad = 'flowchart TD\n  S([Start]) --> A[Send: intro'
+  const refused = await put(`/api/campaigns/${running.id}`, { mermaid: bad })
+  assert.equal(refused.status, 400)
+  assert.ok((await json(refused)).validation.errors.length > 0)
+
+  const draft = seedCampaign('Legacy invalid draft')
+  const saved = await put(`/api/campaigns/${draft.id}`, { mermaid: bad })
+  assert.equal(saved.status, 200, 'a draft may hold work-in-progress mermaid')
+})
+
+test('legacy launch refuses when the existing playbook conflicts with the mode', async () => {
+  const campaign = seedCampaign('Legacy launch guard')
+  db.prepare("UPDATE campaigns SET channel_mode = 'sms' WHERE id = ?").run(campaign.id)
+  attach(campaign.id, seedLead().id)
+  const res = await put(`/api/campaigns/${campaign.id}`, { status: 'running' })
+  assert.equal(res.status, 409)
+  assert.equal((await json(res)).code, 'channel_immutable')
+  assert.equal(db.prepare('SELECT status FROM campaigns WHERE id = ?').get(campaign.id).status, 'draft')
+})

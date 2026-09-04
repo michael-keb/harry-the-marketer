@@ -303,3 +303,60 @@ test('no_reply to opposite channel logs channel_switched', async () => {
     `expected channel_switched in branch log, got: ${branched.map((e) => e.detail).join(' | ')}`,
   )
 })
+
+test('unprocessed replies classify oldest-first across ticks', async () => {
+  const { simulateReply } = await import('../server/mailer.js')
+  const playbook = `flowchart TD
+    S([Start]) --> A[Send: hello]
+    A -- reply: question --> Q[Send: answer pricing]
+    A -- reply: interested --> I[Send: propose call]
+    Q -- reply: interested --> I
+    I -- reply --> W([Won])
+  `
+  db.prepare(
+    "INSERT INTO campaigns (user_id, name, status, mailbox_id, mermaid) VALUES (1, 'Oldest first', 'running', 1, ?)"
+  ).run(playbook)
+  const campaign = db.prepare("SELECT * FROM campaigns WHERE name = 'Oldest first'").get()
+  db.prepare("INSERT INTO leads (user_id, email, first_name) VALUES (1, 'order@example.test', 'Ord')").run()
+  const lead = db.prepare("SELECT * FROM leads WHERE email = 'order@example.test'").get()
+  db.prepare('INSERT INTO campaign_leads (campaign_id, lead_id) VALUES (?, ?)').run(campaign.id, lead.id)
+
+  await tick() // intro
+  const cl = () => db.prepare('SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(campaign.id, lead.id)
+  simulateReply({ user: db.prepare('SELECT * FROM users WHERE id = 1').get(), campaignLead: cl(), text: 'What is your pricing?' })
+  simulateReply({ user: db.prepare('SELECT * FROM users WHERE id = 1').get(), campaignLead: cl(), text: 'Actually this sounds interesting — tell me more.' })
+
+  await tick()
+  assert.equal(cl().node_id, 'Q', 'first tick classifies the older question reply')
+
+  await tick()
+  assert.equal(cl().node_id, 'I', 'second tick classifies the newer interested reply')
+
+  const branches = db.prepare(
+    "SELECT detail FROM events WHERE campaign_id = ? AND lead_id = ? AND type = 'branched' ORDER BY id"
+  ).all(campaign.id, lead.id).map((r) => r.detail)
+  const qIdx = branches.findIndex((d) => /--\[reply: question\]-->/.test(d))
+  const iIdx = branches.findIndex((d) => /--\[reply: interested\]-->/.test(d))
+  assert.ok(qIdx >= 0 && iIdx > qIdx, `branched order: ${branches.join(' | ')}`)
+})
+
+test('pickNoReplyEdge returns null when no edge is due', async () => {
+  const { pickNoReplyEdge } = await import('../server/engine.js')
+  const { parsePlaybook } = await import('../server/playbook.js')
+  const graph = parsePlaybook(`flowchart TD
+    S([Start]) --> A[Send: hi]
+    A -- no reply 3d --> B[Send email: follow]
+    A -- no reply 7d --> C[Send sms: later]
+  `)
+  const ctx = {
+    campaign: { settings: '{}' },
+    graph,
+  }
+  const scheduled = [
+    { edge: graph.edges.find((e) => e.to === 'B'), at: Date.now() + 86400e3 },
+    { edge: graph.edges.find((e) => e.to === 'C'), at: Date.now() + 7 * 86400e3 },
+  ]
+  assert.equal(pickNoReplyEdge(ctx, 'A', scheduled), null)
+  const due = [{ edge: graph.edges.find((e) => e.to === 'B'), at: Date.now() - 1000 }]
+  assert.equal(pickNoReplyEdge(ctx, 'A', due)?.edge.to, 'B')
+})

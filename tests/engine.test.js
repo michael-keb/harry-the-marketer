@@ -120,3 +120,49 @@ test('engine respects mailbox daily limit', async () => {
   assert.equal(outCount(dan.id), 1)
   assert.equal(cl(dan.id).state, 'waiting')
 })
+
+test('human intent guard stamps ISO intent_set_at without re-classifying', async () => {
+  db.prepare("INSERT INTO leads (user_id, email, first_name) VALUES (1, 'guard@example.com', 'Guard')").run()
+  const leadId = db.prepare("SELECT id FROM leads WHERE email = 'guard@example.com'").get().id
+  attach.run(leadId)
+  await tick()
+  const row = cl(leadId)
+  simulateReply({ user, campaignLead: row, text: 'This sounds interesting — tell me more.' })
+  const iso = new Date().toISOString()
+  db.prepare(
+    "UPDATE campaign_leads SET intent = 'not now', intent_set_by = ?, intent_set_at = ? WHERE campaign_id = 1 AND lead_id = ?"
+  ).run(user.email, iso, leadId)
+  await tick()
+  await tick()
+  const inbound = db.prepare("SELECT intent FROM messages WHERE lead_id = ? AND direction = 'in'").get(leadId)
+  assert.equal(inbound.intent, 'not now')
+  assert.equal(cl(leadId).intent, 'not now')
+  assert.equal(cl(leadId).node_id, 'A', 'lead did not branch on the misread reply')
+  const classified = db.prepare(
+    "SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'classified'"
+  ).get(leadId).n
+  assert.equal(classified, 0, 'classifier never ran after human stamp')
+})
+
+test('wait node self-heals empty wait_until', async () => {
+  const playbook = `flowchart TD
+    S([Start]) --> W[Wait: 30s]
+    W --> A[Send: after wait]
+    A --> T([Won])
+  `
+  db.prepare('UPDATE campaigns SET mermaid = ? WHERE id = 1').run(playbook)
+  db.prepare("INSERT INTO leads (user_id, email, first_name) VALUES (1, 'heal@example.com', 'Heal')").run()
+  const leadId = db.prepare("SELECT id FROM leads WHERE email = 'heal@example.com'").get().id
+  attach.run(leadId)
+  await tick()
+  const row = cl(leadId)
+  assert.equal(row.node_id, 'W')
+  db.prepare("UPDATE campaign_leads SET wait_until = '' WHERE campaign_id = 1 AND lead_id = ?").run(leadId)
+  await tick()
+  const healed = cl(leadId)
+  assert.ok(healed.wait_until, 'wait_until frozen after self-heal')
+  const retimed = db.prepare(
+    "SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'retimed'"
+  ).get(leadId).n
+  assert.equal(retimed, 1)
+})
