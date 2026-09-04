@@ -452,13 +452,63 @@ export function ingestRecentInbound(mailbox, msg) {
   }
 
   const from = String(msg.fromEmail || '').toLowerCase().trim()
+
+  // The provider thread identifies the conversation; the From address only
+  // identifies an address. Resolve the thread FIRST.
+  //
+  // Matching on the address first attributed a reply to whichever lead happened
+  // to own that mailbox address, and then looked for a thread only among *that*
+  // lead's enrolments — so a reply landed on the wrong lead and the wrong
+  // campaign, and the lead who was actually written to never saw it. Three ways
+  // that happens in ordinary use, all of them common:
+  //
+  //   * plus-addressing — a lead stored as `you+launch@co.com` replies, and the
+  //     mail client sends from the base `you@co.com`;
+  //   * a person replying from their phone, an alias, or a second address;
+  //   * an assistant answering on someone's behalf.
+  //
+  // In every case the thread is right and the address is wrong, so the thread
+  // decides. The address remains the fallback for a reply that carries no
+  // recognisable thread.
+  let cl = msg.threadId
+    ? db.prepare(
+        `SELECT cl.* FROM campaign_leads cl
+           JOIN campaigns c ON c.id = cl.campaign_id
+          WHERE cl.thread_id = ? AND c.user_id = ?
+          ORDER BY cl.id DESC LIMIT 1`
+      ).get(msg.threadId, mailbox.user_id)
+    : null
+
+  // The thread may predate `campaign_leads.thread_id` being set, so fall back to
+  // the outbound message that opened it — still thread evidence, not address.
+  if (!cl && msg.threadId) {
+    const out = db.prepare(
+      `SELECT campaign_id, lead_id FROM messages
+        WHERE user_id = ? AND thread_id = ? AND direction = 'out' AND lead_id IS NOT NULL
+        ORDER BY id DESC LIMIT 1`
+    ).get(mailbox.user_id, msg.threadId)
+    if (out?.campaign_id && out?.lead_id) {
+      cl = db.prepare(
+        'SELECT * FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?'
+      ).get(out.campaign_id, out.lead_id) || null
+    }
+  }
+
+  if (cl) {
+    const owner = db.prepare('SELECT * FROM leads WHERE id = ?').get(cl.lead_id)
+    if (owner) {
+      storeInboundReply({ mailbox, msg, campaignId: cl.campaign_id, leadId: owner.id, cl })
+      return 'attached'
+    }
+  }
+
   const lead = from
     ? db.prepare('SELECT * FROM leads WHERE user_id = ? AND lower(trim(email)) = ?').get(mailbox.user_id, from)
     : null
 
   if (lead) {
     // Prefer the enrolment that already owns this provider thread.
-    let cl = msg.threadId
+    cl = msg.threadId
       ? db.prepare(
           `SELECT cl.* FROM campaign_leads cl
              JOIN campaigns c ON c.id = cl.campaign_id

@@ -317,6 +317,23 @@ export function parsePlaybook(source) {
     if (n.type === 'send' && out.length === 0) {
       warnings.push({ line: 0, message: `Send node "${n.id}" has no next step — the lead will finish there after sending.` })
     }
+    // A follow-up timer shorter than the gap a real mailbox keeps between sends
+    // is a timer the recipient can never beat. The mailbox spaces sends by at
+    // least 45 seconds (server/pacing.js MIN_GAP_MS) and usually far more, so a
+    // step set to fire sooner than that simply advances the moment the engine
+    // next looks: the sequence marches through its steps and finishes the lead
+    // while the person is still reading the first email. Warned rather than
+    // rejected — seconds are exactly what a sandbox rehearsal wants, and the
+    // sandbox honours them.
+    for (const e of out) {
+      const ms = e.cond?.ms
+      if ((e.cond?.kind === 'no_reply' || e.cond?.kind === 'after') && Number.isFinite(ms) && ms < 60_000) {
+        warnings.push({
+          line: e.line,
+          message: `"${e.label || e.cond.kind}" out of "${n.id}" waits ${Math.round(ms / 1000)}s — a real mailbox leaves at least 45s between sends, so on a live campaign this step will fire before anyone can reply. Fine for a sandbox rehearsal; use minutes or days for real leads.`,
+        })
+      }
+    }
     // Waiting nodes (send/decision with reply edges) should have a timeout escape.
     const replyEdges = out.filter((e) => e.cond.kind === 'reply')
     const timeoutEdges = out.filter((e) => e.cond.kind === 'no_reply' || e.cond.kind === 'after')
