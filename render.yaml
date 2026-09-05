@@ -62,6 +62,13 @@ services:
       - key: LEGAL_SUPPORT_EMAIL
         value: support@harrythemarketer.com
 
+      # AI allowance for this deployment, in cents per month. Billing is not
+      # configured here, so the plan table would leave the workspace on the $5
+      # trial ceiling — which it exhausted on its first live campaign, and the
+      # engine then (correctly) parked every step for a person. $50/month.
+      - key: AI_MONTHLY_ALLOWANCE_CENTS
+        value: "5000"
+
       # Secrets: set in the Render dashboard, never in this file.
       - key: AUTH0_DOMAIN
         sync: false
