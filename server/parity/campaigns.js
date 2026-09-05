@@ -1994,7 +1994,9 @@ export function register(api) {
       owner: ownerOf(req.wsId), campaign: c, mailbox: freqMailbox,
     })?.frequency?.personDays) || 0
     for (const row of rows) {
-      if (row.lastSent || row.state === 'finished' || row.state === 'stopped') continue
+      // Not short-circuited on `lastSent`: an email from a previous enrolment
+      // is not this conversation, and firstTouchDeferral knows the difference.
+      if (row.state === 'finished' || row.state === 'stopped') continue
       const hold = firstTouchDeferral({
         ownerId: req.wsId, campaignId: c.id, mailbox: freqMailbox,
         lead: { id: row.leadId }, personDays,

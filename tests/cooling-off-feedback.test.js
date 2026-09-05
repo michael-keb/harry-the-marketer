@@ -137,3 +137,27 @@ test('the legacy attach route gives the same warning', async () => {
   assert.equal(res.coolingOff[0].email, warm.email)
   assert.match(res.coolingOff[0].reason, /contacted 5 days ago/)
 })
+
+test('re-enrolling someone is a fresh approach: the cooling-off applies again', async () => {
+  const c = seedCampaign('Re-enrol', realBox)
+  const lead = seedLead('again@five.test')
+  // A previous run of this campaign wrote to them yesterday and the ledger knows.
+  db.prepare(
+    "INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body, created_at) VALUES (1, ?, ?, ?, 'out', 's', 'b', datetime('now', '-1 day'))"
+  ).run(c.id, lead.id, realBox)
+  touch(lead.id, 1)
+  // Enrol them afresh now (the trigger stamps enrolled_at).
+  db.prepare('INSERT INTO campaign_leads (campaign_id, lead_id) VALUES (?, ?)').run(c.id, lead.id)
+  const row = db.prepare('SELECT enrolled_at FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?').get(c.id, lead.id)
+  assert.ok(row.enrolled_at, 'enrolment is timestamped by the trigger')
+  const res = await json(await get(`/api/campaigns/${c.id}/leads`))
+  const r = res.leads.find((l) => l.email === lead.email)
+  assert.ok(r.coolingOffUntil, 'yesterday\'s email belongs to the old enrolment, so this is a fresh approach and waits')
+
+  // A message sent within this enrolment makes the next one a follow-up again.
+  db.prepare(
+    "INSERT INTO messages (user_id, campaign_id, lead_id, mailbox_id, direction, subject, body) VALUES (1, ?, ?, ?, 'out', 's2', 'b2')"
+  ).run(c.id, lead.id, realBox)
+  const res2 = await json(await get(`/api/campaigns/${c.id}/leads`))
+  assert.equal(res2.leads.find((l) => l.email === lead.email).coolingOffUntil, undefined)
+})

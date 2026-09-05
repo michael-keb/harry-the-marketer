@@ -119,11 +119,21 @@ const atMidday = (date) => Date.parse(`${date}T12:00:00Z`)
 // Has this plan already written to this person? A follow-up inside a
 // conversation is not a new approach, and the frequency caps must not treat it
 // as one — otherwise a three-step sequence stalls after step one.
+//
+// "Already written to" means within THIS enrolment. The messages a campaign
+// sent to someone last month still exist under the same campaign and lead, so
+// removing and re-attaching them used to look like a follow-up and skip the
+// cooling-off entirely — seven emails to one address in a morning, in the
+// first live run. A re-enrolment starts a fresh approach; only outbound sent
+// since it began counts as this conversation.
 function isFirstTouch(campaignId, leadId) {
   if (!campaignId || !leadId) return true
+  const enrolled = db.prepare(
+    'SELECT enrolled_at FROM campaign_leads WHERE campaign_id = ? AND lead_id = ?'
+  ).get(campaignId, leadId)?.enrolled_at || ''
   return !db.prepare(
-    "SELECT 1 FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'out' LIMIT 1"
-  ).get(campaignId, leadId)
+    "SELECT 1 FROM messages WHERE campaign_id = ? AND lead_id = ? AND direction = 'out' AND created_at >= ? LIMIT 1"
+  ).get(campaignId, leadId, enrolled)
 }
 
 // When would this campaign's FIRST email to `lead` be allowed under the person
