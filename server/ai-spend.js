@@ -13,6 +13,7 @@
 // allowance producing nothing (model refusal is not refunded).
 
 import { db } from './db.js'
+import { billingConfigured } from './billing.js'
 
 // Approximate provider cost in cents per op. Research uses web search and is
 // an order of magnitude more expensive than a short compose.
@@ -61,6 +62,10 @@ export const ALLOWANCE_CENTS = {
   starter: 1500, // $15
   growth: 4000,  // $40
   scale: 10000,  // $100
+  // A production deployment with no billing configured is run by an operator
+  // who pays the provider directly; the trial ceiling exists to stop a local
+  // workspace running away, not to cap them at $5. See monthlyAllowanceCents.
+  operator: 5000, // $50
 }
 
 function monthKey(at = new Date()) {
@@ -84,6 +89,10 @@ export function monthlyAllowanceCents(wsId) {
   // the plan table has nothing to say. Cents, like everything else here.
   const override = Number(process.env.AI_MONTHLY_ALLOWANCE_CENTS)
   if (Number.isFinite(override) && override > 0) return override
+  // No Stripe in production means nobody here is on a plan: the operator is
+  // the payer. The first live campaign hit the $5 trial ceiling on its first
+  // day and every step parked for a person — correct behaviour, wrong ceiling.
+  if (process.env.NODE_ENV === 'production' && !billingConfigured()) return ALLOWANCE_CENTS.operator
   const plan = planOf(wsId)
   return ALLOWANCE_CENTS[plan] ?? ALLOWANCE_CENTS.trial
 }

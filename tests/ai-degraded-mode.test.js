@@ -155,6 +155,22 @@ test('the plan description names every step, branch, outcome and the current pos
   assert.equal(describePlaybook(parsePlaybook('nonsense'), 'A'), '', 'an invalid graph describes nothing')
 })
 
+test('a production deployment with no billing is operator-run: the trial ceiling does not apply', async () => {
+  const { monthlyAllowanceCents, ALLOWANCE_CENTS } = await import('../server/ai-spend.js')
+  const prevEnv = process.env.NODE_ENV
+  const prevKey = process.env.STRIPE_SECRET_KEY
+  delete process.env.STRIPE_SECRET_KEY
+  process.env.NODE_ENV = 'production'
+  try {
+    assert.equal(monthlyAllowanceCents(1), ALLOWANCE_CENTS.operator)
+    assert.ok(ALLOWANCE_CENTS.operator > ALLOWANCE_CENTS.trial)
+  } finally {
+    process.env.NODE_ENV = prevEnv
+    if (prevKey !== undefined) process.env.STRIPE_SECRET_KEY = prevKey
+  }
+  assert.equal(monthlyAllowanceCents(1), ALLOWANCE_CENTS.trial, 'outside production the local safety ceiling stays')
+})
+
 test('an operator allowance override replaces the plan table', async () => {
   const { monthlyAllowanceCents } = await import('../server/ai-spend.js')
   const before = monthlyAllowanceCents(1)
