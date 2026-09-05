@@ -1,6 +1,8 @@
 # AI Coordinator — plan
 
-**Status: proposed.** Phase 0 shipped 2026-09-05 (`c4f9cb9`); phases 1–4 not started.
+**Status: phases 0–3 shipped 2026-09-05.** Per campaign, Settings → Behaviour →
+"Who runs the conversation": `graph` (default), `shadow`, or `ai`. Phase 4 (the
+default flip) waits on shadow-mode evidence. Tests: `tests/ai-coordinator.test.js`.
 
 ## The change in one sentence
 

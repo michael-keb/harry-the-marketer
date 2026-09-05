@@ -4,7 +4,7 @@
 // and following the matching edge.
 import { db, logEvent, touch, kvSet } from './db.js'
 import { parsePlaybook, nodeIntents, describePlaybook } from './playbook.js'
-import { composeEmail, classifyReply, researchLead } from './ai.js'
+import { composeEmail, classifyReply, researchLead, coordinate, heuristicClassify, freshReplyText } from './ai.js'
 import { guardComposed, isNonCommercial } from './purpose.js'
 import { syncInbound } from './mailer.js'
 import { sendMessage, smsAccountFor, smsEligibility, smsAllowedForWorkspace } from './channels/send.js'
@@ -264,6 +264,133 @@ function parkForAi(ctx, cl, nodeId, { subject, body, lead, reason = '' }) {
   })
   setLead(cl, { state: 'needs_attention', error: 'ai_unavailable' })
   return false
+}
+
+// ---- the coordinator -------------------------------------------------------
+// Docs/AI-COORDINATOR-PLAN.md. Three modes, per campaign:
+//   graph  — the engine coordinates: replies are matched to edges, timers
+//            branch, the model only writes the words (today's behaviour).
+//   shadow — the engine coordinates AND the model is asked what it would have
+//            done; both go on the activity trail so they can be compared.
+//   ai     — the model coordinates; the engine keeps every rail.
+function coordinatorMode(campaign) {
+  try {
+    const mode = JSON.parse(campaign?.settings || '{}').coordinator
+    return ['graph', 'shadow', 'ai'].includes(mode) ? mode : 'graph'
+  } catch { return 'graph' }
+}
+function autoOutcomes(campaign) {
+  try { return Boolean(JSON.parse(campaign?.settings || '{}').auto_outcomes) } catch { return false }
+}
+
+function coordinatorChannels(ctx) {
+  const out = []
+  if (ctx.mailbox) out.push('email')
+  if (smsAccountFor(ctx.campaign)) out.push('sms')
+  return out.length ? out : ['email']
+}
+
+async function askCoordinator(ctx, cl, event, extra = {}) {
+  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(cl.lead_id)
+  const outbound = lastOutbound(cl)
+  return coordinate({
+    graph: ctx.graph,
+    nodeId: cl.node_id || '',
+    lead,
+    thread: threadMessages(cl),
+    event,
+    businessContext: ctx.user.business_context,
+    senderName: ctx.mailbox?.display_name || ctx.user.name || ctx.mailbox?.email || '',
+    meetingLink: ctx.user.meeting_link,
+    purpose: ctx.campaign.purpose || 'commercial',
+    plannedWaitMs: extra.plannedWaitMs || 0,
+    plannedStep: extra.plannedStep || '',
+    elapsedMs: outbound ? Math.max(0, nowMs() - parseDbTime(outbound.created_at)) : 0,
+    channels: coordinatorChannels(ctx),
+    approvalOn: approvalRequired(ctx.user, ctx.campaign),
+    workspaceId: ctx.user.id,
+  })
+}
+
+function describeDecision(d) {
+  if (d.action === 'send') return `send ${d.step}`
+  if (d.action === 'finish') return `finish ${d.outcome} (${d.terminal})`
+  if (d.action === 'wait') return `wait ${(d.waitMs / 3600e3).toFixed(1)}h`
+  return 'escalate'
+}
+
+function engineDidOf(cl) {
+  if (cl.state === 'finished') return { kind: 'finish', outcome: cl.outcome }
+  if (cl.state === 'needs_attention') return { kind: 'escalate' }
+  return { kind: 'send', step: cl.node_id }
+}
+
+// Shadow mode: the engine has just acted; ask the model what it would have
+// done and write both down. Never touches the lead, never throws.
+async function shadowCoordinate(ctx, cl, event, engineDid, extra = {}) {
+  try {
+    const d = await askCoordinator(ctx, cl, event, extra)
+    const detail = d.via === 'unavailable'
+      ? `unavailable — ${d.reasoning}`
+      : `${(engineDid.kind === d.action &&
+          (d.action !== 'send' || engineDid.step === d.step) &&
+          (d.action !== 'finish' || engineDid.outcome === d.outcome)) ? 'agrees' : 'differs'}: ` +
+        `engine ${engineDid.kind}${engineDid.step ? ` ${engineDid.step}` : ''}${engineDid.outcome ? ` ${engineDid.outcome}` : ''}; ` +
+        `model would ${describeDecision(d)} — ${d.reasoning}`
+    logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'coordinator_shadow', detail: detail.slice(0, 400) })
+  } catch (err) {
+    console.warn('[engine] shadow coordinator failed:', err.message)
+  }
+}
+
+// Act on a decision. Every branch lands on machinery that already enforces
+// the invariants: `enterNode` for a send (gates, approval, purpose guard,
+// ceilings), `finishLead` for an outcome the campaign lets the model call,
+// and needs_attention for everything a person has to see first.
+async function applyDecision(ctx, cl, d, { message = null } = {}) {
+  const who = db.prepare('SELECT * FROM leads WHERE id = ?').get(cl.lead_id)
+  const name = [who?.first_name, who?.last_name].filter(Boolean).join(' ') || who?.email || 'a lead'
+  if (d.via === 'unavailable') {
+    // The reply stays unclassified, so it is read again when a person puts
+    // the lead back in play and the model is back.
+    setLead(cl, { state: 'needs_attention', error: 'ai_unavailable' })
+    logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'needs_attention', detail: `the coordinator could not run — ${d.reasoning}`.slice(0, 300) })
+    notify(ctx.user.id, { title: 'Harry could not decide the next step', text: `${d.reasoning}. ${name} is parked until a person looks.`.slice(0, 300), link: '/app/inbox' })
+    return
+  }
+  if (message) {
+    db.prepare('UPDATE messages SET intent = ? WHERE id = ?').run(d.intent || 'other', message.id)
+    setLead(cl, { intent: d.intent || 'other' })
+  }
+  logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'coordinator_decision', detail: `${describeDecision(d)} — ${d.reasoning}`.slice(0, 400) })
+  if (d.action === 'escalate') {
+    setLead(cl, { state: 'needs_attention', error: 'coordinator_escalated', wait_until: '' })
+    notify(ctx.user.id, { title: 'A conversation needs you', text: `${name}: ${d.reasoning}`.slice(0, 300), link: '/app/inbox' })
+    return
+  }
+  if (d.action === 'wait') {
+    parkWaiting(cl, { wait_until: new Date(nowMs() + d.waitMs).toISOString() })
+    return
+  }
+  if (d.action === 'finish') {
+    if (autoOutcomes(ctx.campaign)) { finishLead(ctx, cl, d.outcome, d.reasoning); return }
+    // Outcomes are a person's call unless the campaign says otherwise: a false
+    // Won is the most expensive thing a coordinator can get wrong.
+    setLead(cl, { state: 'needs_attention', error: `outcome_proposed:${d.outcome}`, wait_until: '' })
+    logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'outcome_proposed', detail: `${d.outcome} — ${d.reasoning}`.slice(0, 300) })
+    notify(ctx.user.id, { title: `Harry thinks this is ${d.outcome} — confirm?`, text: `${name}: ${d.reasoning}`.slice(0, 300), link: '/app/inbox' })
+    return
+  }
+  // send: the model chose the step and wrote the message; the step's own
+  // send path takes it from here, so every rail applies unchanged.
+  clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
+  setLead(cl, { wait_until: '' })
+  ctx.precomposed = { nodeId: d.step, subject: d.subject, body: d.body }
+  try {
+    await enterNode(ctx, cl, d.step)
+  } finally {
+    delete ctx.precomposed
+  }
 }
 
 function lastOutbound(cl) {
@@ -790,6 +917,7 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
     return false
   }
 
+  const pre = ctx.precomposed && ctx.precomposed.nodeId === nodeId ? ctx.precomposed : null
   let body = draft?.body
   if (!draft) {
     // Gate BEFORE composing for the ungated path — SMS is gated by its own
@@ -797,7 +925,7 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
     // slot must not pay for a compose every tick. `mailbox: null` keeps the email
     // mailbox's cap and spacing out of the SMS decision while quiet hours, the
     // working window, frequency caps and workspace/campaign caps still apply.
-    if (!gated) {
+    if (!gated && !pre) {
       const preslot = resolveSend({
         owner: ctx.user, campaign: ctx.campaign, mailbox: null, lead,
         draft: null, rules: ctx.rules, holds: ctx.holds, channel: 'sms',
@@ -807,7 +935,7 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
     const approved = db.prepare(
       'SELECT subject, body FROM node_examples WHERE campaign_id = ? AND node_id = ?'
     ).get(cl.campaign_id, nodeId)
-    const composed = await composeSms({
+    const composed = pre ? { body: pre.body, via: 'ai' } : await composeSms({
       instruction: node.instruction || node.label,
       lead,
       businessContext: ctx.user.business_context,
@@ -861,6 +989,17 @@ async function sendSmsNode(ctx, cl, node, nodeId, out) {
       })
       setLead(cl, { state: 'active' })
       return false
+    }
+    if (pre) {
+      // The coordinator's message must survive a closed gate. An ungated
+      // workspace persists nothing between ticks, so the draft is written and
+      // approved by the coordinator itself; the gate below decides the minute.
+      createDraft({ userId: ctx.user.id, campaignId: cl.campaign_id, leadId: cl.lead_id, nodeId, subject: 'SMS', body })
+      draft = openDraft(cl.campaign_id, cl.lead_id)
+      if (draft) {
+        db.prepare("UPDATE drafts SET status = 'approved', reviewed_by = 'coordinator', reviewed_at = datetime('now') WHERE id = ?").run(draft.id)
+        draft = openDraft(cl.campaign_id, cl.lead_id)
+      }
     }
   }
 
@@ -1024,6 +1163,7 @@ async function enterNode(ctx, cl, nodeId) {
         return false
       }
 
+      const pre = ctx.precomposed && ctx.precomposed.nodeId === nodeId ? ctx.precomposed : null
       let subject = draft?.subject
       let body = draft?.body
       if (!draft) {
@@ -1033,7 +1173,7 @@ async function enterNode(ctx, cl, nodeId) {
         // blocked lead all night. A gated workspace instead parks a draft the
         // first time and returns at the pending-draft check above on later ticks,
         // so it composes once; only the ungated path needs this guard.
-        if (!gated) {
+        if (!gated && !pre) {
           const preslot = resolveSend({
             owner: ctx.user, campaign: ctx.campaign, mailbox, lead,
             draft: null, rules, holds: ctx.holds, channel: 'email',
@@ -1046,7 +1186,7 @@ async function enterNode(ctx, cl, nodeId) {
         }
         // Research agent: build a knowledge profile before the first email (AI only;
         // failures fall through silently — the templates still work without it).
-        if (!lead.research && !threadMessages(cl).length) {
+        if (!pre && !lead.research && !threadMessages(cl).length) {
           const profile = await researchLead({
             lead,
             businessContext: ctx.user.business_context,
@@ -1078,7 +1218,7 @@ async function enterNode(ctx, cl, nodeId) {
         ).get(cl.campaign_id, nodeId)
         const thread = threadMessages(cl)
         const defaultSubject = defaultVariantSubject(ctx.campaign, ctx.rules)
-        const composed = await composeEmail({
+        const composed = pre ? { subject: pre.subject, body: pre.body, via: 'ai' } : await composeEmail({
           instruction: node.instruction || node.label,
           lead,
           businessContext: ctx.user.business_context,
@@ -1144,6 +1284,18 @@ async function enterNode(ctx, cl, nodeId) {
           })
           setLead(cl, { state: 'active' })
           return false
+        }
+        if (pre) {
+          // The coordinator's message must survive a closed gate. An ungated
+          // workspace persists nothing between ticks, so the draft is written
+          // and approved by the coordinator itself; the gate below decides the
+          // minute exactly as it does for a person's approval.
+          createDraft({ userId: ctx.user.id, campaignId: cl.campaign_id, leadId: cl.lead_id, nodeId, subject, body })
+          draft = openDraft(cl.campaign_id, cl.lead_id)
+          if (draft) {
+            db.prepare("UPDATE drafts SET status = 'approved', reviewed_by = 'coordinator', reviewed_at = datetime('now') WHERE id = ?").run(draft.id)
+            draft = openDraft(cl.campaign_id, cl.lead_id)
+          }
         }
       }
 
@@ -1382,7 +1534,12 @@ async function processWaiting(ctx, cl) {
       if (!next) { finishLead(ctx, cl, 'completed', 'wait node has no outgoing edge'); return }
       logEvent(ctx.user.id, { campaignId: cl.campaign_id, leadId: cl.lead_id, type: 'branched', detail: `${cl.node_id} --[wait done]--> ${next.to}` })
       clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
-      await enterNode(ctx, cl, next.to)
+      if (ctx.mode === 'ai') {
+        setLead(cl, { wait_until: '' })
+        await applyDecision(ctx, cl, await askCoordinator(ctx, cl, 'timer', { plannedStep: next.to, plannedWaitMs: node.ms || 0 }))
+      } else {
+        await enterNode(ctx, cl, next.to)
+      }
     }
     return
   }
@@ -1422,6 +1579,17 @@ async function processWaiting(ctx, cl) {
       db.prepare('UPDATE messages SET intent = ? WHERE id = ?').run(cl.intent, unprocessed.id)
       return
     }
+    if (ctx.mode === 'ai') {
+      // Unsubscribe stays a person's decision in every mode — the same rule
+      // routeReply enforces, applied before the coordinator ever sees the reply.
+      const quick = heuristicClassify(freshReplyText(unprocessed.body), ['unsubscribe', 'other'])
+      if (quick.intent === 'unsubscribe' && quick.confidence >= 0.9) {
+        await routeReply(ctx, cl, 'unsubscribe', unprocessed, { via: 'heuristic' })
+        return
+      }
+      await applyDecision(ctx, cl, await askCoordinator(ctx, cl, 'replied'), { message: unprocessed })
+      return
+    }
     const intents = nodeIntents(ctx.graph, cl.node_id)
     const { intent, via } = await classifyReply({
       intents,
@@ -1432,6 +1600,7 @@ async function processWaiting(ctx, cl) {
       playbook: describePlaybook(ctx.graph, cl.node_id),
     })
     await routeReply(ctx, cl, intent, unprocessed, { via })
+    if (ctx.mode === 'shadow') await shadowCoordinate(ctx, cl, 'replied', engineDidOf(cl))
     return
   }
 
@@ -1442,7 +1611,15 @@ async function processWaiting(ctx, cl) {
   const timeoutEdges = ctx.graph.edges
     .filter((e) => e.from === cl.node_id && (e.cond.kind === 'no_reply' || e.cond.kind === 'after'))
     .sort((a, b) => a.cond.ms - b.cond.ms)
-  if (!timeoutEdges.length) return
+  if (!timeoutEdges.length) {
+    // In ai mode a "wait" decision may park a lead at a step with no timer of
+    // its own; when that wait elapses it is an event like any other.
+    if (ctx.mode === 'ai' && cl.wait_until && Date.parse(cl.wait_until) <= nowMs()) {
+      setLead(cl, { wait_until: '' })
+      await applyDecision(ctx, cl, await askCoordinator(ctx, cl, 'timer'))
+    }
+    return
+  }
 
   const outbound = lastOutbound(cl)
   let since = parseDbTime(outbound?.created_at)
@@ -1463,6 +1640,21 @@ async function processWaiting(ctx, cl) {
     clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
     setLead(cl, { wait_until: '' })
     await enterNode(ctx, cl, due.to)
+  }
+
+  // A timer elapsing is an instruction to the engine and an event to the
+  // model: in ai mode the coordinator decides whether the plan's follow-up
+  // goes now, patience is better, or the conversation is over.
+  const fireTimer = async (due, tuned = '') => {
+    const planned = { plannedStep: due.to, plannedWaitMs: due.cond.ms || 0 }
+    if (ctx.mode === 'ai') {
+      clearStepSlots(cl.campaign_id, cl.lead_id, cl.node_id)
+      setLead(cl, { wait_until: '' })
+      await applyDecision(ctx, cl, await askCoordinator(ctx, cl, 'timer', planned))
+      return
+    }
+    await branchTimeout(due, tuned)
+    if (ctx.mode === 'shadow') await shadowCoordinate(ctx, cl, 'timer', engineDidOf(cl), planned)
   }
 
   // Frozen clock: do nothing until it elapses. Edge choice is resolved only when due.
@@ -1511,7 +1703,7 @@ async function processWaiting(ctx, cl) {
     }
     const due = chosen.edge
     const tuned = due.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
-    await branchTimeout(due, tuned)
+    await fireTimer(due, tuned)
     return
   }
 
@@ -1527,7 +1719,7 @@ async function processWaiting(ctx, cl) {
     return
   }
   const tuned = chosen.edge.cond.kind === 'no_reply' && timing.reason ? ` (${timing.reason})` : ''
-  await branchTimeout(chosen.edge, tuned)
+  await fireTimer(chosen.edge, tuned)
 }
 
 export async function processCampaign(campaign) {
@@ -1565,7 +1757,7 @@ export async function processCampaign(campaign) {
   // Doing either once per lead would make the send controls the most expensive
   // thing in the tick, so they are resolved once here and passed down.
   const { rules, holds } = sendingContext({ owner: user, campaign, mailbox })
-  const ctx = { user, mailbox, campaign, graph, rules, holds }
+  const ctx = { user, mailbox, campaign, graph, rules, holds, mode: coordinatorMode(campaign) }
 
   // The brake. Bounces are the signal a mailbox is burning, and the damage is
   // to the domain rather than to this campaign — so the hold goes on the
@@ -1625,7 +1817,12 @@ export async function processCampaign(campaign) {
     try {
       if (cl.state === 'queued') {
         setLead(cl, { state: 'active' })
-        await enterNode(ctx, cl, graph.startId)
+        if (ctx.mode === 'ai') {
+          await applyDecision(ctx, cl, await askCoordinator(ctx, cl, 'enrolled'))
+        } else {
+          await enterNode(ctx, cl, graph.startId)
+          if (ctx.mode === 'shadow') await shadowCoordinate(ctx, cl, 'enrolled', engineDidOf(cl))
+        }
       } else if (cl.state === 'active') {
         await enterNode(ctx, cl, cl.node_id || graph.startId)
       } else if (cl.state === 'waiting') {
@@ -1729,5 +1926,5 @@ export function campaignCtx(campaignId) {
   // The same rules and holds the tick resolves, so a manually routed send is
   // gated by exactly what an automatic one is.
   const { rules, holds } = sendingContext({ owner: user, campaign, mailbox })
-  return { campaign, user, mailbox, graph, rules, holds }
+  return { campaign, user, mailbox, graph, rules, holds, mode: coordinatorMode(campaign) }
 }

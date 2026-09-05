@@ -19,6 +19,7 @@ import { db } from './db.js'
 export const AI_COST_CENTS = {
   research: 40,
   compose: 3,
+  coordinate: 3,
   classify: 1,
   purpose: 1,
   qualify: 2,
@@ -33,6 +34,7 @@ const OP_ALIASES = {
   'compose sms': 'compose',
   research: 'research',
   compose: 'compose',
+  coordinate: 'coordinate',
   classify: 'classify',
   purpose: 'purpose',
   qualify: 'qualify',

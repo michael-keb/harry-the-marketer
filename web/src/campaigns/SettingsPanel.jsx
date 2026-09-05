@@ -79,7 +79,13 @@ const TRACKING = [
 const NAMED_FIELDS = [
   'name', 'track_settings', 'stop_lead_settings', 'unsubscribe_text',
   'follow_up_percentage', 'out_of_office_detection_settings',
-  'email_subject', 'reply_handling', 'purpose',
+  'email_subject', 'reply_handling', 'purpose', 'coordinator', 'auto_outcomes',
+]
+
+const COORDINATOR_OPTIONS = [
+  { value: 'graph', label: 'The plan, as written — Harry follows the steps and writes each email' },
+  { value: 'shadow', label: 'The plan, with the AI watching — it says what it would have done, but the plan decides' },
+  { value: 'ai', label: 'The AI — it reads the whole plan and the whole conversation and decides what happens next' },
 ]
 
 const PURPOSE_OPTIONS = [
@@ -125,7 +131,7 @@ export function BehaviourPanel({ campaign, onSaved }) {
     const out = {}
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
     if (form.name !== undefined && form.name !== campaign.name) out.name = form.name
-    for (const key of ['stop_lead_settings', 'send_as_plain_text', 'force_plain_text', 'unsubscribe_text', 'follow_up_percentage', 'email_subject', 'purpose']) {
+    for (const key of ['stop_lead_settings', 'send_as_plain_text', 'force_plain_text', 'unsubscribe_text', 'follow_up_percentage', 'email_subject', 'purpose', 'coordinator', 'auto_outcomes']) {
       if (!same(form[key], saved[key])) out[key] = form[key]
     }
     if (!same([...(form.track_settings || [])].sort(), [...(saved.track_settings || [])].sort())) {
@@ -235,6 +241,29 @@ export function BehaviourPanel({ campaign, onSaved }) {
             >
               {STOP_WHEN.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
+          </Field>
+
+          <Field
+            label="Who runs the conversation"
+            htmlFor="cs-coordinator"
+            hint="Either way, nothing sends past your sending rules, approvals, or unsubscribes. With the AI in charge, Won and Lost are proposed to you to confirm unless you allow it below."
+            error={errorFor(err, 'coordinator')}
+          >
+            <select
+              id="cs-coordinator"
+              className="input w-auto"
+              value={form.coordinator || 'graph'}
+              onChange={(e) => set({ coordinator: e.target.value })}
+            >
+              {COORDINATOR_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            {form.coordinator === 'ai' && (
+              <label className="mt-2 flex cursor-pointer items-start gap-2 text-sm text-slate-700">
+                <input type="checkbox" className="mt-0.5 accent-accent-500" checked={Boolean(form.auto_outcomes)}
+                  onChange={(e) => set({ auto_outcomes: e.target.checked })} />
+                <span>Let the AI close a lead as Won or Lost without asking me</span>
+              </label>
+            )}
           </Field>
 
           <fieldset className="space-y-2">

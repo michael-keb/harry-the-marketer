@@ -211,7 +211,7 @@ const SETTINGS_KEYS = [
   'name', 'track_settings', 'stop_lead_settings', 'send_as_plain_text',
   'force_plain_text', 'unsubscribe_text', 'follow_up_percentage',
   'out_of_office_detection_settings', 'email_subject', 'reply_handling',
-  'purpose',
+  'purpose', 'coordinator', 'auto_outcomes',
 ]
 
 function validateEmailSubject(raw) {
@@ -314,6 +314,11 @@ function settingsOf(campaign) {
     email_subject: campaign.email_subject || '',
     // Purpose guardrail (PURPOSE-GUARDRAIL-PLAN.md). Column-backed.
     purpose: PURPOSES.includes(campaign.purpose) ? campaign.purpose : 'commercial',
+    // Who runs the conversation (Docs/AI-COORDINATOR-PLAN.md): the plan as
+    // written, the model with the engine watching, or the model deciding.
+    coordinator: ['graph', 'shadow', 'ai'].includes(stored.coordinator) ? stored.coordinator : 'graph',
+    // May the model close a lead as Won/Lost itself? Off: it proposes, a person confirms.
+    auto_outcomes: Boolean(stored.auto_outcomes),
     // Read-time projection of the columns the mailer and engine actually read,
     // so a client never has to reconcile the JSON with the columns.
     track_opens: Boolean(campaign.track_opens),
@@ -971,6 +976,10 @@ export function register(api) {
     if (body.follow_up_percentage !== undefined) {
       next.follow_up_percentage = int(body, 'follow_up_percentage', { required: true, min: 0, max: 100 })
     }
+    if (body.coordinator !== undefined) {
+      next.coordinator = oneOf(body, 'coordinator', ['graph', 'shadow', 'ai'], { required: true })
+    }
+    if (body.auto_outcomes !== undefined) next.auto_outcomes = bool(body, 'auto_outcomes', false)
     if (body.out_of_office_detection_settings !== undefined) {
       const ooo = body.out_of_office_detection_settings
       if (!ooo || typeof ooo !== 'object' || Array.isArray(ooo)) {
